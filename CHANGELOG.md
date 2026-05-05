@@ -7,6 +7,8 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-05-05
+
 ### Fixed
 
 - **Resource-graph placeholder substitution rendered the literal
