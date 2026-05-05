@@ -28,6 +28,8 @@ the corresponding source data is available:
 | `if_speed`             | derived                                 | Bits-per-second: `ifHighSpeed × 1_000_000` when non-zero, else `ifSpeed`.
 | `onms_cat_<name>`      | surveillance categories                 | One label per category, value `"true"`.
 | `mtype`                | meta tag `MetaTagNames.mtype`           | Metric type (`gauge`, `counter`, `count`, `rate`, `timestamp`). Set by the OpenNMS writer on every Sample. *Load-bearing for graph rendering* — see <<mtype-roundtrip>>.
+| `onms_attr_<key>`      | plain-key Sample meta tags              | MATE-scope tags (`${node:…}` / `${asset:…}` / etc.) and any other plain-key meta tag. One label per plain-key meta tag — see <<attr-roundtrip>>.
+| `onms_extattr_<key>`   | plain-key Sample external tags          | Resource string attributes attached by collectors (JMX bean Name properties, JDBC `datname`, …). The values `${name}` / `${datname}` / `${spcname}` resolve against. One label per plain-key external tag — see <<attr-roundtrip>>.
 |===
 
 *Deliberately excluded by default* — available via `labels.include` if
@@ -76,6 +78,96 @@ operator override (intended for non-OpenNMS consumers of the same
 Prometheus stack), but it means the read path falls back to synthesis on
 every fetch indefinitely. Either remove the exclude rule or treat the
 rising counter as expected for your deployment.
+
+[#attr-roundtrip]
+=== Resource string attributes (`onms_attr_*` and `onms_extattr_*`)
+
+OpenNMS resource-graph templates substitute shell-style placeholders
+like `${name}`, `${datname}`, and `${spcname}` against *string
+attributes* attached to a resource. On the integration-API write path,
+those attributes arrive on the `Metric` partition system: meta tags
+carry MATE-scope values, external tags carry collector-emitted resource
+properties. The motivating case for the round-trip is that the
+resource-string-attribute named `name` (the *Eventd Processing Stats*
+row, the JDBC datasource label, etc.) collides with the intrinsic
+`name` (metric-name) tag the plugin emits as `__name__` — and OpenNMS-
+core's `TimeseriesResourceStorageDao.getStringAttributes()` reads only
+from `Metric.getExternalTags()` for placeholder substitution, so
+partition fidelity is required end-to-end.
+
+The plugin makes the round-trip work via two reserved label prefixes,
+one per partition:
+
+* `onms_attr_<key>` carries the META partition (MATE-scope tags,
+  `mtype` aside). Read side strips and deposits on
+  `Metric.getMetaTags()`.
+* `onms_extattr_<key>` carries the EXTERNAL partition (collector-
+  emitted resource string attributes — the values placeholder
+  substitution actually reads). Read side strips and deposits on
+  `Metric.getExternalTags()`.
+
+Concretely:
+
+* *Write* — for each non-intrinsic partition, every Sample tag whose
+  key is non-empty, contains no `:` (context tags use `onms_meta_`
+  instead — they're owned by the metadata processor regardless of
+  partition), is not `mtype`, is not blocked by the built-in plain-key
+  secret denylist (`*password*`, `*secret*`, `*token*`, `snmp-community`,
+  all case-insensitive), and is not already represented under a
+  canonical default-label name (for the external-partition pass — the
+  meta pass uses an empty consumed-keys set to preserve v0.4.0
+  behavior) is emitted as `<prefix><sanitized_key>=<sanitized_value>`.
+  The walks read the partition lists directly off the source `Metric`,
+  bypassing the intrinsic-wins shadow merge that otherwise drops
+  collisions.
++
+[NOTE]
+====
+The plain-key denylist is deliberately narrower than the context-tag
+form (`metadata.label-prefix`'s denylist also includes `*:*key*`).
+Resource string attributes commonly shaped like `primary_key`,
+`partition_key`, or `foreign_key` are exactly the attributes that
+resource graphs substitute via `${...}` placeholders, so the plain-key
+path lets them through. Only credential-shaped names (password /
+secret / token / `snmp-community`) are blocked from the `onms_attr_`
+and `onms_extattr_` namespaces.
+====
+* *Read* — labels matching `onms_attr_<key>` reconstruct as a meta tag
+  with key `<key>`; labels matching `onms_extattr_<key>` reconstruct as
+  an external tag with key `<key>`. The prefixed forms are not also
+  surfaced under their raw names — single source of truth, per
+  partition.
+
+[NOTE]
+.Sanitization is one-way for non-identifier source keys
+====
+The plugin sanitizes the meta-tag key into the Prometheus label-name
+grammar (`[a-zA-Z_][a-zA-Z0-9_]*`) before applying the prefix. For
+identifier-shaped keys like `name`, `datname`, `spcname` (the standard
+OpenNMS placeholder set), sanitization is a no-op and the key
+round-trips identically. A meta tag named `rack-unit` ends up as
+`onms_attr_rack_unit` on the wire and reconstructs as a meta tag with
+key `rack_unit` (not `rack-unit`). Adjust your placeholder references
+accordingly if you use non-identifier attribute names.
+====
+
+[NOTE]
+.No retroactive synthesis
+====
+Unlike the `mtype` round-trip, there is no read-side fallback for
+samples written before this fix. Pre-fix data continues to render
+literal `${name}` (or empty) in resource-graph row labels until it
+ages out of the backend's retention window. Operators with long
+retention can either re-collect or accept that legacy data graphs
+without resolved placeholders.
+====
+
+Operators who want to opt out of either namespace altogether (cost-
+sensitive backends, no resource-graph use case) can set
+`labels.exclude = onms_attr_*` and / or `labels.exclude = onms_extattr_*`.
+Excluding `onms_extattr_*` reverts resource-graph placeholder
+substitution to literal placeholders; excluding `onms_attr_*` mostly
+just drops MATE-scope label duplication. Other graphs are unaffected.
 
 == Label enrichment is two-sided
 
@@ -340,6 +432,8 @@ targets:
 | Exact  | `onms_instance_id`                                    | Multi-instance origin stamp (reserved even when `instance.id` is unset).
 | Prefix | `onms_cat_*`                                          | Per-surveillance-category expansion.
 | Prefix | `onms_meta_*`                                         | Default metadata-passthrough prefix.
+| Prefix | `onms_attr_*`                                         | Resource string attributes — meta partition (see <<attr-roundtrip>>).
+| Prefix | `onms_extattr_*`                                      | Resource string attributes — external partition (see <<attr-roundtrip>>).
 |===
 
 Duplicate rename targets (`foo -> cluster, bar -> cluster`) and
@@ -356,6 +450,21 @@ than `onms_meta_`, rename / copy targets that collide with the
 customized prefix are *not* caught by startup validation; pick
 non-colliding targets by inspection. The default prefix is what the
 vast majority of deployments use.
+====
+
+[NOTE]
+.`metadata.label-prefix` itself is now collision-checked
+====
+While the `onms_meta_*` reservation is conditional on the default
+prefix, the *operator-supplied* value of `metadata.label-prefix` is
+checked at startup against every other reserved prefix. A
+`metadata.label-prefix` set to `onms_attr_`, `onms_extattr_`,
+`onms_cat_`, any case variant (e.g. `ONMS_ATTR_`), or a shorter prefix
+that subsumes one of them (e.g. bare `onms_`) is rejected with an
+actionable message. The default `onms_meta_` and any unrelated value
+(e.g. `custom_`) are accepted. This stops an operator from silently
+emitting metadata into another emitter's namespace and breaking the
+read-side reconstruction.
 ====
 
 == Sanitization rules

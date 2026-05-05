@@ -7,6 +7,102 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Resource-graph placeholder substitution rendered the literal
+  `${name}` / `${datname}` / `${spcname}` in OpenNMS Horizon resource
+  graphs.** OpenNMS resource-graph templates substitute these shell-
+  style placeholders against *string attributes* attached to a
+  resource. On the integration-API write path, OpenNMS-core's
+  `TimeseriesPersistOperationBuilder` attaches them to
+  `Sample.metric.externalTags()`; the motivating case is the attribute
+  named `name` (the *Eventd Processing Stats* row, JDBC datasource
+  labels, similar) whose key collides with the intrinsic `name`
+  (metric-name) tag the plugin emits as `__name__`. Two independent
+  gates in `LabelMapper` dropped the value: the `putIfAbsent` shadow
+  merge in `collectTags()` discarded it before any allowlist ran, and
+  the `consumedSourceKeys` skip in `applyInclude` blocked the obvious
+  operator workaround (`labels.include = name`). On the read side,
+  OpenNMS-core's `TimeseriesResourceStorageDao.getStringAttributes()`
+  consults `Metric.getExternalTags()` only, so partition fidelity is
+  required end-to-end.
+
+  The fix uses two reserved label prefixes — one per partition — to
+  round-trip plain-key tags through Prometheus while preserving which
+  partition each tag came from:
+
+  - `onms_attr_<sanitized_key>` carries the **meta** partition (MATE-
+    scope tags, `mtype` aside).
+  - `onms_extattr_<sanitized_key>` carries the **external** partition
+    (collector-emitted resource string attributes — the values OpenNMS
+    placeholder substitution actually reads).
+
+  Mechanism per partition:
+
+  - **Write side** — a new `emitAttrLabels` step walks each partition's
+    tag list directly off the source `Metric` (bypassing the shadow
+    merge in `collectTags`) and emits each tag as `<prefix><sanitized_
+    key>=<sanitized_value>`. Same skip-filters apply to both
+    partitions: empty key, colon-keyed (context tags continue to flow
+    through `MetadataProcessor`'s `onms_meta_*`), `mtype` (handled by
+    the dedicated default emission), and the built-in plain-key secret
+    denylist (`*password*`, `*secret*`, `*token*`, `snmp-community`,
+    all case-insensitive — narrower than the context-tag form's
+    `*:*key*` so legitimate resource attributes shaped like
+    `primary_key` / `partition_key` / `foreign_key` flow through). The
+    external-tag pass additionally skips keys the default emitter
+    already represents under canonical names (`nodeLabel`,
+    `foreignSource`, `foreignId`, `nodeId`, `categories`, `ifName`,
+    `ifDescr`, `ifSpeed`, `ifHighSpeed`, `location`) so they aren't
+    double-emitted under the new prefix.
+  - **Read side** — `PromResponseParser.labelObjectToMetric` strips
+    `onms_attr_` to `metric.getMetaTags()` and `onms_extattr_` to
+    `metric.getExternalTags()`. Bare prefixes fall through to the
+    catch-all (preserving the verbatim label name as a generic meta
+    tag). Prefixed forms are not also emitted under their raw names —
+    single source of truth, per partition.
+
+  Identifier-shaped attribute names (`name`, `datname`, `spcname`, …)
+  round-trip identically. Non-identifier source keys (e.g. `rack-unit`)
+  arrive on the read side in their sanitized form (`rack_unit`) —
+  adjust placeholder references accordingly. There is no read-side
+  synthesis for samples written before this fix; pre-fix data
+  continues to render literal placeholders until it ages out of
+  backend retention.
+
+### Added
+
+- **`onms_attr_*` reserved label-name prefix** carrying the meta
+  partition through the round-trip.
+- **`onms_extattr_*` reserved label-name prefix** carrying the
+  external partition through the round-trip — the partition OpenNMS-
+  core's `TimeseriesResourceStorageDao.getStringAttributes()` reads
+  for resource-graph placeholder substitution. Same reserved-prefix
+  discipline as `onms_attr_*`: `labels.rename`, `labels.copy`, and
+  `metadata.label-prefix` directives whose target lands in the
+  namespace are rejected at startup. Per-prefix opt-out via
+  `labels.exclude = onms_attr_*` / `labels.exclude = onms_extattr_*`.
+- **Partition-tagged collision messages.** Validation rejection text
+  for `labels.rename` / `labels.copy` / `metadata.label-prefix`
+  collisions on the resource-attribute namespaces reads `"resource
+  string attributes (meta partition)"` for `onms_attr_*` and `"resource
+  string attributes (external partition)"` for `onms_extattr_*`. Helps
+  operators distinguish the two partitions when debugging a config
+  rejection.
+- **`metadata.label-prefix` collision rejection.** Setting
+  `metadata.label-prefix` to a value that collides with another
+  emitter's reserved namespace (`onms_cat_`, `onms_attr_`,
+  `onms_extattr_`, or any shorter prefix that subsumes them like
+  `onms_`) is now rejected at startup with an actionable message.
+  Comparison is case-insensitive (`ONMS_ATTR_` is caught) and
+  bidirectional (a shorter operator value subsuming a reserved prefix
+  is caught too). The default `onms_meta_` and unrelated values like
+  `custom_` remain accepted.
+- **`LabelMapper.ATTR_PREFIX` and `LabelMapper.EXTATTR_PREFIX` are
+  public constants** so `PromResponseParser` can reference them
+  cross-package and write/read stay in lockstep on the round-trip wire
+  shape. ABI-relevant for any caller depending on the literals.
+
 ## [0.3.3] — 2026-05-05
 
 A patch release whose headline is the **graph-rendering hotfix**: every

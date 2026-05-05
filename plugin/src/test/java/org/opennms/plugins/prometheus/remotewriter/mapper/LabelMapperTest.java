@@ -1053,6 +1053,380 @@ class LabelMapperTest {
                 MetaTagNames.mtype);
     }
 
+    // ---------- ${name} resource-label substitution round-trip --------------
+    // OpenNMS substitutes ${name} / ${datname} / ${spcname} placeholders in
+    // resource-type labels from string attributes carried as Sample meta tags.
+    // For substitution to work, the source key/value must survive the
+    // round-trip Sample → Prom label → Metric.metaTags. The plugin emits
+    // them as `onms_attr_<key>` so collisions with intrinsic tag keys
+    // (notably `name`) don't drop the meta value.
+
+    @Test
+    void meta_tag_named_name_round_trips_via_onms_attr_prefix() {
+        // The intrinsic `name` (metric name) and the meta `name` (the
+        // resource string attribute that ${name} resolves to) share a key.
+        // emitAttrLabels walks the meta-tag list directly off the Metric, so
+        // the meta value is emitted under `onms_attr_name` and survives.
+        PrometheusRemoteWriterConfig c = defaultConfig();
+        Sample s = sample(ImmutableMetric.builder()
+                .intrinsicTag("name", "events_processed")
+                .intrinsicTag("resourceId", "node[1].eventdProcessingStat[Logger]")
+                .metaTag("name", "Eventd_Logger_Receiver"));
+        MappedSample out = new LabelMapper(c).map(s);
+        assertThat(out.labels()).containsEntry("__name__", "events_processed");
+        assertThat(out.labels()).containsEntry("onms_attr_name", "Eventd_Logger_Receiver");
+        // Bare `name` is reserved for the metric-name intrinsic and does
+        // not carry the meta value.
+        assertThat(out.labels()).doesNotContainKey("name");
+    }
+
+    @Test
+    void labels_include_name_is_no_op_for_meta_tag_named_name() {
+        // The round-trip happens unconditionally via the onms_attr_ path,
+        // independent of labels.include. Operators reaching for
+        // `labels.include = name` to "expose" the meta value still get a
+        // no-op on the bare `name` label — the value is already round-tripping.
+        PrometheusRemoteWriterConfig c = defaultConfig();
+        c.setLabelsInclude("name");
+        Sample s = sample(ImmutableMetric.builder()
+                .intrinsicTag("name", "events_processed")
+                .intrinsicTag("resourceId", "node[1].eventdProcessingStat[Logger]")
+                .metaTag("name", "Eventd_Logger_Receiver"));
+        MappedSample out = new LabelMapper(c).map(s);
+        assertThat(out.labels()).doesNotContainKey("name");
+        assertThat(out.labels()).containsEntry("onms_attr_name", "Eventd_Logger_Receiver");
+    }
+
+    @Test
+    void meta_tag_datname_round_trips_via_onms_attr_prefix() {
+        Sample s = sample(ImmutableMetric.builder()
+                .intrinsicTag("name", "pg_stat_database_numbackends")
+                .intrinsicTag("resourceId", "node[1].pgDatabase[customers]")
+                .metaTag("datname", "customers_db"));
+        MappedSample out = DEFAULT_MAPPER.map(s);
+        assertThat(out.labels()).containsEntry("onms_attr_datname", "customers_db");
+    }
+
+    @Test
+    void meta_tag_spcname_round_trips_via_onms_attr_prefix() {
+        Sample s = sample(ImmutableMetric.builder()
+                .intrinsicTag("name", "pg_stat_user_tables_seq_scan")
+                .intrinsicTag("resourceId", "node[1].pgTablespace[indexes]")
+                .metaTag("spcname", "indexes"));
+        MappedSample out = DEFAULT_MAPPER.map(s);
+        assertThat(out.labels()).containsEntry("onms_attr_spcname", "indexes");
+    }
+
+    @Test
+    void meta_tag_with_context_prefix_uses_onms_meta_not_onms_attr() {
+        PrometheusRemoteWriterConfig c = defaultConfig();
+        c.setMetadataEnabled(true);
+        c.setMetadataInclude("requisition:*");
+        Sample s = sample(ImmutableMetric.builder()
+                .intrinsicTag("name", "ifHCInOctets")
+                .intrinsicTag("resourceId", "node[1].interfaceSnmp[eth0]")
+                .metaTag("requisition:location", "Pittsboro"));
+        MappedSample out = new LabelMapper(c).map(s);
+        assertThat(out.labels()).containsEntry("onms_meta_requisition_location", "Pittsboro");
+        assertThat(out.labels()).doesNotContainKeys(
+                "onms_attr_requisition_location",
+                "onms_attr_requisition:location");
+    }
+
+    @Test
+    void meta_tag_mtype_uses_default_label_not_onms_attr() {
+        Sample s = sample(ImmutableMetric.builder()
+                .intrinsicTag("name", "ifHCInOctets")
+                .intrinsicTag("resourceId", "node[1].interfaceSnmp[eth0]")
+                .metaTag(MetaTagNames.mtype, "counter"));
+        MappedSample out = DEFAULT_MAPPER.map(s);
+        assertThat(out.labels()).containsEntry("mtype", "counter");
+        assertThat(out.labels()).doesNotContainKey("onms_attr_mtype");
+    }
+
+    @Test
+    void meta_tag_matching_secret_denylist_is_not_emitted() {
+        Sample s = sample(ImmutableMetric.builder()
+                .intrinsicTag("name", "ifHCInOctets")
+                .intrinsicTag("resourceId", "node[1].interfaceSnmp[eth0]")
+                .metaTag("password",       "hunter2")
+                .metaTag("api-token",      "abc")
+                .metaTag("snmp-community", "public")
+                .metaTag("MY_SECRET",      "shhh"));
+        MappedSample out = DEFAULT_MAPPER.map(s);
+        assertThat(out.labels()).doesNotContainKeys(
+                "onms_attr_password",
+                "onms_attr_api_token",
+                "onms_attr_snmp_community",
+                "onms_attr_my_secret");
+        assertThat(out.labels().values())
+                .doesNotContain("hunter2", "abc", "public", "shhh");
+    }
+
+    @Test
+    void meta_tag_named_like_a_db_key_attribute_is_emitted_not_denylisted() {
+        // Pins the deliberate narrowing of the plain-key denylist: the
+        // context-tag form blocks `*:*key*`, but in the plain-key path
+        // `*key*` would also drop legitimate resource string attributes
+        // (`primary_key`, `partition_key`, `foreign_key`). Only credential-
+        // shaped names (password / secret / token / snmp-community) are
+        // blocked from the onms_attr_ namespace.
+        Sample s = sample(ImmutableMetric.builder()
+                .intrinsicTag("name", "pg_stat_user_indexes_idx_scan")
+                .intrinsicTag("resourceId", "node[1].pgIndex[customers_pkey]")
+                .metaTag("primary_key", "customers_pkey")
+                .metaTag("foreign_key", "orders_customer_id"));
+        MappedSample out = DEFAULT_MAPPER.map(s);
+        assertThat(out.labels())
+                .containsEntry("onms_attr_primary_key", "customers_pkey")
+                .containsEntry("onms_attr_foreign_key", "orders_customer_id");
+    }
+
+    // ---------- onms_extattr_ — external-partition round-trip --------------
+    // OpenNMS-core's TimeseriesPersistOperationBuilder attaches resource
+    // string attributes (the values ${name} / ${datname} / ${spcname}
+    // resolve against) to Metric.getExternalTags(). The plugin emits them
+    // under onms_extattr_<key> so the read side can deposit them on the
+    // external partition where TimeseriesResourceStorageDao.getStringAttributes()
+    // actually looks for placeholder substitution.
+
+    @Test
+    void external_tag_named_name_round_trips_via_onms_extattr_prefix() {
+        Sample s = sample(ImmutableMetric.builder()
+                .intrinsicTag("name", "EventProcess50")
+                .intrinsicTag("resourceId",
+                        "snmp/fs/selfmonitor/1/Eventlogs/eventlogs.process.expand/x")
+                .externalTag("name", "eventlogs.process"));
+        MappedSample out = DEFAULT_MAPPER.map(s);
+        assertThat(out.labels()).containsEntry("__name__", "EventProcess50");
+        assertThat(out.labels()).containsEntry("onms_extattr_name", "eventlogs.process");
+        // Partition fidelity — meta-side prefix must not carry external-side data.
+        assertThat(out.labels()).doesNotContainKey("onms_attr_name");
+        // The bare `name` label is reserved for the metric-name intrinsic.
+        assertThat(out.labels()).doesNotContainKey("name");
+    }
+
+    @Test
+    void external_tag_datname_and_spcname_round_trip_via_onms_extattr_prefix() {
+        Sample s = sample(ImmutableMetric.builder()
+                .intrinsicTag("name", "pg_stat_database_numbackends")
+                .intrinsicTag("resourceId", "node[1].pgDatabase[customers]")
+                .externalTag("datname", "customers_db")
+                .externalTag("spcname", "indexes"));
+        MappedSample out = DEFAULT_MAPPER.map(s);
+        assertThat(out.labels())
+                .containsEntry("onms_extattr_datname", "customers_db")
+                .containsEntry("onms_extattr_spcname", "indexes");
+    }
+
+    @Test
+    void meta_and_external_tags_with_same_key_each_round_trip_under_their_own_prefix() {
+        // Worst-case partition collision: same key on BOTH partitions with
+        // different values. Each must round-trip under its own prefix; neither
+        // value can be lost.
+        Sample s = sample(ImmutableMetric.builder()
+                .intrinsicTag("name", "ifHCInOctets")
+                .intrinsicTag("resourceId", "node[1].interfaceSnmp[eth0]")
+                .metaTag("custom", "from_meta")
+                .externalTag("custom", "from_external"));
+        MappedSample out = DEFAULT_MAPPER.map(s);
+        assertThat(out.labels())
+                .containsEntry("onms_attr_custom",    "from_meta")
+                .containsEntry("onms_extattr_custom", "from_external");
+    }
+
+    @Test
+    void external_tag_consumed_by_default_allowlist_does_not_double_emit_via_onms_extattr() {
+        // The default emitter consumes external `nodeLabel`, `foreignSource`,
+        // etc. under canonical names (`node_label`, `foreign_source`).
+        // Re-emitting them as `onms_extattr_*` would just bloat the wire.
+        Sample s = sample(ImmutableMetric.builder()
+                .intrinsicTag("name", "ifHCInOctets")
+                .intrinsicTag("resourceId", "nodeSource[NOC:router-42].interfaceSnmp[eth0]")
+                .externalTag("nodeLabel",     "router-42.example.com")
+                .externalTag("foreignSource", "NOC")
+                .externalTag("foreignId",     "router-42")
+                .externalTag("location",      "default")
+                .externalTag("ifName",        "eth0")
+                .externalTag("ifDescr",       "GigabitEthernet0/0")
+                .externalTag("ifHighSpeed",   "1000")
+                .externalTag("ifSpeed",       "4294967295")
+                .externalTag("nodeId",        "42")
+                .externalTag("categories",    "Routers"));
+        MappedSample out = DEFAULT_MAPPER.map(s);
+        // Default emissions are present.
+        assertThat(out.labels())
+                .containsKeys("node_label", "foreign_source", "foreign_id", "location",
+                              "if_name", "if_descr", "if_speed");
+        // No double-emit under onms_extattr_.
+        assertThat(out.labels()).doesNotContainKeys(
+                "onms_extattr_nodeLabel",
+                "onms_extattr_foreignSource",
+                "onms_extattr_foreignId",
+                "onms_extattr_location",
+                "onms_extattr_ifName",
+                "onms_extattr_ifDescr",
+                "onms_extattr_ifHighSpeed",
+                "onms_extattr_ifSpeed",
+                "onms_extattr_nodeId",
+                "onms_extattr_categories");
+    }
+
+    @Test
+    void external_tag_with_context_prefix_uses_onms_meta_not_onms_extattr() {
+        PrometheusRemoteWriterConfig c = defaultConfig();
+        c.setMetadataEnabled(true);
+        c.setMetadataInclude("requisition:*");
+        Sample s = sample(ImmutableMetric.builder()
+                .intrinsicTag("name", "ifHCInOctets")
+                .intrinsicTag("resourceId", "node[1].interfaceSnmp[eth0]")
+                .externalTag("requisition:location", "Pittsboro"));
+        MappedSample out = new LabelMapper(c).map(s);
+        // The MetadataProcessor picks up colon-keyed tags from the merged
+        // sourceTags map, so it sees external context tags too. Owns onms_meta_*.
+        assertThat(out.labels()).containsEntry("onms_meta_requisition_location", "Pittsboro");
+        assertThat(out.labels()).doesNotContainKeys(
+                "onms_extattr_requisition_location",
+                "onms_extattr_requisition:location");
+    }
+
+    @Test
+    void external_tag_matching_secret_denylist_is_not_emitted() {
+        Sample s = sample(ImmutableMetric.builder()
+                .intrinsicTag("name", "ifHCInOctets")
+                .intrinsicTag("resourceId", "node[1].interfaceSnmp[eth0]")
+                .externalTag("password",       "hunter2")
+                .externalTag("api-token",      "abc")
+                .externalTag("snmp-community", "public")
+                .externalTag("MY_SECRET",      "shhh"));
+        MappedSample out = DEFAULT_MAPPER.map(s);
+        assertThat(out.labels()).doesNotContainKeys(
+                "onms_extattr_password",
+                "onms_extattr_api_token",
+                "onms_extattr_snmp_community",
+                "onms_extattr_my_secret",
+                "onms_extattr_MY_SECRET");
+        assertThat(out.labels().values())
+                .doesNotContain("hunter2", "abc", "public", "shhh");
+    }
+
+    @Test
+    void extattr_label_value_is_truncated_to_the_label_value_byte_cap() {
+        String oversize = "a".repeat(Sanitizer.MAX_LABEL_VALUE_BYTES + 100);
+        String expected = "a".repeat(Sanitizer.MAX_LABEL_VALUE_BYTES);
+        Sample s = sample(ImmutableMetric.builder()
+                .intrinsicTag("name", "EventProcess50")
+                .intrinsicTag("resourceId", "node[1].eventdProcessingStat[Logger]")
+                .externalTag("name", oversize));
+        MappedSample out = DEFAULT_MAPPER.map(s);
+        assertThat(out.labels()).containsEntry("onms_extattr_name", expected);
+    }
+
+    @Test
+    void extattr_label_key_with_special_chars_is_sanitized() {
+        Sample s = sample(ImmutableMetric.builder()
+                .intrinsicTag("name", "ifHCInOctets")
+                .intrinsicTag("resourceId", "node[1].interfaceSnmp[eth0]")
+                .externalTag("rack-unit", "14"));
+        MappedSample out = DEFAULT_MAPPER.map(s);
+        assertThat(out.labels()).containsEntry("onms_extattr_rack_unit", "14");
+    }
+
+    @Test
+    void labels_exclude_onms_extattr_glob_drops_all_extattr_labels() {
+        PrometheusRemoteWriterConfig c = defaultConfig();
+        c.setLabelsExclude("onms_extattr_*");
+        Sample s = sample(ImmutableMetric.builder()
+                .intrinsicTag("name", "EventProcess50")
+                .intrinsicTag("resourceId", "node[1].eventdProcessingStat[Logger]")
+                .externalTag("name",    "eventlogs.process")
+                .externalTag("datname", "customers_db"));
+        MappedSample out = new LabelMapper(c).map(s);
+        assertThat(out.labels()).doesNotContainKeys(
+                "onms_extattr_name", "onms_extattr_datname");
+    }
+
+    @Test
+    void labels_include_onms_extattr_name_is_a_no_op_on_the_round_trip_emission() {
+        // Parity with the meta-side test: `applyInclude` matches the glob
+        // against SOURCE TAG keys, not against already-emitted labels. There
+        // is no source-side key literally named `onms_extattr_name`, so the
+        // include is a no-op and the round-trip emission is unchanged.
+        PrometheusRemoteWriterConfig c = defaultConfig();
+        c.setLabelsInclude("onms_extattr_name");
+        Sample s = sample(ImmutableMetric.builder()
+                .intrinsicTag("name", "EventProcess50")
+                .intrinsicTag("resourceId", "node[1].eventdProcessingStat[Logger]")
+                .externalTag("name", "eventlogs.process"));
+        MappedSample out = new LabelMapper(c).map(s);
+        assertThat(out.labels()).containsEntry("onms_extattr_name", "eventlogs.process");
+    }
+
+    @Test
+    void attr_label_value_is_truncated_to_the_label_value_byte_cap() {
+        // Sanitizer.labelValue's behavior is byte-cap truncation (it does not
+        // strip control characters — Prometheus's text model accepts them).
+        // Feed an over-cap value and assert the explicit truncated form so a
+        // regression in the sanitizer would be caught here, not double-counted
+        // by re-invoking it on both sides of the assertion.
+        String oversize = "a".repeat(Sanitizer.MAX_LABEL_VALUE_BYTES + 100);
+        String expected = "a".repeat(Sanitizer.MAX_LABEL_VALUE_BYTES);
+        Sample s = sample(ImmutableMetric.builder()
+                .intrinsicTag("name", "events_processed")
+                .intrinsicTag("resourceId", "node[1].eventdProcessingStat[Logger]")
+                .metaTag("name", oversize));
+        MappedSample out = DEFAULT_MAPPER.map(s);
+        assertThat(out.labels()).containsEntry("onms_attr_name", expected);
+    }
+
+    @Test
+    void attr_label_key_with_special_chars_is_sanitized() {
+        // Source keys are sanitized into the Prometheus label-name grammar
+        // before the prefix is applied. On read, the prefix-strip recovers
+        // the SANITIZED key, not the original — documented round-trip
+        // fidelity caveat for non-identifier source keys.
+        Sample s = sample(ImmutableMetric.builder()
+                .intrinsicTag("name", "ifHCInOctets")
+                .intrinsicTag("resourceId", "node[1].interfaceSnmp[eth0]")
+                .metaTag("rack-unit", "14"));
+        MappedSample out = DEFAULT_MAPPER.map(s);
+        assertThat(out.labels()).containsEntry("onms_attr_rack_unit", "14");
+    }
+
+    @Test
+    void labels_include_onms_attr_name_is_a_no_op_on_the_round_trip_emission() {
+        // The round-trip is unconditional via `emitAttrLabels`. Operators who
+        // reach for `labels.include = onms_attr_name` to "expose" the meta
+        // value get a no-op rather than a double emission, because
+        // `applyInclude` matches the glob against SOURCE TAG keys (read from
+        // the merged sourceTags map), not against already-emitted labels.
+        // The source side has no key literally named `onms_attr_name`, so
+        // the include glob matches nothing and the existing emission is
+        // unchanged. (Map<String,String> semantics also rule out a duplicate
+        // label name, but that's incidental to what this test pins.)
+        PrometheusRemoteWriterConfig c = defaultConfig();
+        c.setLabelsInclude("onms_attr_name");
+        Sample s = sample(ImmutableMetric.builder()
+                .intrinsicTag("name", "events_processed")
+                .intrinsicTag("resourceId", "node[1].eventdProcessingStat[Logger]")
+                .metaTag("name", "Eventd_Logger_Receiver"));
+        MappedSample out = new LabelMapper(c).map(s);
+        assertThat(out.labels()).containsEntry("onms_attr_name", "Eventd_Logger_Receiver");
+    }
+
+    @Test
+    void labels_exclude_onms_attr_glob_drops_all_attr_labels() {
+        PrometheusRemoteWriterConfig c = defaultConfig();
+        c.setLabelsExclude("onms_attr_*");
+        Sample s = sample(ImmutableMetric.builder()
+                .intrinsicTag("name", "events_processed")
+                .intrinsicTag("resourceId", "node[1].eventdProcessingStat[Logger]")
+                .metaTag("name", "Eventd_Logger_Receiver")
+                .metaTag("datname", "customers_db"));
+        MappedSample out = new LabelMapper(c).map(s);
+        assertThat(out.labels()).doesNotContainKeys("onms_attr_name", "onms_attr_datname");
+    }
+
     // ---------- fixtures ----------------------------------------------------
 
     /** A well-populated interface sample: FS-qualified node, 2 categories, 1 Gbps. */

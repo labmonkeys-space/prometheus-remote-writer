@@ -19,6 +19,7 @@ import org.opennms.integration.api.v1.timeseries.Metric;
 import org.opennms.integration.api.v1.timeseries.StorageException;
 import org.opennms.integration.api.v1.timeseries.immutables.ImmutableDataPoint;
 import org.opennms.integration.api.v1.timeseries.immutables.ImmutableMetric;
+import org.opennms.plugins.prometheus.remotewriter.mapper.LabelMapper;
 
 /**
  * Parses Prometheus HTTP API responses into OpenNMS TSS domain objects.
@@ -218,6 +219,32 @@ public final class PromResponseParser {
                 mb.intrinsicTag(IntrinsicTagNames.name, value);
             } else if (IntrinsicTagNames.resourceId.equals(key)) {
                 mb.intrinsicTag(IntrinsicTagNames.resourceId, value);
+            } else if (key.length() > LabelMapper.EXTATTR_PREFIX.length()
+                    && key.startsWith(LabelMapper.EXTATTR_PREFIX)) {
+                // Strip the onms_extattr_ prefix and deposit on the EXTERNAL
+                // partition. This is the partition OpenNMS-core's
+                // TimeseriesResourceStorageDao.getStringAttributes() reads
+                // for resource-graph placeholder substitution (${name},
+                // ${datname}, ${spcname}). Bare `onms_extattr_` (empty
+                // suffix) falls through to the catch-all below — emitting an
+                // external tag with an empty key would be worse than
+                // preserving the anomalous label name verbatim.
+                //
+                // Branch order against the onms_attr_ branch below is
+                // functionally irrelevant today: the two prefixes are
+                // stem-distinct (they share `onms_` but diverge at the next
+                // character — `e` vs `a`), so neither subsumes the other.
+                // The else-if chain is written defensively for the
+                // hypothetical case where a future reserved prefix would
+                // subsume a shorter one; in that scenario the longer prefix
+                // must be tested first.
+                mb.externalTag(key.substring(LabelMapper.EXTATTR_PREFIX.length()), value);
+            } else if (key.length() > LabelMapper.ATTR_PREFIX.length()
+                    && key.startsWith(LabelMapper.ATTR_PREFIX)) {
+                // Strip the onms_attr_ prefix and deposit on the META
+                // partition. Same bare-prefix fall-through behavior as
+                // onms_extattr_ above.
+                mb.metaTag(key.substring(LabelMapper.ATTR_PREFIX.length()), value);
             } else {
                 mb.metaTag(key, value);
             }

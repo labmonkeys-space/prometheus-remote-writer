@@ -50,6 +50,40 @@ public final class MetadataProcessor {
             "*:*key*",
             "*:snmp-community");
 
+    /** Plain-key (no {@code context:} prefix) denylist, applied by
+     *  {@link LabelMapper#emitAttrLabels} when round-tripping arbitrary
+     *  Sample meta tags through the {@code onms_attr_} namespace. Same
+     *  intent as {@link #BUILTIN_DENYLIST} but matches keys that don't
+     *  carry the OpenNMS context prefix (e.g. a raw {@code password}
+     *  meta tag).
+     *
+     *  <p>Deliberately narrower than {@link #BUILTIN_DENYLIST}: the
+     *  context-tag form has {@code *:*key*} to catch credential
+     *  attachments to context tags, but in the plain-key path that
+     *  pattern would also block legitimate OpenNMS resource string
+     *  attributes shaped like {@code primary_key}, {@code partition_key},
+     *  {@code foreign_key} — the exact attributes resource graphs
+     *  substitute via {@code ${...}} placeholders. The remaining
+     *  patterns ({@code *password*}, {@code *secret*}, {@code *token*},
+     *  {@code snmp-community}) cover credential-shaped names without
+     *  blocking schema descriptors. */
+    static final List<String> BUILTIN_PLAIN_DENYLIST = List.of(
+            "*password*",
+            "*secret*",
+            "*token*",
+            "snmp-community");
+
+    private static final List<Pattern> BUILTIN_PLAIN_DENYLIST_GLOBS =
+            compileCaseInsensitive(BUILTIN_PLAIN_DENYLIST);
+
+    /** Package-private predicate used by {@link LabelMapper} to filter
+     *  plain-key meta tags before emitting them under the {@code onms_attr_}
+     *  prefix. Case-insensitive so the safety net can't be bypassed by an
+     *  unusual casing. */
+    static boolean isPlainKeyDenied(String key) {
+        return matchesAny(key, BUILTIN_PLAIN_DENYLIST_GLOBS);
+    }
+
     private final boolean enabled;
     private final String prefix;
     private final MetadataCase caseMode;

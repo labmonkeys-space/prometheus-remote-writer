@@ -97,11 +97,43 @@ public final class LabelMapper {
      * <p>{@code onms_cat_*} covers per-surveillance-category expansion.
      * {@code onms_meta_*} is the default {@code metadata.label-prefix}; an
      * operator who customizes that prefix is out of scope for this guard.
+     * {@code onms_attr_*} carries plain-key Sample meta tags (resource
+     * string attributes used by OpenNMS placeholder substitution like
+     * {@code ${name}}) — see {@link #emitAttrLabels}.
      * Keep in sync with {@link #buildDefaults} and {@link MetadataProcessor}.
      */
     public static final List<String> RESERVED_LABEL_PREFIXES = List.of(
             "onms_cat_",
-            "onms_meta_");
+            "onms_meta_",
+            "onms_attr_",
+            "onms_extattr_");
+
+    /** Reserved label-name prefix that carries plain-key Sample meta tags
+     *  through the Prometheus round-trip. Keys without a {@code :} (i.e. not
+     *  OpenNMS context tags, which use {@code onms_meta_}) and not already
+     *  owned by a default emission (e.g. {@code mtype}) are emitted under
+     *  this prefix. The read side strips the prefix to recover the meta key.
+     *
+     *  <p>Public so {@code PromResponseParser} can reference the canonical
+     *  constant without duplicating the literal — keeps write and read in
+     *  lockstep. */
+    public static final String ATTR_PREFIX = "onms_attr_";
+
+    /** Reserved label-name prefix that carries plain-key Sample EXTERNAL
+     *  tags through the Prometheus round-trip. The external partition is
+     *  the one OpenNMS-core's {@code TimeseriesPersistOperationBuilder}
+     *  attaches resource string attributes to (the values
+     *  {@code ${name}} / {@code ${datname}} / {@code ${spcname}}
+     *  substitution dereferences), and
+     *  {@code TimeseriesResourceStorageDao.getStringAttributes()} reads
+     *  ONLY from the external partition for placeholder substitution. So
+     *  partition fidelity is required end-to-end: meta tags continue to
+     *  round-trip via {@link #ATTR_PREFIX}, external tags round-trip via
+     *  this prefix, and the read side deposits each on its respective
+     *  partition.
+     *
+     *  <p>Public for the same cross-package reason as {@link #ATTR_PREFIX}. */
+    public static final String EXTATTR_PREFIX = "onms_extattr_";
 
     private static final Logger LOG = LoggerFactory.getLogger(LabelMapper.class);
 
@@ -195,6 +227,47 @@ public final class LabelMapper {
         // then mutates it — we do not want those mutations to leak back into
         // the Defaults record, which is otherwise treated as a value object.
         Map<String, String> labels = new LinkedHashMap<>(defaults.labels());
+        // Walk the source meta-tag and external-tag lists directly (not the
+        // merged sourceTags map) so partition-keyed values whose source key
+        // collides with intrinsics — notably `name` on the external partition,
+        // the resource string attribute that drives OpenNMS's ${name}
+        // placeholder substitution — survive into the wire payload despite
+        // the shadow merge in collectTags.
+        //
+        // Two prefixes preserve partition fidelity end-to-end so the read
+        // side can deposit each tag on the correct partition of the
+        // reconstructed Metric:
+        //   meta     → onms_attr_<key>
+        //   external → onms_extattr_<key>
+        //
+        // The external pass passes the default emitter's consumed-keys set so
+        // an external `nodeLabel` / `foreignSource` / etc. that the default
+        // allowlist already represents under a canonical name is not also
+        // emitted as `onms_extattr_*` (avoids double-emission). The meta pass
+        // uses an empty consumed-keys set — meta keys don't typically overlap
+        // with the default allowlist's source-tag conventions, and the
+        // existing v0.4.0 behavior round-trips MATE-derived meta tags like
+        // `nodeLabel` under `onms_attr_*` even though `node_label` is also
+        // emitted as a default. Kept the same to preserve wire compatibility.
+        // Runs before applyExclude so `labels.exclude = onms_*attr_*` is honored.
+        //
+        // The external-pass consumed-keys set is the default-allowlist's
+        // consumed keys MINUS the intrinsic keys (`name`, `resourceId`).
+        // Rationale: `consumedSourceKeys()` exists to stop `applyInclude` from
+        // re-emitting the same source key under a snake-cased alias; for that
+        // purpose `name` and `resourceId` belong in the set. But on the
+        // external partition, `name` is exactly the resource string attribute
+        // we WANT to round-trip via `onms_extattr_name` (it's the value
+        // OpenNMS-core's ${name} placeholder substitution dereferences). So
+        // we strip the intrinsic-key entries before handing the set to the
+        // external pass — the remaining entries are the default-emitter-owned
+        // source keys (`nodeLabel`, `foreignSource`, `ifName`, …) which we
+        // legitimately don't want to double-emit under `onms_extattr_*`.
+        Set<String> extConsumedKeys = new HashSet<>(defaults.consumedSourceKeys());
+        extConsumedKeys.remove(IntrinsicTagNames.name);
+        extConsumedKeys.remove(IntrinsicTagNames.resourceId);
+        emitAttrLabels(labels, metric.getMetaTags(),     ATTR_PREFIX,    java.util.Set.of());
+        emitAttrLabels(labels, metric.getExternalTags(), EXTATTR_PREFIX, extConsumedKeys);
         labels = applyExclude(labels, excludeGlobs);
         labels = applyInclude(labels, sourceTags, includeGlobs, defaults.consumedSourceKeys());
         labels = applyCopy(labels, copyMap, warnedUnknownCopySources, warnedCopyTargetClobbers);
@@ -395,6 +468,68 @@ public final class LabelMapper {
             }
         }
         return "snmp";
+    }
+
+    // -- attr passthrough -----------------------------------------------------
+
+    /**
+     * Emit plain-key Sample tags from one partition as
+     * {@code <prefix><sanitized_key>} labels so they survive the round-trip
+     * through Prometheus and reach OpenNMS's resource-graph placeholder
+     * substitution (e.g. {@code ${name}}, {@code ${datname}},
+     * {@code ${spcname}}).
+     *
+     * <p>Called twice from {@link #map(Sample)} — once with the meta-tag
+     * partition and {@link #ATTR_PREFIX}, once with the external-tag
+     * partition and {@link #EXTATTR_PREFIX}. The two calls are
+     * partition-distinct on the wire so the read side can deposit each
+     * recovered tag on the correct partition of the reconstructed
+     * {@link Metric}. Walking the partition lists directly (not the merged
+     * sourceTags map) is the whole point: a meta or external tag whose key
+     * collides with an intrinsic — e.g. external {@code name="eventlogs.process"}
+     * vs. intrinsic {@code name="EventProcess50"} on JMX-collected
+     * resources — is otherwise dropped because the intrinsic occupies the
+     * merged map first.
+     *
+     * <p>Skips tags whose key:
+     * <ul>
+     *   <li>is null or empty,</li>
+     *   <li>contains a colon (context tags — handled by {@link MetadataProcessor}
+     *       under {@code onms_meta_}; partition-irrelevant — the metadata
+     *       processor pulls colon-keyed tags from either partition via the
+     *       merged source map),</li>
+     *   <li>equals {@link MetaTagNames#mtype} (handled by the {@code mtype}
+     *       default emission, defensive on both partitions even though
+     *       OpenNMS-core only puts mtype on meta),</li>
+     *   <li>matches the plain-key secret denylist
+     *       ({@link MetadataProcessor#isPlainKeyDenied}),</li>
+     *   <li>is in {@code consumedKeys} — used by the external-tag pass to
+     *       skip keys the default allowlist already represents under a
+     *       canonical name (e.g. external {@code nodeLabel} → {@code node_label},
+     *       not {@code onms_extattr_nodeLabel}). The meta-tag pass
+     *       passes an empty set to preserve the v0.4.0 behavior of also
+     *       round-tripping default-allowlist source keys under the
+     *       {@code onms_attr_*} prefix.</li>
+     * </ul>
+     *
+     * <p>Uses {@code putIfAbsent} so a same-named default-emitted label
+     * (none today, but defensive) wins.
+     */
+    static void emitAttrLabels(Map<String, String> labels,
+                               java.util.Collection<Tag> tags,
+                               String prefix,
+                               Set<String> consumedKeys) {
+        if (tags == null || tags.isEmpty()) return;
+        for (Tag t : tags) {
+            String key = t.getKey();
+            if (key == null || key.isEmpty()) continue;
+            if (key.indexOf(':') >= 0) continue;
+            if (MetaTagNames.mtype.equals(key)) continue;
+            if (consumedKeys.contains(key)) continue;
+            if (MetadataProcessor.isPlainKeyDenied(key)) continue;
+            String labelName = prefix + Sanitizer.labelName(key);
+            labels.putIfAbsent(labelName, Sanitizer.labelValue(t.getValue()));
+        }
     }
 
     // -- exclude/include/rename ----------------------------------------------

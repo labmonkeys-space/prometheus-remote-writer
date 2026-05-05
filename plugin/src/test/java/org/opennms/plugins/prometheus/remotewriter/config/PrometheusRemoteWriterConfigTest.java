@@ -375,6 +375,28 @@ class PrometheusRemoteWriterConfigTest {
     }
 
     @Test
+    void labels_rename_target_matching_onms_attr_prefix_is_rejected() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setLabelsRename("foo -> onms_attr_name");
+        assertThatThrownBy(c::validate)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("labels.rename")
+            .hasMessageContaining("onms_attr_")
+            .hasMessageContaining("meta partition");
+    }
+
+    @Test
+    void labels_rename_target_matching_onms_extattr_prefix_is_rejected() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setLabelsRename("foo -> onms_extattr_name");
+        assertThatThrownBy(c::validate)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("labels.rename")
+            .hasMessageContaining("onms_extattr_")
+            .hasMessageContaining("external partition");
+    }
+
+    @Test
     void labels_rename_two_entries_with_same_target_are_rejected() {
         PrometheusRemoteWriterConfig c = minimal();
         c.setLabelsRename("foreign_source -> cluster, location -> cluster");
@@ -823,6 +845,126 @@ class PrometheusRemoteWriterConfigTest {
             .hasMessageContaining("labels.copy")
             .hasMessageContaining("onms_cat_")
             .hasMessageContaining("surveillance categories");
+    }
+
+    @Test
+    void copy_target_matching_onms_attr_prefix_is_rejected() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setLabelsCopy("node -> onms_attr_name");
+        assertThatThrownBy(c::validate)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("labels.copy")
+            .hasMessageContaining("onms_attr_")
+            .hasMessageContaining("meta partition");
+    }
+
+    @Test
+    void copy_target_matching_onms_extattr_prefix_is_rejected() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setLabelsCopy("node -> onms_extattr_name");
+        assertThatThrownBy(c::validate)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("labels.copy")
+            .hasMessageContaining("onms_extattr_")
+            .hasMessageContaining("external partition");
+    }
+
+    @Test
+    void metadata_label_prefix_colliding_with_reserved_namespace_is_rejected() {
+        // The metadata processor's prefix may not collide with another
+        // emitter's reserved namespace (onms_cat_ for category expansion,
+        // onms_attr_ for resource string attributes). The default
+        // onms_meta_ is intentionally exempt — it's this emitter's own home.
+        PrometheusRemoteWriterConfig c = minimal();
+        assertThatThrownBy(() -> c.setMetadataLabelPrefix("onms_attr_"))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("metadata.label-prefix")
+            .hasMessageContaining("onms_attr_");
+
+        assertThatThrownBy(() -> c.setMetadataLabelPrefix("onms_cat_"))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("metadata.label-prefix")
+            .hasMessageContaining("onms_cat_");
+
+        // Subsumption: a prefix that *starts with* a reserved prefix is also
+        // rejected (an operator-set "onms_attr_extra_" would still write into
+        // the reserved namespace).
+        assertThatThrownBy(() -> c.setMetadataLabelPrefix("onms_attr_extra_"))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("onms_attr_");
+    }
+
+    @Test
+    void metadata_label_prefix_default_onms_meta_is_accepted() {
+        PrometheusRemoteWriterConfig c = minimal();
+        // Setting the default explicitly must not trip the reserved-prefix
+        // guard — onms_meta_ is the metadata processor's own canonical home.
+        assertThatCode(() -> c.setMetadataLabelPrefix("onms_meta_"))
+            .doesNotThrowAnyException();
+        assertThat(c.getMetadataLabelPrefix()).isEqualTo("onms_meta_");
+    }
+
+    @Test
+    void metadata_label_prefix_unrelated_value_is_accepted() {
+        PrometheusRemoteWriterConfig c = minimal();
+        assertThatCode(() -> c.setMetadataLabelPrefix("custom_"))
+            .doesNotThrowAnyException();
+        assertThat(c.getMetadataLabelPrefix()).isEqualTo("custom_");
+    }
+
+    @Test
+    void metadata_label_prefix_uppercase_reserved_form_is_rejected() {
+        // The rejection's intent is "namespace ownership", not "byte
+        // equality on the wire". An uppercase ONMS_ATTR_ is bytes-distinct
+        // from onms_attr_ (Prometheus preserves case in label names) but
+        // semantically claims the same namespace, so it must be caught.
+        PrometheusRemoteWriterConfig c = minimal();
+        assertThatThrownBy(() -> c.setMetadataLabelPrefix("ONMS_ATTR_"))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("onms_attr_");
+    }
+
+    @Test
+    void metadata_label_prefix_shorter_subsuming_value_is_rejected() {
+        // A shorter operator prefix that every reserved namespace starts
+        // with (e.g. onms_) would emit metadata under the same wire shape
+        // as onms_cat_*, onms_attr_*, and onms_meta_*. The setter must
+        // reject this both ways: sanitized.startsWith(reserved) covers the
+        // longer-side case; reserved.startsWith(sanitized) covers this one.
+        PrometheusRemoteWriterConfig c = minimal();
+        assertThatThrownBy(() -> c.setMetadataLabelPrefix("onms_"))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("metadata.label-prefix");
+    }
+
+    @Test
+    void metadata_label_prefix_colliding_with_onms_extattr_is_rejected() {
+        PrometheusRemoteWriterConfig c = minimal();
+        assertThatThrownBy(() -> c.setMetadataLabelPrefix("onms_extattr_"))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("metadata.label-prefix")
+            .hasMessageContaining("onms_extattr_");
+    }
+
+    @Test
+    void metadata_label_prefix_subsumed_by_onms_extattr_is_rejected() {
+        PrometheusRemoteWriterConfig c = minimal();
+        assertThatThrownBy(() -> c.setMetadataLabelPrefix("onms_extattr_extra_"))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("onms_extattr_");
+    }
+
+    @Test
+    void metadata_label_prefix_unrelated_mixed_case_value_is_accepted() {
+        // Tightening for case must not over-trigger: a benign mixed-case
+        // prefix that doesn't collide with any reserved namespace stays
+        // accepted.
+        PrometheusRemoteWriterConfig c = minimal();
+        assertThatCode(() -> c.setMetadataLabelPrefix("Custom_"))
+            .doesNotThrowAnyException();
+        // Sanitizer.labelName preserves case; the stored value is the
+        // sanitized (case-preserved) form, not the lowercased comparison form.
+        assertThat(c.getMetadataLabelPrefix()).isEqualTo("Custom_");
     }
 
     @Test

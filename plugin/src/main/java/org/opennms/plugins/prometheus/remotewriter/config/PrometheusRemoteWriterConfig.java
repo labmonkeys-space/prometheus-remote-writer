@@ -355,9 +355,13 @@ public class PrometheusRemoteWriterConfig {
         }
         for (String prefix : LabelMapper.RESERVED_LABEL_PREFIXES) {
             if (to.startsWith(prefix)) {
-                String reason = prefix.equals("onms_cat_")
-                        ? "surveillance categories"
-                        : "metadata passthrough";
+                String reason;
+                switch (prefix) {
+                    case "onms_cat_":     reason = "surveillance categories";                       break;
+                    case "onms_attr_":    reason = "resource string attributes (meta partition)";   break;
+                    case "onms_extattr_": reason = "resource string attributes (external partition)"; break;
+                    default:              reason = "metadata passthrough";                          break;
+                }
                 return primitiveKey + " target '" + to + "' collides with the reserved prefix '"
                     + prefix + "*' (" + reason + "). Pick a different 'to' name.";
             }
@@ -628,10 +632,36 @@ public class PrometheusRemoteWriterConfig {
     public void setMetadataExclude(String v)       { metadataExclude = blankToNull(v); }
     public void setMetadataLabelPrefix(String v) {
         String trimmed = blankToNull(v);
+        if (trimmed == null) {
+            metadataLabelPrefix = "onms_meta_";
+            return;
+        }
         // Sanitize the prefix to the Prometheus label-name grammar so an
         // operator-supplied "my-prefix." can't produce an invalid label name
-        // downstream. An empty prefix is allowed (no namespacing).
-        metadataLabelPrefix = trimmed == null ? "onms_meta_" : Sanitizer.labelName(trimmed);
+        // downstream.
+        String sanitized = Sanitizer.labelName(trimmed);
+        // Reject prefixes that collide with another emitter's reserved
+        // namespace (e.g. onms_cat_, onms_attr_). onms_meta_ itself is the
+        // default and is intentionally exempt — that's this emitter's own
+        // canonical home.
+        //
+        // Comparison is lowercased so an operator value like ONMS_ATTR_ is
+        // caught — the rejection's intent is "namespace ownership", not
+        // "byte equality on the wire". And the subsumption check goes both
+        // ways so a SHORTER operator prefix that the reserved namespace
+        // starts with (e.g. metadata.label-prefix = onms_) is also rejected,
+        // since it would emit metadata into the same wire shape as the
+        // reserved emitter.
+        String lc = sanitized.toLowerCase(java.util.Locale.ROOT);
+        for (String reserved : LabelMapper.RESERVED_LABEL_PREFIXES) {
+            if ("onms_meta_".equals(reserved)) continue;
+            if (lc.equals(reserved) || lc.startsWith(reserved) || reserved.startsWith(lc)) {
+                throw new IllegalStateException(
+                    "metadata.label-prefix '" + sanitized + "' collides with the reserved '"
+                    + reserved + "*' namespace owned by another emitter. Pick a different prefix.");
+            }
+        }
+        metadataLabelPrefix = sanitized;
     }
     public void setMetadataCase(String v) {
         if (isBlank(v)) {
