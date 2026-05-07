@@ -7,6 +7,57 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Optional two-phase resource discovery for `findMetrics`.**
+  Operators on Grafana Mimir, Thanos, or other large multi-tenant
+  backends can opt into a two-phase path that enumerates `resourceId`
+  values via `GET /api/v1/label/resourceId/values` first and then issues
+  batched `GET /api/v1/series` calls with anchored exact-match
+  alternation (`resourceId=~"^(v1|v2|…)$"`) per
+  `read.discovery-batch-size` chunk. The motivation is the broad-regex
+  scan ceiling: when OpenNMS calls `findMetrics` for resource-graph
+  rendering with a regex on `resourceId` (the typical wildcard
+  discovery shape), the single-pass `series` endpoint forces the
+  backend to scan every matching series across the lookback window —
+  Prometheus standalone tolerates it; Mimir's series API is
+  block-store-bound and Thanos's StoreAPI fan-out amplifies the cost.
+  The `label/values` endpoint is index-only on those systems and
+  returns just the distinct `resourceId` strings, which the phase-2
+  alternation then resolves through label-postings rather than a full
+  series scan. Two new operator-facing knobs:
+    - `read.discovery-strategy` (enum, default `single-pass`):
+      `single-pass` preserves v0.5.0 behavior bit-for-bit; flip to
+      `label-values-first` to opt into the two-phase path.
+    - `read.discovery-batch-size` (int, default `50`, range
+      `[1, 200]`): maximum `resourceId` values per phase-2
+      alternation; chunks above this cap split into multiple phase-2
+      calls. Setting this with `single-pass` strategy logs a one-shot
+      WARN — the knob has no effect on the single-pass path.
+  Fires only when the matcher collection contains an `EQUALS_REGEX`
+  matcher on `resourceId` and no `NOT_EQUALS_REGEX` on the same key.
+  Exact-match callers, matchers on other labels, NOT_EQUALS_REGEX-only
+  on `resourceId`, and mixed EQUALS_REGEX + NOT_EQUALS_REGEX on
+  `resourceId` all stay on the single-pass path even with the toggle
+  on (the alternation form silently inverts the operator's exclusion
+  intent for negative regex; falling through preserves correctness at
+  the cost of the optimization for those rarer call shapes). The plugin does not silently fall back from
+  two-phase to single-pass on phase-1 failure — a non-2xx response
+  surfaces as `StorageException`, identical to single-pass error
+  semantics. New observability counters
+  `find_metrics_two_phase_total`, `find_metrics_single_pass_total`,
+  and `find_metrics_phase2_batches_total` make the path mix and
+  per-call batch counts visible. Migration: leave the default for
+  vanilla Prometheus; flip to `label-values-first` on Mimir / Thanos
+  and tune `read.discovery-batch-size` against your workload. The
+  implementation is clean-room — designed from the
+  [Prometheus HTTP query API spec](https://prometheus.io/docs/prometheus/latest/querying/api/)
+  (specifically `/api/v1/label/<name>/values` with `match[]` filtering,
+  available since Prometheus 2.24, 2021-01) and direct observation of
+  the use case. No code or pattern is taken from the AGPL-3.0
+  `opennms-cortex-tss-plugin`'s `feature/label-values-discovery`
+  branch.
+
 ## [0.4.0] — 2026-05-05
 
 ### Fixed

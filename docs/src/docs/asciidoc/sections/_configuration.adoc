@@ -73,7 +73,61 @@ Used when `wal.enabled=false` (the default). When the WAL is enabled,
 | Key                          | Default | Purpose
 
 | `max-series-lookback-seconds`| `7776000` (90 d) | `findMetrics` lookback when no time window is supplied.
+| `read.discovery-strategy`    | `single-pass` | Resource-discovery flow for `findMetrics`. `single-pass` issues one `GET /api/v1/series` per call. `label-values-first` opts into a two-phase path that enumerates `resourceId` values via `/api/v1/label/resourceId/values` first, then issues batched series queries with exact-match alternation. See <<resource-discovery>>.
+| `read.discovery-batch-size`  | `50`    | Maximum `resourceId` values exact-match-alternated into one phase-2 selector when `read.discovery-strategy = label-values-first`. Bounds `[1, 200]`. Default 50 is comfortably below the typical 8 KiB HTTP request-line cap; the upper bound 200 holds at ~30 KiB worst case (fits cloud LB defaults; safe ceiling above default nginx / Mimir 8 KiB limits). Ignored under `single-pass` (logs a WARN at validate time).
 |===
+
+[#resource-discovery]
+=== Resource discovery (`findMetrics`)
+
+OpenNMS discovers child resources for graph rendering, asset reports, and
+search via `findMetrics(tagMatchers)`. The plugin offers two strategies for
+that flow.
+
+==== Single-pass (default)
+
+One `GET /api/v1/series?match[]=…&start=…` call per `findMetrics` invocation.
+Fast against vanilla Prometheus; the matcher-derived selector goes straight
+to the backend, which evaluates it against its label index.
+
+==== Label-values-first (opt-in)
+
+Two-phase: Phase 1 calls `GET /api/v1/label/resourceId/values?match[]=…&start=…`
+to enumerate `resourceId` values consistent with the *non-resourceId*
+constraints (the `match[]` is the original matcher collection minus the
+regex on `resourceId`). Phase 2 issues batched `GET /api/v1/series` calls,
+each with an anchored exact-match alternation `resourceId=~"^(v1|v2|…|vN)$"`
+over up to `read.discovery-batch-size` resourceIds.
+
+The two-phase path activates only when the matcher collection contains
+an `EQUALS_REGEX` matcher on `resourceId` AND no `NOT_EQUALS_REGEX` on
+the same key. `NOT_EQUALS_REGEX` matchers (alone or paired with an
+`EQUALS_REGEX` on `resourceId`) deliberately fall through to single-pass:
+the phase-2 alternation is an inclusion form, and the helper strips ALL
+`resourceId`-keyed matchers — so any negative regex would be silently
+dropped, inverting the operator's exclusion intent. Exact-match callers
+and matchers on other labels also stay on the single-pass path even with
+the toggle on.
+
+==== When to enable
+
+Leave the default for vanilla Prometheus. Flip to `label-values-first` for
+*Mimir / Thanos / large multi-tenant backends*, where the broad regex on
+`resourceId` forces the backend to scan every matching series across the
+lookback window. The `label/values` endpoint is index-only on those systems
+and avoids the scan; the phase-2 alternation hits label-postings rather than
+the block store.
+
+Observe the `find_metrics_two_phase_total` and `find_metrics_single_pass_total`
+counters to confirm the path mix; tune `read.discovery-batch-size` against
+your workload via `find_metrics_phase2_batches_total` (its quotient with
+`find_metrics_two_phase_total` is the average batches per call).
+
+NOTE: The plugin does not silently fall back from two-phase to single-pass
+on phase-1 failure — a non-2xx phase-1 response surfaces as `StorageException`
+identical to single-pass error semantics. Enable the toggle only when you
+trust the backend's `/api/v1/label/<name>/values` endpoint to answer
+correctly under your `match[]` shape.
 
 == Label policy
 

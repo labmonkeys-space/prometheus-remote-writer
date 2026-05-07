@@ -44,6 +44,37 @@ public final class PromResponseParser {
     private PromResponseParser() {}
 
     /**
+     * Parse a {@code /api/v1/label/<name>/values} response into a list of
+     * label-value strings. The Prom envelope is the same {@code status} /
+     * {@code data} shape; {@code data} is a JSON array of strings rather
+     * than the array of label objects {@code /series} returns.
+     *
+     * <p>Used by the two-phase {@code findMetrics} path to enumerate
+     * {@code resourceId} values before issuing batched series queries.
+     * Returns an empty list when {@code data} is missing or empty — phase 1
+     * empty short-circuits the whole call to an empty result.
+     */
+    public static List<String> parseLabelValuesResponse(String json) throws StorageException {
+        try {
+            JSONObject root = parseJson(json);
+            requireSuccess(root);
+            JSONArray data = root.optJSONArray("data");
+            if (data == null) return List.of();
+            List<String> out = new ArrayList<>(data.length());
+            for (int i = 0; i < data.length(); i++) {
+                // optString to coerce nulls / non-strings to empty rather
+                // than throwing — defensive against backend quirks.
+                String v = data.optString(i, "");
+                if (!v.isEmpty()) out.add(v);
+            }
+            return out;
+        } catch (JSONException | IllegalStateException e) {
+            throw new StorageException(
+                "failed to parse Prometheus /label/values response: " + e.getMessage(), e);
+        }
+    }
+
+    /**
      * Parse a {@code /api/v1/series} response into a list of Metric objects.
      * Every label pair becomes a tag; {@code __name__} becomes intrinsic
      * {@link IntrinsicTagNames#name}; {@code resourceId} becomes intrinsic

@@ -1276,6 +1276,139 @@ class PrometheusRemoteWriterConfigTest {
                 .isEqualTo(org.opennms.plugins.prometheus.remotewriter.wal.WalWriter.OverflowPolicy.BACKPRESSURE);
     }
 
+    // ---------- two-phase resource discovery -------------------------------
+
+    @Test
+    void discovery_strategy_default_is_single_pass() {
+        PrometheusRemoteWriterConfig c = minimal();
+        assertThatCode(c::validate).doesNotThrowAnyException();
+        assertThat(c.getDiscoveryStrategy())
+                .isEqualTo(PrometheusRemoteWriterConfig.DiscoveryStrategy.SINGLE_PASS);
+    }
+
+    @Test
+    void discovery_strategy_label_values_first_is_accepted() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setDiscoveryStrategy("label-values-first");
+        assertThatCode(c::validate).doesNotThrowAnyException();
+        assertThat(c.getDiscoveryStrategy())
+                .isEqualTo(PrometheusRemoteWriterConfig.DiscoveryStrategy.LABEL_VALUES_FIRST);
+    }
+
+    @Test
+    void discovery_strategy_is_case_insensitive_and_trimmed() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setDiscoveryStrategy("  Label-Values-First  ");
+        assertThat(c.getDiscoveryStrategy())
+                .isEqualTo(PrometheusRemoteWriterConfig.DiscoveryStrategy.LABEL_VALUES_FIRST);
+
+        c.setDiscoveryStrategy("SINGLE-PASS");
+        assertThat(c.getDiscoveryStrategy())
+                .isEqualTo(PrometheusRemoteWriterConfig.DiscoveryStrategy.SINGLE_PASS);
+    }
+
+    @Test
+    void discovery_strategy_blank_or_null_falls_back_to_default() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setDiscoveryStrategy("label-values-first");
+        c.setDiscoveryStrategy("   ");
+        assertThat(c.getDiscoveryStrategy())
+                .isEqualTo(PrometheusRemoteWriterConfig.DiscoveryStrategy.SINGLE_PASS);
+        c.setDiscoveryStrategy("label-values-first");
+        c.setDiscoveryStrategy((String) null);
+        assertThat(c.getDiscoveryStrategy())
+                .isEqualTo(PrometheusRemoteWriterConfig.DiscoveryStrategy.SINGLE_PASS);
+    }
+
+    @Test
+    void discovery_strategy_unknown_value_is_rejected_with_accepted_forms_listed() {
+        PrometheusRemoteWriterConfig c = minimal();
+        Throwable t = catchThrowable(() -> c.setDiscoveryStrategy("fancy-mode"));
+        assertThat(t)
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("read.discovery-strategy")
+                .hasMessageContaining("single-pass")
+                .hasMessageContaining("label-values-first")
+                .hasMessageContaining("fancy-mode");
+    }
+
+    @Test
+    void discovery_strategy_enum_setter_null_defaults_to_single_pass() {
+        // Aries Blueprint setter overload contract — see setDiscoveryStrategy(DiscoveryStrategy).
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setDiscoveryStrategy(PrometheusRemoteWriterConfig.DiscoveryStrategy.LABEL_VALUES_FIRST);
+        c.setDiscoveryStrategy((PrometheusRemoteWriterConfig.DiscoveryStrategy) null);
+        assertThat(c.getDiscoveryStrategy())
+                .isEqualTo(PrometheusRemoteWriterConfig.DiscoveryStrategy.SINGLE_PASS);
+    }
+
+    @Test
+    void discovery_batch_size_default_is_50() {
+        PrometheusRemoteWriterConfig c = minimal();
+        assertThat(c.getDiscoveryBatchSize()).isEqualTo(50);
+    }
+
+    @Test
+    void discovery_batch_size_zero_is_rejected() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setDiscoveryBatchSize(0);
+        assertThatThrownBy(c::validate)
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("read.discovery-batch-size")
+                .hasMessageContaining("[1, 200]");
+    }
+
+    @Test
+    void discovery_batch_size_negative_is_rejected() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setDiscoveryBatchSize(-1);
+        assertThatThrownBy(c::validate)
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("[1, 200]");
+    }
+
+    @Test
+    void discovery_batch_size_above_200_is_rejected() {
+        // Upper bound tightened from 1000 to 200 in code-review round 1
+        // (D2). At batch-size 200 with typical OpenNMS resourceIds the
+        // request line is ~30 KiB — fits cloud LB defaults but is the
+        // safe ceiling above default nginx / Mimir 8 KiB limits.
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setDiscoveryBatchSize(201);
+        assertThatThrownBy(c::validate)
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("[1, 200]");
+    }
+
+    @Test
+    void discovery_batch_size_at_lower_bound_is_accepted() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setDiscoveryStrategy("label-values-first");
+        c.setDiscoveryBatchSize(1);
+        assertThatCode(c::validate).doesNotThrowAnyException();
+    }
+
+    @Test
+    void discovery_batch_size_at_upper_bound_is_accepted() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setDiscoveryStrategy("label-values-first");
+        c.setDiscoveryBatchSize(200);
+        assertThatCode(c::validate).doesNotThrowAnyException();
+    }
+
+    @Test
+    void discovery_batch_size_set_non_default_with_single_pass_strategy_validates_without_error() {
+        // Validates without rejection; the WARN log is observable but not
+        // asserted here — the project has no SLF4J binding on the test
+        // classpath, so a programmatic Logback ListAppender would require
+        // a new test dependency. Code-review round 1 reclassified P4 from
+        // PATCH → DEFER pending a logger-injection refactor (recorded in
+        // _bmad-output/implementation-artifacts/deferred-work.md).
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setDiscoveryBatchSize(75); // non-default
+        assertThatCode(c::validate).doesNotThrowAnyException();
+    }
+
     // ---------- helpers -----------------------------------------------------
 
     private static PrometheusRemoteWriterConfig minimal() {

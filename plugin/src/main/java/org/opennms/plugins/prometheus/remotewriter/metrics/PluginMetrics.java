@@ -49,6 +49,11 @@ public final class PluginMetrics {
     public static final String WAL_DISK_USAGE_BYTES            = "wal_disk_usage_bytes";
     public static final String WAL_SEGMENTS_ACTIVE             = "wal_segments_active";
 
+    // --- Read-path discovery metrics ---------------------------------------
+    public static final String FIND_METRICS_SINGLE_PASS_TOTAL  = "find_metrics_single_pass_total";
+    public static final String FIND_METRICS_TWO_PHASE_TOTAL    = "find_metrics_two_phase_total";
+    public static final String FIND_METRICS_PHASE2_BATCHES_TOTAL = "find_metrics_phase2_batches_total";
+
     private final MetricRegistry registry = new MetricRegistry();
     private final Counter samplesWritten;
     private final Counter samplesDropped4xx;
@@ -66,6 +71,10 @@ public final class PluginMetrics {
     private final Counter samplesDroppedWalFull;
     private final Counter walFramesDroppedCorrupted;
 
+    private final Counter findMetricsSinglePass;
+    private final Counter findMetricsTwoPhase;
+    private final Counter findMetricsPhase2Batches;
+
     public PluginMetrics() {
         this.samplesWritten               = registry.counter(SAMPLES_WRITTEN);
         this.samplesDropped4xx            = registry.counter(SAMPLES_DROPPED_4XX);
@@ -81,6 +90,9 @@ public final class PluginMetrics {
         this.walBatchesDropped4xx         = registry.counter(WAL_BATCHES_DROPPED_4XX);
         this.samplesDroppedWalFull        = registry.counter(SAMPLES_DROPPED_WAL_FULL);
         this.walFramesDroppedCorrupted    = registry.counter(WAL_FRAMES_DROPPED_CORRUPTED);
+        this.findMetricsSinglePass        = registry.counter(FIND_METRICS_SINGLE_PASS_TOTAL);
+        this.findMetricsTwoPhase          = registry.counter(FIND_METRICS_TWO_PHASE_TOTAL);
+        this.findMetricsPhase2Batches     = registry.counter(FIND_METRICS_PHASE2_BATCHES_TOTAL);
     }
 
     public MetricRegistry registry() { return registry; }
@@ -102,6 +114,10 @@ public final class PluginMetrics {
     public void walBatchesDropped4xx(long n)           { if (n > 0) walBatchesDropped4xx.inc(n); }
     public void samplesDroppedWalFull(long n)          { if (n > 0) samplesDroppedWalFull.inc(n); }
     public void walFramesDroppedCorrupted(long n)      { if (n > 0) walFramesDroppedCorrupted.inc(n); }
+
+    public void findMetricsSinglePass()                { findMetricsSinglePass.inc(); }
+    public void findMetricsTwoPhase()                  { findMetricsTwoPhase.inc(); }
+    public void findMetricsPhase2Batches(long n)       { if (n > 0) findMetricsPhase2Batches.inc(n); }
 
     // ---- gauge registration (called by Storage on start) ------------------
 

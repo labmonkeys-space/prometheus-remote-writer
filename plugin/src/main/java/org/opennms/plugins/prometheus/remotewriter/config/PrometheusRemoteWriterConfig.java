@@ -33,6 +33,19 @@ public class PrometheusRemoteWriterConfig {
 
     public enum MetadataCase { PRESERVE, SNAKE_CASE }
 
+    /**
+     * Read-side resource discovery strategy. {@code SINGLE_PASS} (default)
+     * issues exactly one {@code GET /api/v1/series} per {@code findMetrics}
+     * call. {@code LABEL_VALUES_FIRST} opts into the two-phase path:
+     * enumerate {@code resourceId} values via
+     * {@code /api/v1/label/resourceId/values}, then batch exact-match
+     * alternations through {@code /api/v1/series} per
+     * {@link #discoveryBatchSize}. The two-phase path only fires when the
+     * matcher collection actually carries a regex on {@code resourceId} —
+     * see {@link org.opennms.plugins.prometheus.remotewriter.read.PrometheusReadClient}.
+     */
+    public enum DiscoveryStrategy { SINGLE_PASS, LABEL_VALUES_FIRST }
+
     // --- Endpoint ---
     private String writeUrl;
     private String readUrl;
@@ -83,6 +96,35 @@ public class PrometheusRemoteWriterConfig {
     // --- Read path ---
     /** How far back findMetrics() looks when no explicit start is provided. */
     private long maxSeriesLookbackSeconds = 7_776_000L; // 90 days
+
+    /** Strategy for {@code findMetrics()} resource enumeration. Default
+     *  {@link DiscoveryStrategy#SINGLE_PASS} preserves v0.5.0 behavior
+     *  exactly. Operators on Mimir / Thanos can flip to
+     *  {@link DiscoveryStrategy#LABEL_VALUES_FIRST} to dodge the
+     *  broad-regex {@code series}-scan ceiling. See
+     *  {@code openspec/specs/tss-plugin/spec.md} requirement
+     *  "Optional two-phase resource discovery" for the trigger heuristic. */
+    private DiscoveryStrategy discoveryStrategy = DiscoveryStrategy.SINGLE_PASS;
+
+    /** Maximum number of {@code resourceId} values exact-match-alternated
+     *  into one phase-2 selector when {@link #discoveryStrategy} is
+     *  {@link DiscoveryStrategy#LABEL_VALUES_FIRST}. Above this cap the
+     *  enumeration is split into multiple phase-2 calls. Bounds: {@code
+     *  [1, 200]}. Default 50, picked to stay comfortably below typical
+     *  HTTP request-line caps (~8 KiB at typical OpenNMS resourceId
+     *  sizes); upper bound 200 holds at ~30 KiB worst case, which fits
+     *  cloud LB defaults but is the safe ceiling above default
+     *  nginx / Mimir 8 KiB limits. Ignored — with a startup WARN — when
+     *  the strategy is {@code SINGLE_PASS}. */
+    private int discoveryBatchSize = 50;
+
+    /** Did the operator set {@code read.discovery-batch-size} explicitly to
+     *  a non-default value? The validator uses this to emit a one-shot
+     *  WARN when the value is set but the strategy is {@code SINGLE_PASS}
+     *  (the knob would otherwise silently no-op). Set in
+     *  {@link #setDiscoveryBatchSize(int)}, queried from
+     *  {@link #validate()}. */
+    private transient boolean discoveryBatchSizeExplicitlySet;
 
     // --- Label policy ---
     private String labelsInclude;
@@ -259,6 +301,35 @@ public class PrometheusRemoteWriterConfig {
         }
 
         validateWal();
+        validateDiscovery();
+    }
+
+    /**
+     * Validate the two-phase discovery knobs. Strategy parsing already
+     * happened in {@link #setDiscoveryStrategy(String)} (which throws on
+     * bad input); this method enforces the batch-size bounds and the
+     * "set non-default with single-pass strategy" warn.
+     */
+    private void validateDiscovery() {
+        if (discoveryBatchSize < 1 || discoveryBatchSize > 200) {
+            throw new IllegalStateException(
+                "read.discovery-batch-size must be in [1, 200] (got "
+                + discoveryBatchSize + ")");
+        }
+        if (discoveryStrategy == DiscoveryStrategy.SINGLE_PASS
+                && discoveryBatchSizeExplicitlySet
+                && discoveryBatchSize != 50) {
+            // One-shot WARN — set non-default while strategy is single-pass
+            // is almost always a configuration mistake (operator copied the
+            // knob without flipping the strategy). Don't reject — operators
+            // experimenting with the toggle should be able to flip it back
+            // without triggering startup errors.
+            org.slf4j.LoggerFactory.getLogger(PrometheusRemoteWriterConfig.class).warn(
+                "read.discovery-batch-size={} is set but read.discovery-strategy=single-pass; "
+                + "the batch-size knob has no effect on the single-pass path. "
+                + "Either flip read.discovery-strategy to label-values-first or remove the batch-size override.",
+                discoveryBatchSize);
+        }
     }
 
     private void validateWal() {
@@ -578,6 +649,8 @@ public class PrometheusRemoteWriterConfig {
         diffInt(out, "http.max-connections",      other.httpMaxConnections,    httpMaxConnections);
         diffLong(out, "shutdown.grace-period-ms", other.shutdownGracePeriodMs, shutdownGracePeriodMs);
         diffLong(out, "max-series-lookback-seconds", other.maxSeriesLookbackSeconds, maxSeriesLookbackSeconds);
+        diffStr(out, "read.discovery-strategy",   other.discoveryStrategy.name(),   discoveryStrategy.name());
+        diffInt(out, "read.discovery-batch-size", other.discoveryBatchSize,         discoveryBatchSize);
         diffStr(out, "labels.include",            other.labelsInclude,         labelsInclude);
         diffStr(out, "labels.exclude",            other.labelsExclude,         labelsExclude);
         diffStr(out, "labels.rename",             other.labelsRename,          labelsRename);
@@ -616,6 +689,42 @@ public class PrometheusRemoteWriterConfig {
     public void setHttpMaxConnections(int v)       { httpMaxConnections = v; }
     public void setShutdownGracePeriodMs(long v)      { shutdownGracePeriodMs = v; }
     public void setMaxSeriesLookbackSeconds(long v)   { maxSeriesLookbackSeconds = v; }
+
+    /**
+     * Parse {@code read.discovery-strategy}. Accepts {@code single-pass} and
+     * {@code label-values-first} (case-insensitive, whitespace-trimmed). Empty
+     * → default ({@code SINGLE_PASS}). Anything else throws.
+     */
+    public void setDiscoveryStrategy(String v) {
+        String normalized = blankToNull(v);
+        if (normalized == null) {
+            discoveryStrategy = DiscoveryStrategy.SINGLE_PASS;
+            return;
+        }
+        String lc = normalized.toLowerCase(java.util.Locale.ROOT);
+        switch (lc) {
+            case "single-pass" -> discoveryStrategy = DiscoveryStrategy.SINGLE_PASS;
+            case "label-values-first" -> discoveryStrategy = DiscoveryStrategy.LABEL_VALUES_FIRST;
+            default -> throw new IllegalStateException(
+                "read.discovery-strategy must be 'single-pass' or 'label-values-first' (got: '"
+                + v + "')");
+        }
+    }
+
+    // Aries Blueprint requires at least one setter to match the getter's
+    // return type; otherwise blueprint rejects the bean. Same pattern as
+    // setMetadataCase / setWalFsync / setWalOverflow.
+    public void setDiscoveryStrategy(DiscoveryStrategy v) {
+        discoveryStrategy = v == null ? DiscoveryStrategy.SINGLE_PASS : v;
+    }
+
+    public void setDiscoveryBatchSize(int v) {
+        discoveryBatchSize = v;
+        // Track whether the operator changed it; the validator uses this to
+        // distinguish "default 50 with single-pass" (silent) from "operator
+        // set 200 with single-pass" (warn — likely a configuration mistake).
+        discoveryBatchSizeExplicitlySet = (v != 50);
+    }
     public void setLabelsInclude(String v)         { labelsInclude = blankToNull(v); }
     public void setLabelsExclude(String v)         { labelsExclude = blankToNull(v); }
     public void setLabelsRename(String v) {
@@ -794,6 +903,8 @@ public class PrometheusRemoteWriterConfig {
     public int     getHttpMaxConnections()    { return httpMaxConnections; }
     public long    getShutdownGracePeriodMs()    { return shutdownGracePeriodMs; }
     public long    getMaxSeriesLookbackSeconds() { return maxSeriesLookbackSeconds; }
+    public DiscoveryStrategy getDiscoveryStrategy() { return discoveryStrategy; }
+    public int     getDiscoveryBatchSize()     { return discoveryBatchSize; }
     public String  getLabelsInclude()         { return labelsInclude; }
     public String  getLabelsExclude()         { return labelsExclude; }
     public String  getLabelsRename()          { return labelsRename; }

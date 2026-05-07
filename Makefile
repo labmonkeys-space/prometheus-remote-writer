@@ -94,18 +94,22 @@ smoke: kar ## Run e2e smoke against BACKENDS (defaults exclude sentinel; SMOKE_T
 	}; \
 	trap 'cleanup; echo; echo "=== interrupted ==="; exit 130' INT TERM; \
 	for backend in $(BACKENDS); do \
+	    discovery_query=""; \
 	    case "$$backend" in \
 	        prometheus) \
 	            file=e2e/compose.prometheus.yml; \
 	            query="curl -sfG 'http://localhost:9090/api/v1/query' --data-urlencode 'query=count({__name__=~\".+\"})'"; \
+	            discovery_query="curl -sfG 'http://localhost:9090/api/v1/label/resourceId/values'"; \
 	            log_container=core; log_path=/opt/opennms/logs/karaf.log ;; \
 	        mimir) \
 	            file=e2e/compose.mimir.yml; \
 	            query="curl -sfG 'http://localhost:9009/prometheus/api/v1/query' -H 'X-Scope-OrgID: e2e' --data-urlencode 'query=count({__name__=~\".+\"})'"; \
+	            discovery_query="curl -sfG 'http://localhost:9009/prometheus/api/v1/label/resourceId/values' -H 'X-Scope-OrgID: e2e'"; \
 	            log_container=core; log_path=/opt/opennms/logs/karaf.log ;; \
 	        victoriametrics) \
 	            file=e2e/compose.victoriametrics.yml; \
 	            query="curl -sfG 'http://localhost:8428/api/v1/query' --data-urlencode 'query=count({__name__=~\".+\"})'"; \
+	            discovery_query="curl -sfG 'http://localhost:8428/api/v1/label/resourceId/values'"; \
 	            log_container=core; log_path=/opt/opennms/logs/karaf.log ;; \
 	        sentinel) \
 	            file=e2e/sentinel/compose.yml; \
@@ -134,7 +138,23 @@ smoke: kar ## Run e2e smoke against BACKENDS (defaults exclude sentinel; SMOKE_T
 	        sleep $(SMOKE_POLL); \
 	    done; \
 	    if [ "$$ok" = 1 ]; then \
-	        passed="$$passed $$backend"; \
+	        if [ -n "$$discovery_query" ]; then \
+	            echo "=== [$$backend] probing /api/v1/label/resourceId/values ==="; \
+	            rid_count=$$(eval "$$discovery_query" 2>/dev/null \
+	                | python3 -c 'import json,sys; d=json.load(sys.stdin); print(len(d.get("data",[])))' \
+	                2>/dev/null || echo 0); \
+	            case "$$rid_count" in ''|*[!0-9]*) rid_count=0 ;; esac; \
+	            if [ "$$rid_count" -gt 0 ]; then \
+	                echo "=== [$$backend] PASS (label-values): $$rid_count resourceIds enumerated ==="; \
+	                passed="$$passed $$backend"; \
+	            else \
+	                echo "=== [$$backend] FAIL: /api/v1/label/resourceId/values returned 0 values ===" >&2; \
+	                echo "    (samples landed but the two-phase phase-1 endpoint is unusable)" >&2; \
+	                failed="$$failed $$backend"; \
+	            fi; \
+	        else \
+	            passed="$$passed $$backend"; \
+	        fi; \
 	    else \
 	        echo "=== [$$backend] FAIL: no samples within $(SMOKE_TIMEOUT)s ===" >&2; \
 	        echo "--- last 40 lines of $$log_container karaf.log ---" >&2; \

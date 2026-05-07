@@ -904,4 +904,158 @@ class PrometheusRemoteWriteIT {
         assertThat(found.get(0).getExternalTags())
                 .noneSatisfy(t -> assertThat(t.getKey()).isEqualTo("custom"));
     }
+
+    // ---------- two-phase resource discovery -------------------------------
+
+    @Test
+    void two_phase_find_metrics_returns_same_metrics_as_single_pass_against_real_prometheus() throws Exception {
+        // Write 5 series across 5 distinct resourceIds under a common parent
+        // node. A regex-on-resourceId matcher then exercises the broad
+        // discovery shape: under single-pass it produces ONE GET /series;
+        // under label-values-first it produces phase-1 enumeration + phase-2
+        // batched series query. The assertion is functional equivalence —
+        // both strategies must return the same set of Metrics.
+        Instant now = Instant.now();
+        String metricName = "onms_it_2p_" + System.nanoTime();
+
+        List<Sample> samples = new java.util.ArrayList<>();
+        for (int i = 1; i <= 5; i++) {
+            samples.add(ImmutableSample.builder()
+                    .metric(ImmutableMetric.builder()
+                            .intrinsicTag("name", metricName)
+                            .intrinsicTag("resourceId",
+                                    "nodeSource[NOC:two-phase-host].interfaceSnmp[eth" + i + "]")
+                            .externalTag("foreignSource", "NOC")
+                            .externalTag("foreignId", "two-phase-host")
+                            .externalTag("ifName", "eth" + i)
+                            .build())
+                    .time(now)
+                    .value((double) i)
+                    .build());
+        }
+        storage.store(samples);
+
+        PluginMetrics m = storage.getMetrics();
+        await().atMost(Duration.ofSeconds(20))
+               .until(() -> m.snapshot().get(PluginMetrics.SAMPLES_WRITTEN).longValue() >= 5L);
+
+        // Wait until the broad regex returns all 5 series under the default
+        // single-pass strategy — confirms ingestion is complete before we
+        // exercise the strategy switch.
+        TagMatcher nameMatcher = ImmutableTagMatcher.builder()
+                .type(TagMatcher.Type.EQUALS).key("name").value(metricName).build();
+        TagMatcher wildcardRid = ImmutableTagMatcher.builder()
+                .type(TagMatcher.Type.EQUALS_REGEX)
+                .key("resourceId")
+                .value("nodeSource\\[NOC:two-phase-host\\]\\.interfaceSnmp\\[eth.*\\]")
+                .build();
+
+        List<Metric> singlePass = await().atMost(Duration.ofSeconds(20))
+                .until(() -> storage.findMetrics(List.of(nameMatcher, wildcardRid)),
+                       list -> list.size() == 5);
+
+        // Now flip to label-values-first and re-run; expect the same set.
+        storage.stop();
+        PrometheusRemoteWriterConfig c = new PrometheusRemoteWriterConfig();
+        String base = "http://" + prometheus.getHost() + ":" + prometheus.getMappedPort(9090);
+        c.setWriteUrl(base + "/api/v1/write");
+        c.setReadUrl(base);
+        c.setBatchSize(10);
+        c.setFlushIntervalMs(100);
+        c.setShutdownGracePeriodMs(2_000);
+        c.setDiscoveryStrategy("label-values-first");
+        PrometheusRemoteWriterStorage twoPhase = new PrometheusRemoteWriterStorage(c);
+        twoPhase.start();
+        try {
+            List<Metric> twoPhaseResult =
+                    twoPhase.findMetrics(List.of(nameMatcher, wildcardRid));
+
+            // Functional equivalence: same intrinsic-tag set, same size,
+            // order-insensitive.
+            assertThat(twoPhaseResult).hasSize(singlePass.size());
+            var singleIntrinsics = singlePass.stream()
+                    .map(Metric::getIntrinsicTags).toList();
+            var twoPhaseIntrinsics = twoPhaseResult.stream()
+                    .map(Metric::getIntrinsicTags).toList();
+            assertThat(twoPhaseIntrinsics).containsExactlyInAnyOrderElementsOf(singleIntrinsics);
+
+            // The two-phase counter incremented exactly once for this call.
+            PluginMetrics tm = twoPhase.getMetrics();
+            assertThat(tm.snapshot().get(PluginMetrics.FIND_METRICS_TWO_PHASE_TOTAL).longValue())
+                    .isEqualTo(1L);
+        } finally {
+            twoPhase.stop();
+        }
+    }
+
+    @Test
+    void two_phase_find_metrics_with_batch_size_2_against_real_prometheus() throws Exception {
+        // Same fixture, but with discovery-batch-size=2 to exercise multi-batch
+        // chunking against a real backend. 5 resourceIds → 1 phase-1 + 3 phase-2
+        // calls; the merged result must contain all 5 series.
+        Instant now = Instant.now();
+        String metricName = "onms_it_2p_chunked_" + System.nanoTime();
+
+        List<Sample> samples = new java.util.ArrayList<>();
+        for (int i = 1; i <= 5; i++) {
+            samples.add(ImmutableSample.builder()
+                    .metric(ImmutableMetric.builder()
+                            .intrinsicTag("name", metricName)
+                            .intrinsicTag("resourceId",
+                                    "nodeSource[NOC:chunked-host].interfaceSnmp[eth" + i + "]")
+                            .externalTag("foreignSource", "NOC")
+                            .externalTag("foreignId", "chunked-host")
+                            .externalTag("ifName", "eth" + i)
+                            .build())
+                    .time(now)
+                    .value((double) i)
+                    .build());
+        }
+        storage.store(samples);
+
+        PluginMetrics m = storage.getMetrics();
+        await().atMost(Duration.ofSeconds(20))
+               .until(() -> m.snapshot().get(PluginMetrics.SAMPLES_WRITTEN).longValue() >= 5L);
+
+        // Brief: wait until ingestion is observable through default-strategy
+        // findMetrics so the two-phase run isn't a race against ingest.
+        TagMatcher nameMatcher = ImmutableTagMatcher.builder()
+                .type(TagMatcher.Type.EQUALS).key("name").value(metricName).build();
+        TagMatcher wildcardRid = ImmutableTagMatcher.builder()
+                .type(TagMatcher.Type.EQUALS_REGEX)
+                .key("resourceId")
+                .value("nodeSource\\[NOC:chunked-host\\]\\.interfaceSnmp\\[eth.*\\]")
+                .build();
+        await().atMost(Duration.ofSeconds(20))
+               .until(() -> storage.findMetrics(List.of(nameMatcher, wildcardRid)),
+                      list -> list.size() == 5);
+
+        storage.stop();
+        PrometheusRemoteWriterConfig c = new PrometheusRemoteWriterConfig();
+        String base = "http://" + prometheus.getHost() + ":" + prometheus.getMappedPort(9090);
+        c.setWriteUrl(base + "/api/v1/write");
+        c.setReadUrl(base);
+        c.setBatchSize(10);
+        c.setFlushIntervalMs(100);
+        c.setShutdownGracePeriodMs(2_000);
+        c.setDiscoveryStrategy("label-values-first");
+        c.setDiscoveryBatchSize(2);
+        PrometheusRemoteWriterStorage twoPhase = new PrometheusRemoteWriterStorage(c);
+        twoPhase.start();
+        try {
+            List<Metric> result = twoPhase.findMetrics(List.of(nameMatcher, wildcardRid));
+
+            assertThat(result).hasSize(5);
+
+            // 5 resourceIds, batch-size 2 → ceil(5/2) = 3 phase-2 batches.
+            // The phase2_batches counter records the cumulative sum across
+            // all two-phase calls (counter-shaped per the design's "match
+            // existing PluginMetrics registry shape" choice).
+            PluginMetrics tm = twoPhase.getMetrics();
+            assertThat(tm.snapshot().get(PluginMetrics.FIND_METRICS_PHASE2_BATCHES_TOTAL).longValue())
+                    .isEqualTo(3L);
+        } finally {
+            twoPhase.stop();
+        }
+    }
 }
