@@ -512,27 +512,100 @@ labels.if-speed-mode = raw
 ----
 
 Restart the plugin. Subsequent samples emit the cortex-style spellings;
-the snake_case names disappear from the wire.
-
-The `labels.if-speed-mode = raw` directive matches cortex's two-label-raw
-emission for SNMP interface speed: the plugin emits `ifSpeed` and
-`ifHighSpeed` as separate labels with the SNMP source values verbatim
-(no normalization, no `if_speed` label). This covers the
-value-semantics gap that the rename-only approach can't bridge — high-
-speed interfaces emit `ifSpeed=<32-bit-capped bps>` and `ifHighSpeed=<Mbps>`
-exactly as cortex did. The `ifSpeed` and `ifHighSpeed` label names are
-reserved against `labels.rename` / `labels.copy` targets in **both**
-modes — see <<reserved-rename-copy-targets>>.
+the snake_case names disappear from the wire. The `labels.if-speed-mode = raw`
+directive switches the SNMP interface-speed emission from this plugin's
+default single-`if_speed`-bps shape to the cortex-equivalent two-raw-label
+shape — see the next subsection for the per-input emission table and
+the source-presence filter rules. The `ifSpeed` and `ifHighSpeed` label
+names are reserved against `labels.rename` / `labels.copy` targets in
+**both** modes — see <<reserved-rename-copy-targets>>.
 
 [NOTE]
-.WAL flip semantics
+.WAL flip semantics + series identity
 ====
 Plan a brief flip window when changing `labels.if-speed-mode` — the WAL
 drains in seconds at default cadence; pre-flip samples flush under the
-old mode, post-flip samples emit under the new mode. Operators see
-briefly mixed-mode series identity at the backend during the flip; old
-series age out of retention naturally.
+old mode, post-flip samples emit under the new mode. Backends see briefly
+mixed-mode series identity during the flip. *Series identity also
+changes permanently:* a series previously identified by
+`{…, if_speed="40000000000"}` becomes
+`{…, ifSpeed="4294967295", ifHighSpeed="40000"}` after the flip. The
+backend treats this as a new series with the same name; old series
+age out of retention naturally.
 ====
+
+=== Interface-speed labels in raw mode
+
+`labels.if-speed-mode = raw` emits the SNMP `ifSpeed` and `ifHighSpeed`
+source values as two separate camelCase labels, matching cortex's wire
+shape. Concretely, for the same SNMP source row:
+
+[cols="1,1,1,1",options="header"]
+|===
+| SNMP source                         | Cortex                                     | Normalized (default)            | Raw
+
+| `ifSpeed=100000000` (100 Mbps), `ifHighSpeed=0`
+                                      | `ifSpeed=100000000`, `ifHighSpeed=0`       | `if_speed=100000000`           | `ifSpeed=100000000`, `ifHighSpeed=0`
+| `ifSpeed=4294967295` (32-bit cap), `ifHighSpeed=10000` (10 Gbps)
+                                      | `ifSpeed=4294967295`, `ifHighSpeed=10000`  | `if_speed=10000000000`         | `ifSpeed=4294967295`, `ifHighSpeed=10000`
+| `ifHighSpeed=40000` (40 Gbps), `ifSpeed` absent
+                                      | `ifHighSpeed=40000`                        | `if_speed=40000000000` (synthesised) | `ifHighSpeed=40000` (no `ifSpeed`)
+| `ifSpeed=0`, `ifHighSpeed=0` (loopback / unknown)
+                                      | `ifSpeed=0`, `ifHighSpeed=0`               | `if_speed=0`                   | `ifSpeed=0`, `ifHighSpeed=0`
+| `ifSpeed="   "` (whitespace) or `"abc"` (non-numeric) or `"-100"` (negative)
+                                      | label emitted verbatim with the garbage value | label dropped (parser rejects) | label dropped — *divergence from cortex* (see next paragraph)
+|===
+
+==== Source-presence filter — narrow divergence from cortex
+
+Raw mode is **not** literally byte-for-byte verbatim. The plugin applies
+the same source-presence grammar to both modes: `ifSpeed` /
+`ifHighSpeed` are emitted only when the source value is non-null,
+non-empty, and parseable as a non-negative `long` (after trimming).
+Whitespace-only, non-numeric, and negative source values are *dropped*
+in raw mode rather than emitted verbatim. The filter is per-label, not
+per-pair: one parseable source still emits its own label even if the
+other is garbage.
+
+This is a deliberate, narrow divergence from cortex. Cortex's literal
+verbatim emission would let a misconfigured upstream agent inject
+arbitrary text into a series-identity label and blow up cardinality at
+the backend. The filter closes that footgun while preserving cortex
+parity for every interface that reports valid SNMP values — i.e. every
+real-world interface. If your existing cortex dashboards depend on
+sentinel garbage values appearing as labels, you'll need to surface
+them another way; they were a wire artifact, not informative data.
+
+[NOTE]
+.No `ifSpeed` synthesis from `ifHighSpeed × 1_000_000` in raw mode
+====
+When only `ifHighSpeed` is present (no `ifSpeed` source tag), raw mode
+emits **only** `ifHighSpeed` — it does NOT synthesise an `ifSpeed`
+label from `ifHighSpeed × 1_000_000`. This mirrors cortex behaviour and
+is pinned by a unit test specifically so future contributors don't
+"helpfully" add the synthesis and silently break parity. A cortex-fielded
+dashboard that assumed `ifSpeed` always exists will see no `ifSpeed`
+label for high-speed interfaces under either cortex or this plugin's
+raw mode — that's pre-existing behaviour, not something this plugin
+introduced.
+
+If you need a single canonical bps value for high-speed interfaces, use
+`labels.if-speed-mode = normalized` (the default) — that's exactly
+what `if_speed` is for.
+====
+
+==== When to use which mode
+
+* **Greenfield Prometheus dashboards** — leave the default
+  (`normalized`). One canonical `if_speed` label in bps, immediately
+  rateable, no PromQL ternary.
+* **Migrating cortex-fielded dashboards / alert rules** — set
+  `labels.if-speed-mode = raw`. Existing PromQL of the
+  `ifHighSpeed > 0 ? ifHighSpeed × 1e6 : ifSpeed` shape continues to
+  work without rewrite.
+* **Mixed estate** — the mode is plugin-global. Run separate plugin
+  instances if a single OpenNMS needs to feed both a cortex-style
+  backend and a greenfield backend with different label shapes.
 
 === What this rename recipe gets you, and what it doesn't
 
@@ -549,7 +622,7 @@ series age out of retention naturally.
 | `foreignId`     | restored                    | Same value as cortex.
 | `ifName`        | restored                    | Same value as cortex.
 | `ifDescr`       | restored                    | Same value as cortex.
-| `ifSpeed`, `ifHighSpeed` | restored *byte-for-byte* | *Resolved via `labels.if-speed-mode = raw`.* Both labels are emitted with their SNMP source values verbatim — same spellings, same value semantics, same per-interface label set as cortex. The `if_speed` label is not emitted in raw mode. (In default `normalized` mode this plugin would emit a single bps-normalized `if_speed` instead, with high-speed interfaces seeing a value-semantics gap; the knob exists for cortex-fielded dashboards that pre-date this plugin's normalization.)
+| `ifSpeed`, `ifHighSpeed` | restored | *Resolved via `labels.if-speed-mode = raw`* — see the dedicated subsection above for the per-input emission table, the source-presence filter (a narrow divergence from cortex that drops whitespace-only / non-numeric / negative values), and the no-synthesis edge case. In default `normalized` mode the plugin emits a single bps-normalized `if_speed` instead.
 | `nodeId`        | *not directly recoverable*  | This plugin consumes `nodeId` and emits `node` instead. The closest substitute is `labels.copy = node -> nodeId`, but the *value* differs: this plugin's `node` is `<foreignSource>:<foreignId>` when both are set, falling back to the numeric dbId; cortex's `nodeId` was always the raw numeric dbId. Dashboards that expect a purely numeric value must be updated.
 | `categories`    | *structurally different*    | Cortex emitted a single `categories` label with comma-separated values. This plugin emits one `onms_cat_<sanitized-name>="true"` label per category — a per-category boolean, not a string. Filters like `categories=~".*Server.*"` must be rewritten to `{onms_cat_Server="true"}` (using whatever sanitized form the category name takes). No rename or copy directive can bridge this difference; it's a dashboard-level rewrite.
 |===
