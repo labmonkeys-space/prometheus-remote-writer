@@ -7,6 +7,8 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.3] — 2026-05-09
+
 ### Added
 
 - **`labels.if-speed-mode` configuration knob (cortex-compat for SNMP
