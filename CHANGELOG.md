@@ -7,6 +7,25 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Documentation
+
+- **New section "Migration from `opennms-cortex-tss-plugin`"** in the
+  *Labels and enrichment* docs. Operators moving from the AGPL cortex
+  plugin can recover the camelCase label spellings cortex emitted
+  (`nodeLabel`, `foreignSource`, `foreignId`, `ifName`, `ifDescr`,
+  `ifSpeed`) with a copy-paste `labels.rename` recipe. Honest call-outs
+  cover three caveats the rename can't bridge: `ifSpeed` value
+  semantics differ for high-speed interfaces (this plugin normalises
+  `ifHighSpeed × 1_000_000` when non-zero, cortex emitted both raw),
+  `nodeId` is not directly recoverable (this plugin emits FS-qualified
+  `node` instead of cortex's raw numeric dbId), and `categories` is a
+  structural difference (per-category `onms_cat_<name>="true"` booleans
+  vs cortex's single comma-separated label) that requires a
+  dashboard-level rewrite. A unit test in `PrometheusRemoteWriterConfigTest`
+  runs the published recipe through `validate()` so a future
+  reserved-target change that would silently break the recipe fails CI
+  instead.
+
 ## [0.4.1] — 2026-05-07
 
 ### Added

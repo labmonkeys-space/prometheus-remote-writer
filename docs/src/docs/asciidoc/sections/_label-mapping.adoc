@@ -410,6 +410,7 @@ resourceId shape — open an issue with the offending string. The
 `samples_unparseable_resource_id_total` counter tracks this rate.
 ====
 
+[#reserved-rename-copy-targets]
 == Reserved rename / copy targets
 
 The plugin rejects `labels.rename` and `labels.copy` entries whose
@@ -466,6 +467,72 @@ actionable message. The default `onms_meta_` and any unrelated value
 emitting metadata into another emitter's namespace and breaking the
 read-side reconstruction.
 ====
+
+[#migration-from-cortex-tss]
+== Migration from `opennms-cortex-tss-plugin`
+
+If you're moving from the AGPL
+https://github.com/OpenNMS-Plugins/opennms-cortex-tss-plugin[`opennms-cortex-tss-plugin`]
+and want existing dashboards and alert rules to keep working without a
+wholesale label rewrite, the camelCase label spellings cortex emitted
+(`nodeLabel`, `foreignSource`, `foreignId`, `ifName`, `ifDescr`,
+`ifSpeed`) can be recovered with `labels.rename`. This plugin's defaults
+follow Prometheus naming conventions (snake_case); the rename recipe is
+opt-in.
+
+=== Recipe
+
+Add to your plugin cfg:
+
+[source,properties]
+----
+labels.rename = \
+  node_label     -> nodeLabel,     \
+  foreign_source -> foreignSource, \
+  foreign_id     -> foreignId,     \
+  if_name        -> ifName,        \
+  if_descr       -> ifDescr,       \
+  if_speed       -> ifSpeed
+----
+
+Restart the plugin. Subsequent samples emit the cortex-style spellings;
+the snake_case names disappear from the wire. The recipe is validated
+against the reserved-target rules in <<reserved-rename-copy-targets>> —
+none of the camelCase targets collide.
+
+=== What this rename recipe gets you, and what it doesn't
+
+[cols="1,1,3",options="header"]
+|===
+| Cortex label    | Recipe outcome              | Caveat
+
+| `__name__`      | identical                   | No transformation needed.
+| `resourceId`    | identical                   | No transformation needed.
+| `mtype`         | identical                   | No transformation needed.
+| `location`      | identical                   | No transformation needed.
+| `nodeLabel`     | restored                    | Same value as cortex.
+| `foreignSource` | restored                    | Same value as cortex.
+| `foreignId`     | restored                    | Same value as cortex.
+| `ifName`        | restored                    | Same value as cortex.
+| `ifDescr`       | restored                    | Same value as cortex.
+| `ifSpeed`       | restored *by name*, *one* label | *Value differs for high-speed interfaces.* Cortex emitted both `ifSpeed` and `ifHighSpeed` raw; this plugin emits a single normalized value: `ifHighSpeed × 1_000_000` when non-zero, else `ifSpeed`. Dashboards that read `ifSpeed` for non-high-speed interfaces see no change; for high-speed interfaces they now get a bps value, not Mbps. There is no `ifHighSpeed` label to recover.
+| `nodeId`        | *not directly recoverable*  | This plugin consumes `nodeId` and emits `node` instead. The closest substitute is `labels.copy = node -> nodeId`, but the *value* differs: this plugin's `node` is `<foreignSource>:<foreignId>` when both are set, falling back to the numeric dbId; cortex's `nodeId` was always the raw numeric dbId. Dashboards that expect a purely numeric value must be updated.
+| `categories`    | *structurally different*    | Cortex emitted a single `categories` label with comma-separated values. This plugin emits one `onms_cat_<sanitized-name>="true"` label per category — a per-category boolean, not a string. Filters like `categories=~".*Server.*"` must be rewritten to `{onms_cat_Server="true"}` (using whatever sanitized form the category name takes). No rename or copy directive can bridge this difference; it's a dashboard-level rewrite.
+|===
+
+=== Plugin labels cortex never emitted
+
+This plugin emits several labels cortex didn't. They're additive — they
+don't break cortex-era dashboards (which simply don't reference them) —
+but they're worth knowing about because they unlock new query shapes:
+
+* `node`, `instance` — Prometheus-idiomatic subject identity (`<fs>:<fid>` or numeric dbId).
+* `job` — collector classifier (`snmp`, `jmx`, `opennms`).
+* `resource_type`, `resource_instance` — parsed from `resourceId`.
+* `onms_instance_id` — multi-OpenNMS origin stamp (only emitted when `instance.id` is set).
+
+If you want any of them suppressed during migration to keep series
+identity exactly cortex-shaped, use `labels.exclude`.
 
 == Sanitization rules
 

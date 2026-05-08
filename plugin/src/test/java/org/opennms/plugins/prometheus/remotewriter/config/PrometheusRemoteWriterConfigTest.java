@@ -428,6 +428,32 @@ class PrometheusRemoteWriterConfigTest {
     }
 
     @Test
+    void labels_rename_cortex_compat_recipe_validates_and_parses() {
+        // Pin the published "Migration from opennms-cortex-tss-plugin" recipe
+        // (docs/src/docs/asciidoc/sections/_label-mapping.adoc) so a future
+        // change to RESERVED_LABEL_NAMES, the rename parser, or the sanitizer
+        // that would silently break the recipe fails CI instead of shipping
+        // a doc that no longer works. If this test changes, the doc section
+        // must change in lockstep.
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setLabelsRename(
+            "node_label -> nodeLabel, "
+            + "foreign_source -> foreignSource, "
+            + "foreign_id -> foreignId, "
+            + "if_name -> ifName, "
+            + "if_descr -> ifDescr, "
+            + "if_speed -> ifSpeed");
+        assertThatCode(c::validate).doesNotThrowAnyException();
+        assertThat(c.labelsRenameMap()).containsExactlyInAnyOrderEntriesOf(Map.of(
+            "node_label",     "nodeLabel",
+            "foreign_source", "foreignSource",
+            "foreign_id",     "foreignId",
+            "if_name",        "ifName",
+            "if_descr",       "ifDescr",
+            "if_speed",       "ifSpeed"));
+    }
+
+    @Test
     void labels_rename_multiple_errors_are_accumulated_into_one_exception() {
         // foo -> __name__     -> reserved exact
         // bar -> onms_cat_x   -> reserved prefix
