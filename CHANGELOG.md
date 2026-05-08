@@ -7,6 +7,8 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.2] — 2026-05-08
+
 ### Documentation
 
 - **New section "Migration from `opennms-cortex-tss-plugin`"** in the
