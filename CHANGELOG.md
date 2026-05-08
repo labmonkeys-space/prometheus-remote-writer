@@ -7,6 +7,61 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`labels.if-speed-mode` configuration knob (cortex-compat for SNMP
+  interface-speed labels).** Operators migrating dashboards and alert
+  rules from the AGPL `opennms-cortex-tss-plugin` can now flip the wire
+  shape of the SNMP interface-speed labels with a single config
+  directive instead of rewriting PromQL. Two enum values:
+    - `normalized` (default, v0.4.x bit-for-bit): one `if_speed` label
+      in bps, computed as `ifHighSpeed × 1_000_000` when non-zero, else
+      `ifSpeed`. Prometheus-idiomatic, immediately rateable, no PromQL
+      branching.
+    - `raw`: two camelCase labels `ifSpeed` and `ifHighSpeed` emitted
+      with the SNMP source values verbatim (cortex parity); no
+      normalization, no synthesis. The single `if_speed` label is NOT
+      emitted in raw mode. A row with only `ifHighSpeed` source-present
+      emits ONLY `ifHighSpeed` — there is no `ifSpeed = ifHighSpeed × 1_000_000`
+      synthesis (cortex parity, pinned by a `documented-behavior` test).
+  The two camelCase names `ifSpeed` and `ifHighSpeed` are added to the
+  reserved-rename / reserved-copy target set **unconditionally**
+  (regardless of the active mode) so a hot-reload from `normalized` to
+  `raw` cannot unmask a previously-accepted `labels.rename = X -> ifSpeed`
+  collision. Operators upgrading from v0.4.2 with the cortex-migration
+  recipe verbatim will see a startup error on the `if_speed -> ifSpeed`
+  rename line — drop that line and add `labels.if-speed-mode = raw`
+  instead. The new rejection error message names both the collision and
+  the supported migration path. The reserved-target enforcement is the
+  only operator-facing tightening; the default emission shape is
+  unchanged from v0.4.x. The implementation is clean-room — designed
+  from the SNMP MIB-II `ifTable` / `ifXTable` definitions and direct
+  observation of the cortex emission shape via its public
+  `toPrometheusTimeSeries` label-emission contract. No code or pattern
+  is taken from the AGPL cortex source.
+
+  *WAL flip semantics.* The WAL stores already-mapped `MappedSample`
+  records, so flipping `labels.if-speed-mode` with pending WAL contents
+  produces a brief mixed-emission window (typically seconds at default
+  drain cadence): pre-flip samples flush under the old mode, new
+  samples emit under the new mode. Operators see briefly mixed-mode
+  series identity at the backend during the flip; old series age out of
+  retention naturally.
+
+### Changed
+
+- **Reserved exact rename / copy target set tightened to include
+  `ifSpeed` and `ifHighSpeed`.** *Affects only operators using the v0.4.2
+  cortex-migration recipe verbatim.* The recipe published in v0.4.2's
+  `Migration from opennms-cortex-tss-plugin` doc section included
+  `labels.rename = if_speed -> ifSpeed` to recover the cortex spelling
+  for the speed label. With `labels.if-speed-mode` landing, `ifSpeed` is
+  now reserved (always — see above) and the rename rejects at startup
+  with an actionable error pointing at the new knob. Migration: drop the
+  `if_speed -> ifSpeed` line from your `labels.rename` and add
+  `labels.if-speed-mode = raw` to your cfg; the rest of the recipe is
+  unchanged. The doc section is updated in lockstep.
+
 ## [0.4.2] — 2026-05-08
 
 ### Documentation

@@ -70,6 +70,15 @@ public final class LabelMapper {
      * plugin emits them as Prom-idiomatic defaults. Operators who previously
      * used {@code labels.rename = foo -> instance} (unusual, since {@code instance}
      * wasn't a default emission pre-v0.4) must pick a different target name.
+     *
+     * <p>{@code ifSpeed} and {@code ifHighSpeed} are reserved <strong>unconditionally</strong>
+     * — regardless of the active {@code labels.if-speed-mode}. They are only
+     * emitted as defaults in raw mode, but reserving them only-when-raw would
+     * create a hot-reload footgun: a {@code labels.rename = X -> ifSpeed} accepted
+     * under {@code normalized} mode would silently clobber the now-emitted
+     * default after a flip to {@code raw}. Unconditional reservation closes that
+     * window with no operator-facing loss — neither name is a useful rename target
+     * in {@code normalized} mode (the labels aren't emitted there).
      */
     public static final Set<String> RESERVED_LABEL_NAMES = Set.of(
             "__name__",
@@ -84,6 +93,8 @@ public final class LabelMapper {
             "if_name",
             "if_descr",
             "if_speed",
+            "ifSpeed",
+            "ifHighSpeed",
             "onms_instance_id",
             "instance",
             "job",
@@ -144,6 +155,7 @@ public final class LabelMapper {
     private final String metricPrefix;
     private final String instanceId;
     private final String jobName;
+    private final PrometheusRemoteWriterConfig.IfSpeedMode ifSpeedMode;
     private final MetadataProcessor metadataProcessor;
     /** Plugin metrics sink. May be null — tests that don't care about the
      *  counter use the 1-arg constructor which leaves this null; the
@@ -178,6 +190,7 @@ public final class LabelMapper {
         this.metricPrefix      = config.getMetricPrefix();
         this.instanceId        = config.getInstanceId();
         this.jobName           = config.getJobName();
+        this.ifSpeedMode       = config.getIfSpeedMode();
         this.metadataProcessor = new MetadataProcessor(config);
         this.metrics           = metrics;
     }
@@ -218,7 +231,7 @@ public final class LabelMapper {
             metricName = metricPrefix + metricName;
         }
 
-        Defaults defaults = buildDefaults(metricName, sourceTags, instanceId, jobName);
+        Defaults defaults = buildDefaults(metricName, sourceTags, instanceId, jobName, ifSpeedMode);
         if (defaults.resourceIdWasUnparseable() && metrics != null) {
             metrics.samplesUnparseableResourceId(1);
         }
@@ -302,7 +315,17 @@ public final class LabelMapper {
                     Set<String> consumedSourceKeys,
                     boolean resourceIdWasUnparseable) {}
 
+    /** 4-arg overload — defaults to {@code NORMALIZED} mode. Preserves the
+     *  pre-{@code if-speed-mode} call shape for existing tests and any future
+     *  caller that doesn't care about the mode (the default reproduces v0.4.x
+     *  emission). */
     static Defaults buildDefaults(String metricName, Map<String, String> tags, String instanceId, String jobName) {
+        return buildDefaults(metricName, tags, instanceId, jobName,
+                PrometheusRemoteWriterConfig.IfSpeedMode.NORMALIZED);
+    }
+
+    static Defaults buildDefaults(String metricName, Map<String, String> tags, String instanceId, String jobName,
+                                  PrometheusRemoteWriterConfig.IfSpeedMode ifSpeedMode) {
         Map<String, String> out = new LinkedHashMap<>();
         Set<String> consumed = new HashSet<>();
 
@@ -390,12 +413,35 @@ public final class LabelMapper {
         consumed.add(MetaTagNames.mtype);
         putIfPresent(out, "mtype", tags, MetaTagNames.mtype);
 
-        // if_speed normalisation
+        // ifSpeed / ifHighSpeed emission — mode-dispatched. Both modes mark
+        // the source keys consumed so labels.include = * does not re-surface
+        // them and onms_extattr_* does not double-emit them.
         consumed.add("ifHighSpeed");
         consumed.add("ifSpeed");
-        Long ifSpeed = IfSpeedNormalizer.normalize(tags.get("ifHighSpeed"), tags.get("ifSpeed"));
-        if (ifSpeed != null) {
-            out.put("if_speed", Long.toString(ifSpeed));
+        if (ifSpeedMode == PrometheusRemoteWriterConfig.IfSpeedMode.RAW) {
+            // Cortex parity for SHAPE (two raw labels, no synthesis): emit each
+            // present source tag verbatim under its camelCase spelling. A row
+            // with only ifHighSpeed present emits ONLY ifHighSpeed — no
+            // synthesized ifSpeed from ifHighSpeed × 1_000_000. See change
+            // add-cortex-if-speed-compat / design.md §6.
+            //
+            // Source-presence filter: same grammar as the normalized path's
+            // IfSpeedNormalizer.parseNonNegative — non-null, non-empty,
+            // parseable as a non-negative long. Whitespace-only, non-numeric,
+            // and negative source values are dropped (not emitted) so a
+            // misconfigured upstream agent can't blow up series cardinality
+            // by stuffing arbitrary text into a series-identity label.
+            if (IfSpeedNormalizer.isParseableNonNegative(tags.get("ifSpeed"))) {
+                putIfPresent(out, "ifSpeed", tags, "ifSpeed");
+            }
+            if (IfSpeedNormalizer.isParseableNonNegative(tags.get("ifHighSpeed"))) {
+                putIfPresent(out, "ifHighSpeed", tags, "ifHighSpeed");
+            }
+        } else {
+            Long ifSpeed = IfSpeedNormalizer.normalize(tags.get("ifHighSpeed"), tags.get("ifSpeed"));
+            if (ifSpeed != null) {
+                out.put("if_speed", Long.toString(ifSpeed));
+            }
         }
 
         // Surveillance categories: one label per category. Accepts a single

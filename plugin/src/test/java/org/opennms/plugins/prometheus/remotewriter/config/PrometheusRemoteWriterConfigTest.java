@@ -328,6 +328,155 @@ class PrometheusRemoteWriterConfigTest {
             .isInstanceOf(IllegalStateException.class);
     }
 
+    // ---------- labels.if-speed-mode ----------------------------------------
+
+    @Test
+    void if_speed_mode_default_is_normalized() {
+        PrometheusRemoteWriterConfig c = minimal();
+        assertThat(c.getIfSpeedMode())
+            .isEqualTo(PrometheusRemoteWriterConfig.IfSpeedMode.NORMALIZED);
+    }
+
+    @Test
+    void if_speed_mode_accepts_normalized_and_raw_spellings() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setIfSpeedMode("normalized");
+        assertThat(c.getIfSpeedMode()).isEqualTo(PrometheusRemoteWriterConfig.IfSpeedMode.NORMALIZED);
+        c.setIfSpeedMode("Normalized");
+        assertThat(c.getIfSpeedMode()).isEqualTo(PrometheusRemoteWriterConfig.IfSpeedMode.NORMALIZED);
+        c.setIfSpeedMode("NORMALIZED");
+        assertThat(c.getIfSpeedMode()).isEqualTo(PrometheusRemoteWriterConfig.IfSpeedMode.NORMALIZED);
+        c.setIfSpeedMode("raw");
+        assertThat(c.getIfSpeedMode()).isEqualTo(PrometheusRemoteWriterConfig.IfSpeedMode.RAW);
+        c.setIfSpeedMode("Raw");
+        assertThat(c.getIfSpeedMode()).isEqualTo(PrometheusRemoteWriterConfig.IfSpeedMode.RAW);
+        c.setIfSpeedMode("RAW");
+        assertThat(c.getIfSpeedMode()).isEqualTo(PrometheusRemoteWriterConfig.IfSpeedMode.RAW);
+    }
+
+    @Test
+    void if_speed_mode_empty_string_resets_to_normalized() {
+        // Mirrors setMetadataCase semantics — empty / null reset to default;
+        // whitespace-only is not treated as blank (matches every other
+        // String-enum setter in this class).
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setIfSpeedMode("raw");
+        c.setIfSpeedMode("");
+        assertThat(c.getIfSpeedMode()).isEqualTo(PrometheusRemoteWriterConfig.IfSpeedMode.NORMALIZED);
+        c.setIfSpeedMode("raw");
+        c.setIfSpeedMode((String) null);
+        assertThat(c.getIfSpeedMode()).isEqualTo(PrometheusRemoteWriterConfig.IfSpeedMode.NORMALIZED);
+    }
+
+    @Test
+    void if_speed_mode_rejects_unknown_value() {
+        PrometheusRemoteWriterConfig c = minimal();
+        assertThatThrownBy(() -> c.setIfSpeedMode("preserve"))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("labels.if-speed-mode")
+            .hasMessageContaining("preserve")
+            .hasMessageContaining("normalized")
+            .hasMessageContaining("raw");
+    }
+
+    @Test
+    void if_speed_mode_rejects_cortex_alias() {
+        // We deliberately do not alias `cortex` to `raw`; users typing `cortex`
+        // get a clear error pointing at the right value via the accepted-list.
+        PrometheusRemoteWriterConfig c = minimal();
+        assertThatThrownBy(() -> c.setIfSpeedMode("cortex"))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("labels.if-speed-mode");
+    }
+
+    @Test
+    void if_speed_mode_setter_null_defaults_to_normalized() {
+        // Aries Blueprint contract overload — see setIfSpeedMode(IfSpeedMode).
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setIfSpeedMode(PrometheusRemoteWriterConfig.IfSpeedMode.RAW);
+        c.setIfSpeedMode((PrometheusRemoteWriterConfig.IfSpeedMode) null);
+        assertThat(c.getIfSpeedMode())
+            .isEqualTo(PrometheusRemoteWriterConfig.IfSpeedMode.NORMALIZED);
+    }
+
+    @Test
+    void reserved_rename_target_ifspeed_is_rejected_in_normalized_mode() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setLabelsRename("foo -> ifSpeed");
+        assertThatThrownBy(c::validate)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("labels.rename")
+            .hasMessageContaining("'ifSpeed'")
+            .hasMessageContaining("default label")
+            .hasMessageContaining("labels.if-speed-mode = raw");
+    }
+
+    @Test
+    void reserved_rename_target_ifspeed_is_rejected_in_raw_mode() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setIfSpeedMode("raw");
+        c.setLabelsRename("foo -> ifSpeed");
+        assertThatThrownBy(c::validate)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("labels.rename")
+            .hasMessageContaining("'ifSpeed'");
+    }
+
+    @Test
+    void reserved_rename_target_ifhighspeed_is_rejected_in_both_modes() {
+        for (PrometheusRemoteWriterConfig.IfSpeedMode mode :
+                PrometheusRemoteWriterConfig.IfSpeedMode.values()) {
+            PrometheusRemoteWriterConfig c = minimal();
+            c.setIfSpeedMode(mode);
+            c.setLabelsRename("foo -> ifHighSpeed");
+            assertThatThrownBy(c::validate)
+                .as("rename target 'ifHighSpeed' should be rejected in mode %s", mode)
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("labels.rename")
+                .hasMessageContaining("'ifHighSpeed'")
+                .hasMessageContaining("labels.if-speed-mode = raw");
+        }
+    }
+
+    @Test
+    void rename_from_if_speed_in_raw_mode_validates() {
+        // The rename is harmless in raw mode (no `if_speed` label to rename).
+        // Validation accepts; a one-shot WARN fires (not asserted here — the
+        // project has no SLF4J binding on the test classpath, same as the
+        // discovery-batch-size unused-knob WARN test).
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setIfSpeedMode("raw");
+        c.setLabelsRename("if_speed -> link_speed");
+        assertThatCode(c::validate).doesNotThrowAnyException();
+    }
+
+    @Test
+    void rename_from_if_speed_in_normalized_mode_validates() {
+        // Pin the conditional-on-mode behavior: in normalized mode the rename
+        // is functional (renames the emitted `if_speed` label); validation
+        // accepts and no WARN fires. Symmetric to the raw-mode case.
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setLabelsRename("if_speed -> link_speed");
+        assertThatCode(c::validate).doesNotThrowAnyException();
+    }
+
+    @Test
+    void cortex_compat_recipe_with_if_speed_mode_raw_validates() {
+        // The new recommended recipe for cortex migrants: drop the
+        // `if_speed -> ifSpeed` rename from the v0.4.2 list, set
+        // labels.if-speed-mode = raw instead. This is the canonical
+        // post-this-change recipe; the doc section publishes it.
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setIfSpeedMode("raw");
+        c.setLabelsRename(
+            "node_label -> nodeLabel, "
+            + "foreign_source -> foreignSource, "
+            + "foreign_id -> foreignId, "
+            + "if_name -> ifName, "
+            + "if_descr -> ifDescr");
+        assertThatCode(c::validate).doesNotThrowAnyException();
+    }
+
     // ---------- labels.rename reserved-target validation --------------------
 
     @Test
@@ -435,6 +584,35 @@ class PrometheusRemoteWriterConfigTest {
         // that would silently break the recipe fails CI instead of shipping
         // a doc that no longer works. If this test changes, the doc section
         // must change in lockstep.
+        //
+        // Note: as of the labels.if-speed-mode change, the v0.4.2 recipe's
+        // `if_speed -> ifSpeed` line was dropped (ifSpeed is now reserved
+        // unconditionally; the recipe relies on `labels.if-speed-mode = raw`
+        // for that label instead). The other five rename lines are unchanged.
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setLabelsRename(
+            "node_label -> nodeLabel, "
+            + "foreign_source -> foreignSource, "
+            + "foreign_id -> foreignId, "
+            + "if_name -> ifName, "
+            + "if_descr -> ifDescr");
+        assertThatCode(c::validate).doesNotThrowAnyException();
+        assertThat(c.labelsRenameMap()).containsExactlyInAnyOrderEntriesOf(Map.of(
+            "node_label",     "nodeLabel",
+            "foreign_source", "foreignSource",
+            "foreign_id",     "foreignId",
+            "if_name",        "ifName",
+            "if_descr",       "ifDescr"));
+    }
+
+    @Test
+    void labels_rename_v04_2_cortex_recipe_collides_after_if_speed_mode_lands() {
+        // The v0.4.2 cortex-migration recipe verbatim — the if_speed -> ifSpeed
+        // line collides with the reserved-target set added by the
+        // labels.if-speed-mode change. Pinning the rejection makes the version
+        // transition explicit: an operator who upgrades carrying the v0.4.2
+        // recipe sees this exact failure shape, with the pointer at the new
+        // knob baked into the message body.
         PrometheusRemoteWriterConfig c = minimal();
         c.setLabelsRename(
             "node_label -> nodeLabel, "
@@ -443,14 +621,12 @@ class PrometheusRemoteWriterConfigTest {
             + "if_name -> ifName, "
             + "if_descr -> ifDescr, "
             + "if_speed -> ifSpeed");
-        assertThatCode(c::validate).doesNotThrowAnyException();
-        assertThat(c.labelsRenameMap()).containsExactlyInAnyOrderEntriesOf(Map.of(
-            "node_label",     "nodeLabel",
-            "foreign_source", "foreignSource",
-            "foreign_id",     "foreignId",
-            "if_name",        "ifName",
-            "if_descr",       "ifDescr",
-            "if_speed",       "ifSpeed"));
+        assertThatThrownBy(c::validate)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("labels.rename")
+            .hasMessageContaining("'ifSpeed'")
+            .hasMessageContaining("default label")
+            .hasMessageContaining("labels.if-speed-mode = raw");
     }
 
     @Test
