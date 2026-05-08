@@ -61,6 +61,33 @@ public class PrometheusRemoteWriterConfig {
      */
     public enum IfSpeedMode { NORMALIZED, RAW }
 
+    /**
+     * Surveillance-categories label emission mode. {@code PER_CATEGORY}
+     * (default) splits the OpenNMS-supplied {@code categories} source tag
+     * on {@code ,} and emits one {@code onms_cat_<sanitized-name>="true"}
+     * label per category — the v0.4.x default and the right shape for
+     * set-membership PromQL ({@code {onms_cat_Server="true"}}). {@code RAW}
+     * emits a single {@code categories="<verbatim-comma-joined>"} label
+     * matching the AGPL {@code opennms-cortex-tss-plugin}'s wire shape so
+     * cortex-fielded dashboards keep working without rewrite. {@code BOTH}
+     * emits BOTH encodings on every sample carrying the {@code categories}
+     * source tag — a migration scaffold for operators porting dashboards
+     * from {@code onms_cat_X="true"} to {@code categories=~".*X.*"}.
+     *
+     * <p>The plugin delegates ordering to OpenNMS-core's
+     * {@code MetaTagDataLoader.mapCategories()} which alphabetically sorts
+     * the category list before joining with {@code ","} (no space) — see
+     * {@code openspec/changes/add-cortex-categories-compat/design.md} §Spike
+     * for the upstream-contract reference.
+     *
+     * <p>The {@code categories} (singular) label name and the
+     * {@code onms_cat_*} label-name prefix are reserved against
+     * {@code labels.rename} / {@code labels.copy} targets in all three
+     * modes; flipping the mode does not unmask a previously-accepted
+     * rename collision.
+     */
+    public enum CategoriesMode { PER_CATEGORY, RAW, BOTH }
+
     // --- Endpoint ---
     private String writeUrl;
     private String readUrl;
@@ -148,6 +175,7 @@ public class PrometheusRemoteWriterConfig {
     private String labelsCopy;
     private String metricPrefix;
     private IfSpeedMode ifSpeedMode = IfSpeedMode.NORMALIZED;
+    private CategoriesMode categoriesMode = CategoriesMode.PER_CATEGORY;
 
     // --- Parsed-map caches ---
     // labelsRenameMap() / labelsCopyMap() are called multiple times per
@@ -463,6 +491,10 @@ public class PrometheusRemoteWriterConfig {
             if ("ifSpeed".equals(to) || "ifHighSpeed".equals(to)) {
                 base += " To recover cortex-compatible interface-speed labels,"
                       + " set 'labels.if-speed-mode = raw' instead of a rename.";
+            } else if ("categories".equals(to)) {
+                base += " To recover cortex-compatible categories labels,"
+                      + " set 'labels.categories-mode = raw' (or 'both' during"
+                      + " migration) instead of a rename.";
             }
             return base;
         }
@@ -698,6 +730,7 @@ public class PrometheusRemoteWriterConfig {
         diffStr(out, "labels.rename",             other.labelsRename,          labelsRename);
         diffStr(out, "labels.copy",               other.labelsCopy,            labelsCopy);
         diffStr(out, "labels.if-speed-mode",      other.ifSpeedMode.name(),    ifSpeedMode.name());
+        diffStr(out, "labels.categories-mode",    other.categoriesMode.name(), categoriesMode.name());
         diffStr(out, "metric.prefix",             other.metricPrefix,          metricPrefix);
         diffBool(out, "metadata.enabled",         other.metadataEnabled,       metadataEnabled);
         diffStr(out, "metadata.include",          other.metadataInclude,       metadataInclude);
@@ -853,6 +886,26 @@ public class PrometheusRemoteWriterConfig {
         ifSpeedMode = v == null ? IfSpeedMode.NORMALIZED : v;
     }
 
+    public void setCategoriesMode(String v) {
+        if (isBlank(v)) {
+            categoriesMode = CategoriesMode.PER_CATEGORY;
+            return;
+        }
+        // Locale.ROOT — same Turkish-locale-bug avoidance as setIfSpeedMode.
+        String normalized = v.trim().toUpperCase(java.util.Locale.ROOT).replace('-', '_');
+        try {
+            categoriesMode = CategoriesMode.valueOf(normalized);
+        } catch (IllegalArgumentException e) {
+            throw new IllegalStateException(
+                "labels.categories-mode must be 'per-category', 'raw', or 'both', got: " + v);
+        }
+    }
+
+    // Aries Blueprint setter overload — same pattern as setIfSpeedMode(IfSpeedMode).
+    public void setCategoriesMode(CategoriesMode v) {
+        categoriesMode = v == null ? CategoriesMode.PER_CATEGORY : v;
+    }
+
     // --- WAL setters ---------------------------------------------------------
 
     public void setWalEnabled(boolean v)        { walEnabled = v; }
@@ -978,6 +1031,7 @@ public class PrometheusRemoteWriterConfig {
     public String  getLabelsCopy()            { return labelsCopy; }
     public String  getMetricPrefix()          { return metricPrefix; }
     public IfSpeedMode getIfSpeedMode()       { return ifSpeedMode; }
+    public CategoriesMode getCategoriesMode() { return categoriesMode; }
     public boolean isMetadataEnabled()        { return metadataEnabled; }
     public String  getMetadataInclude()       { return metadataInclude; }
     public String  getMetadataExclude()       { return metadataExclude; }

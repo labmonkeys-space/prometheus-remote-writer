@@ -48,6 +48,60 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   series identity at the backend during the flip; old series age out of
   retention naturally.
 
+- **`labels.categories-mode` configuration knob (cortex-compat for
+  surveillance-categories labels).** Sibling to `labels.if-speed-mode` —
+  resolves the second of three structural-difference rows in the v0.4.2
+  *Migration from `opennms-cortex-tss-plugin`* doc table. Operators
+  migrating dashboards from the AGPL cortex plugin can now flip the
+  wire shape of the categories surface with a single config directive
+  instead of rewriting per-category-boolean queries
+  (`{onms_cat_Server="true"}`) into substring/regex form
+  (`categories=~".*Server.*"`). Three enum values:
+    - `per-category` (default, v0.4.x bit-for-bit): one
+      `onms_cat_<sanitized-name>="true"` label per category.
+      Prometheus-idiomatic for set-membership PromQL.
+    - `raw`: a single `categories="<comma-joined-names>"` label,
+      emitted with the OpenNMS-supplied source value verbatim. Cortex
+      parity. The per-category `onms_cat_*` labels are NOT emitted.
+    - `both`: emit both encodings on every sample carrying the
+      `categories` source tag — a migration scaffold for porting
+      dashboards one panel at a time, then dropping to `raw`. Wire
+      overhead during `both`: ~30-50 bytes per sample for nodes with at
+      least one category.
+  The `categories` (singular) label name is added to the reserved
+  rename / copy target set **unconditionally**; the existing
+  `onms_cat_*` prefix reservation stays unconditional. Hot-reload
+  footgun-closure pattern matches the v0.4.3 `ifSpeed` / `ifHighSpeed`
+  reservation.
+
+  *Spike finding (load-bearing).* OpenNMS-core's
+  `MetaTagDataLoader.mapCategories()` (Apache 2.0) pre-sorts the
+  category list alphabetically with `Collections.sort(catList)` before
+  joining via `String.join(",", catList)` (no space). Raw mode in this
+  plugin delegates ordering to that upstream contract — no
+  canonicalization on the plugin's side, no cardinality bug from
+  unstable order. The "byte-for-byte cortex parity" claim is achievable
+  for free. A test (`categories_raw_mode_does_not_resort_source_value`)
+  pins the delegation so a future contributor "helpfully" adding a sort
+  would break cortex parity at CI time.
+
+  *Cortex-parity edge case.* Category names containing literal commas
+  (e.g. a single category named `"Foo,Bar"`) collide with the
+  comma-delimited representation in any mode — `categories="Foo,Bar"`
+  is indistinguishable from two-category `"Foo"` + `"Bar"`. Cortex
+  broke on this too. Documented in the *Categories labels in raw and
+  both modes* doc subsection; pinned by the
+  `categories_with_comma_in_name_breaks_raw_mode_round_trip` test.
+
+  *WAL flip semantics.* Same as `labels.if-speed-mode`. WAL-flip note
+  in the migration doc extended to cover both knobs.
+
+  Implementation is clean-room — designed from OpenNMS-core's
+  `MetaTagDataLoader.mapCategories()` (Apache 2.0) and direct
+  observation of the cortex emission shape via its public
+  `toPrometheusTimeSeries` label-emission contract. No code or pattern
+  is taken from the AGPL cortex source.
+
 ### Changed
 
 - **Reserved exact rename / copy target set tightened to include
@@ -61,6 +115,24 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `if_speed -> ifSpeed` line from your `labels.rename` and add
   `labels.if-speed-mode = raw` to your cfg; the rest of the recipe is
   unchanged. The doc section is updated in lockstep.
+
+- **Reserved exact rename / copy target set tightened to include
+  `categories`.** Same shape as the `ifSpeed` / `ifHighSpeed`
+  tightening above. *No v0.4.x cortex-migration recipe published a
+  `labels.rename = X -> categories` directive* — the v0.4.2 doc
+  explicitly described the categories surface as "structurally
+  different — dashboard rewrite required" — so the actual
+  operator-impact surface is small. Migration: drop any
+  `labels.rename = X -> categories` directives and use
+  `labels.categories-mode = raw` (or `both` during migration) instead.
+  The error message names both the collision and the new knob.
+
+- **In-tree test fixture format normalized.** `LabelMapperTest`
+  fixture builders previously used `"Routers, ProductionSites"` (with
+  a stray space) as the `categories` source value. Real OpenNMS output
+  is `"ProductionSites,Routers"` (alphabetically sorted, no space).
+  Fixture updated to match. Existing per-category tests pass unchanged
+  (the split-and-trim logic is tolerant of either format).
 
 ## [0.4.2] — 2026-05-08
 

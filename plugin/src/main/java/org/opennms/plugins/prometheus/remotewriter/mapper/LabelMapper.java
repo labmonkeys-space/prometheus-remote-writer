@@ -79,6 +79,12 @@ public final class LabelMapper {
      * default after a flip to {@code raw}. Unconditional reservation closes that
      * window with no operator-facing loss — neither name is a useful rename target
      * in {@code normalized} mode (the labels aren't emitted there).
+     *
+     * <p>{@code categories} (singular) follows the same unconditional-reservation
+     * pattern: it is only emitted as a default in {@code labels.categories-mode = raw}
+     * (or {@code both}), but reserving it only-when-emitted would re-introduce the
+     * same hot-reload footgun. The {@code onms_cat_*} prefix reservation in
+     * {@link #RESERVED_LABEL_PREFIXES} is similarly mode-independent.
      */
     public static final Set<String> RESERVED_LABEL_NAMES = Set.of(
             "__name__",
@@ -95,6 +101,7 @@ public final class LabelMapper {
             "if_speed",
             "ifSpeed",
             "ifHighSpeed",
+            "categories",
             "onms_instance_id",
             "instance",
             "job",
@@ -156,6 +163,7 @@ public final class LabelMapper {
     private final String instanceId;
     private final String jobName;
     private final PrometheusRemoteWriterConfig.IfSpeedMode ifSpeedMode;
+    private final PrometheusRemoteWriterConfig.CategoriesMode categoriesMode;
     private final MetadataProcessor metadataProcessor;
     /** Plugin metrics sink. May be null — tests that don't care about the
      *  counter use the 1-arg constructor which leaves this null; the
@@ -191,6 +199,7 @@ public final class LabelMapper {
         this.instanceId        = config.getInstanceId();
         this.jobName           = config.getJobName();
         this.ifSpeedMode       = config.getIfSpeedMode();
+        this.categoriesMode    = config.getCategoriesMode();
         this.metadataProcessor = new MetadataProcessor(config);
         this.metrics           = metrics;
     }
@@ -231,7 +240,7 @@ public final class LabelMapper {
             metricName = metricPrefix + metricName;
         }
 
-        Defaults defaults = buildDefaults(metricName, sourceTags, instanceId, jobName, ifSpeedMode);
+        Defaults defaults = buildDefaults(metricName, sourceTags, instanceId, jobName, ifSpeedMode, categoriesMode);
         if (defaults.resourceIdWasUnparseable() && metrics != null) {
             metrics.samplesUnparseableResourceId(1);
         }
@@ -315,17 +324,28 @@ public final class LabelMapper {
                     Set<String> consumedSourceKeys,
                     boolean resourceIdWasUnparseable) {}
 
-    /** 4-arg overload — defaults to {@code NORMALIZED} mode. Preserves the
-     *  pre-{@code if-speed-mode} call shape for existing tests and any future
-     *  caller that doesn't care about the mode (the default reproduces v0.4.x
-     *  emission). */
+    /** 4-arg overload — defaults to v0.4.x mode shapes ({@code NORMALIZED} for
+     *  if-speed, {@code PER_CATEGORY} for categories). Preserves the pre-mode-knob
+     *  call shape for existing tests and any future caller that doesn't care
+     *  about either mode (the defaults reproduce v0.4.x emission). */
     static Defaults buildDefaults(String metricName, Map<String, String> tags, String instanceId, String jobName) {
         return buildDefaults(metricName, tags, instanceId, jobName,
-                PrometheusRemoteWriterConfig.IfSpeedMode.NORMALIZED);
+                PrometheusRemoteWriterConfig.IfSpeedMode.NORMALIZED,
+                PrometheusRemoteWriterConfig.CategoriesMode.PER_CATEGORY);
+    }
+
+    /** 5-arg overload — defaults categories to {@code PER_CATEGORY}. Preserves
+     *  the post-{@code if-speed-mode}-pre-{@code categories-mode} call shape
+     *  for tests added in v0.4.3 that pass an explicit if-speed mode. */
+    static Defaults buildDefaults(String metricName, Map<String, String> tags, String instanceId, String jobName,
+                                  PrometheusRemoteWriterConfig.IfSpeedMode ifSpeedMode) {
+        return buildDefaults(metricName, tags, instanceId, jobName, ifSpeedMode,
+                PrometheusRemoteWriterConfig.CategoriesMode.PER_CATEGORY);
     }
 
     static Defaults buildDefaults(String metricName, Map<String, String> tags, String instanceId, String jobName,
-                                  PrometheusRemoteWriterConfig.IfSpeedMode ifSpeedMode) {
+                                  PrometheusRemoteWriterConfig.IfSpeedMode ifSpeedMode,
+                                  PrometheusRemoteWriterConfig.CategoriesMode categoriesMode) {
         Map<String, String> out = new LinkedHashMap<>();
         Set<String> consumed = new HashSet<>();
 
@@ -444,19 +464,37 @@ public final class LabelMapper {
             }
         }
 
-        // Surveillance categories: one label per category. Accepts a single
-        // `categories` tag with comma-separated values — the convention used
-        // by OpenNMS's TSS adapter as of v0.1. Revisit in 15.2 if real
-        // deployments surface categories differently.
+        // Surveillance categories — mode-dispatched. `categories` is a
+        // comma-separated source tag attached by OpenNMS-core's
+        // MetaTagDataLoader.mapCategories() when the operator has set
+        // `org.opennms.timeseries.tin.metatags.exposeCategories=true`.
+        // OpenNMS pre-sorts the list alphabetically and joins with `,`
+        // (no space) — `String.join(",", sortedCatList)`. The plugin
+        // delegates ordering to that upstream contract.
+        //
+        // PER_CATEGORY (default): split + sanitize + per-category booleans.
+        // RAW: emit the source value verbatim as a single `categories` label.
+        // BOTH: apply both code paths in sequence (migration scaffold).
+        //
+        // The source key `categories` is consumed in all three modes so
+        // labels.include = * does not re-surface it and onms_extattr_*
+        // does not double-emit it.
         consumed.add("categories");
         String categories = tags.get("categories");
-        if (categories != null && !categories.isEmpty()) {
-            for (String cat : categories.split(",")) {
-                cat = cat.trim();
-                if (!cat.isEmpty()) {
-                    String labelName = "onms_cat_" + Sanitizer.labelName(cat);
-                    out.put(labelName, "true");
+        if (categories != null && !categories.trim().isEmpty()) {
+            if (categoriesMode == PrometheusRemoteWriterConfig.CategoriesMode.PER_CATEGORY
+                    || categoriesMode == PrometheusRemoteWriterConfig.CategoriesMode.BOTH) {
+                for (String cat : categories.split(",")) {
+                    cat = cat.trim();
+                    if (!cat.isEmpty()) {
+                        String labelName = "onms_cat_" + Sanitizer.labelName(cat);
+                        out.put(labelName, "true");
+                    }
                 }
+            }
+            if (categoriesMode == PrometheusRemoteWriterConfig.CategoriesMode.RAW
+                    || categoriesMode == PrometheusRemoteWriterConfig.CategoriesMode.BOTH) {
+                out.put("categories", Sanitizer.labelValue(categories));
             }
         }
         // `parsed == null` captures both "resourceId was null" and "resourceId

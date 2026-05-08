@@ -295,6 +295,203 @@ class LabelMapperTest {
         return new LabelMapper(c);
     }
 
+    // ---------- labels.categories-mode --------------------------------------
+
+    @Test
+    void categories_per_category_mode_emits_one_boolean_per_category() {
+        // Pin existing v0.4.x behavior. OpenNMS-pre-sorted source format
+        // (no space after comma) — see design.md §Spike.
+        Sample s = sample(ImmutableMetric.builder()
+                .intrinsicTag("name", "foo")
+                .externalTag("categories", "ProductionSites,Routers"));
+        MappedSample out = DEFAULT_MAPPER.map(s);
+        assertThat(out.labels()).containsEntry("onms_cat_ProductionSites", "true");
+        assertThat(out.labels()).containsEntry("onms_cat_Routers", "true");
+        assertThat(out.labels()).doesNotContainKey("categories");
+    }
+
+    @Test
+    void categories_per_category_mode_sanitizes_special_characters_into_label_name() {
+        // Existing test (`category_names_with_forbidden_chars_are_sanitized`)
+        // covers this; included here for cluster completeness so the per-mode
+        // sanitization asymmetry vs raw mode is visible.
+        Sample s = sample(ImmutableMetric.builder()
+                .intrinsicTag("name", "foo")
+                .externalTag("categories", "Server Room-B"));
+        MappedSample out = DEFAULT_MAPPER.map(s);
+        assertThat(out.labels()).containsEntry("onms_cat_Server_Room_B", "true");
+    }
+
+    @Test
+    void categories_raw_mode_emits_single_comma_joined_label() {
+        Sample s = sample(ImmutableMetric.builder()
+                .intrinsicTag("name", "foo")
+                .externalTag("categories", "ProductionSites,Routers"));
+        MappedSample out = categoriesRawMapper().map(s);
+        assertThat(out.labels()).containsEntry("categories", "ProductionSites,Routers");
+        assertThat(out.labels()).doesNotContainKey("onms_cat_ProductionSites");
+        assertThat(out.labels()).doesNotContainKey("onms_cat_Routers");
+    }
+
+    @Test
+    void categories_raw_mode_does_not_resort_source_value() {
+        // DELIBERATE documented behavior: the plugin delegates ordering to
+        // OpenNMS-core's MetaTagDataLoader.mapCategories() which pre-sorts.
+        // Feeding an explicitly out-of-order source (defensive — non-OpenNMS
+        // test harness or a hypothetical future OpenNMS bug) confirms the
+        // plugin does NOT re-sort. A future contributor "helpfully" adding
+        // a sort would regress cortex parity.
+        Sample s = sample(ImmutableMetric.builder()
+                .intrinsicTag("name", "foo")
+                .externalTag("categories", "Routers,Production"));   // intentionally unsorted
+        MappedSample out = categoriesRawMapper().map(s);
+        assertThat(out.labels()).containsEntry("categories", "Routers,Production");
+    }
+
+    @Test
+    void categories_raw_mode_preserves_special_characters_in_value() {
+        // Per-mode sanitization asymmetry: per-category mode sanitizes the
+        // category NAME (used as label-name suffix); raw mode preserves
+        // special characters in the label VALUE (Sanitizer.labelValue is
+        // byte-cap-only).
+        Sample s = sample(ImmutableMetric.builder()
+                .intrinsicTag("name", "foo")
+                .externalTag("categories", "Server Room-B,Front.Office"));
+        MappedSample out = categoriesRawMapper().map(s);
+        assertThat(out.labels()).containsEntry("categories", "Server Room-B,Front.Office");
+    }
+
+    @Test
+    void categories_both_mode_emits_per_category_and_comma_joined() {
+        Sample s = sample(ImmutableMetric.builder()
+                .intrinsicTag("name", "foo")
+                .externalTag("categories", "ProductionSites,Routers"));
+        MappedSample out = categoriesBothMapper().map(s);
+        assertThat(out.labels()).containsEntry("onms_cat_ProductionSites", "true");
+        assertThat(out.labels()).containsEntry("onms_cat_Routers", "true");
+        assertThat(out.labels()).containsEntry("categories", "ProductionSites,Routers");
+    }
+
+    @Test
+    void categories_raw_mode_empty_source_emits_nothing() {
+        Sample s = sample(ImmutableMetric.builder()
+                .intrinsicTag("name", "foo")
+                .externalTag("categories", ""));
+        MappedSample out = categoriesRawMapper().map(s);
+        assertThat(out.labels()).doesNotContainKey("categories");
+        assertThat(out.labels().keySet()).noneMatch(k -> k.startsWith("onms_cat_"));
+    }
+
+    @Test
+    void categories_raw_mode_whitespace_only_source_emits_nothing() {
+        Sample s = sample(ImmutableMetric.builder()
+                .intrinsicTag("name", "foo")
+                .externalTag("categories", "   "));
+        MappedSample out = categoriesRawMapper().map(s);
+        assertThat(out.labels()).doesNotContainKey("categories");
+    }
+
+    @Test
+    void categories_raw_mode_absent_source_emits_nothing() {
+        Sample s = sample(ImmutableMetric.builder()
+                .intrinsicTag("name", "foo"));
+        MappedSample out = categoriesRawMapper().map(s);
+        assertThat(out.labels()).doesNotContainKey("categories");
+    }
+
+    @Test
+    void categories_per_category_mode_consumed_keys_prevent_attr_double_emission() {
+        PrometheusRemoteWriterConfig c = defaultConfig();
+        c.setLabelsInclude("*");
+        Sample s = sample(ImmutableMetric.builder()
+                .intrinsicTag("name", "foo")
+                .externalTag("categories", "Routers"));
+        MappedSample out = new LabelMapper(c).map(s);
+        assertThat(out.labels()).containsEntry("onms_cat_Routers", "true");
+        assertThat(out.labels()).doesNotContainKey("categories");
+        assertThat(out.labels()).doesNotContainKey("onms_extattr_categories");
+    }
+
+    @Test
+    void categories_raw_mode_consumed_keys_prevent_attr_double_emission() {
+        PrometheusRemoteWriterConfig c = defaultConfig();
+        c.setCategoriesMode("raw");
+        c.setLabelsInclude("*");
+        Sample s = sample(ImmutableMetric.builder()
+                .intrinsicTag("name", "foo")
+                .externalTag("categories", "Routers"));
+        MappedSample out = new LabelMapper(c).map(s);
+        assertThat(out.labels()).containsEntry("categories", "Routers");
+        assertThat(out.labels()).doesNotContainKey("onms_extattr_categories");
+        assertThat(out.labels().keySet()).noneMatch(k -> k.startsWith("onms_cat_"));
+    }
+
+    @Test
+    void categories_both_mode_consumed_keys_prevent_attr_double_emission() {
+        PrometheusRemoteWriterConfig c = defaultConfig();
+        c.setCategoriesMode("both");
+        c.setLabelsInclude("*");
+        Sample s = sample(ImmutableMetric.builder()
+                .intrinsicTag("name", "foo")
+                .externalTag("categories", "Routers"));
+        MappedSample out = new LabelMapper(c).map(s);
+        assertThat(out.labels()).containsEntry("categories", "Routers");
+        assertThat(out.labels()).containsEntry("onms_cat_Routers", "true");
+        assertThat(out.labels()).doesNotContainKey("onms_extattr_categories");
+    }
+
+    @Test
+    void categories_with_comma_in_name_breaks_raw_mode_round_trip() {
+        // DELIBERATE documented behavior — cortex-parity edge case.
+        // A category literally named "Foo,Bar" produces a `categories` value
+        // indistinguishable from two-category "Foo" + "Bar". Cortex broke on
+        // this too. See design.md §4. Pinned so a future contributor doesn't
+        // "fix" the comma-delimiter assumption (which would deviate from
+        // OpenNMS's join-with-comma source format).
+        Sample s = sample(ImmutableMetric.builder()
+                .intrinsicTag("name", "foo")
+                .externalTag("categories", "Foo,Bar"));
+        MappedSample out = categoriesRawMapper().map(s);
+        assertThat(out.labels()).containsEntry("categories", "Foo,Bar");
+        // Indistinguishable from a two-category Foo+Bar source — same wire.
+    }
+
+    @Test
+    void full_default_label_set_in_raw_mode_with_full_fixture_categories() {
+        // Spec scenario: "Full default-label emission in raw mode" applied to
+        // the categories surface. Asserts the canonical default-label set in
+        // raw mode includes `categories` and excludes `onms_cat_*`.
+        PrometheusRemoteWriterConfig c = defaultConfig();
+        c.setIfSpeedMode("raw");
+        c.setCategoriesMode("raw");
+        MappedSample out = new LabelMapper(c).map(fullFixtureSample());
+        assertThat(out.labels()).containsEntry("categories", "ProductionSites,Routers");
+        assertThat(out.labels().keySet()).noneMatch(k -> k.startsWith("onms_cat_"));
+    }
+
+    @Test
+    void full_default_label_set_in_both_mode_with_full_fixture_categories() {
+        PrometheusRemoteWriterConfig c = defaultConfig();
+        c.setCategoriesMode("both");
+        MappedSample out = new LabelMapper(c).map(fullFixtureSample());
+        assertThat(out.labels())
+            .containsEntry("categories", "ProductionSites,Routers")
+            .containsEntry("onms_cat_ProductionSites", "true")
+            .containsEntry("onms_cat_Routers", "true");
+    }
+
+    private static LabelMapper categoriesRawMapper() {
+        PrometheusRemoteWriterConfig c = defaultConfig();
+        c.setCategoriesMode("raw");
+        return new LabelMapper(c);
+    }
+
+    private static LabelMapper categoriesBothMapper() {
+        PrometheusRemoteWriterConfig c = defaultConfig();
+        c.setCategoriesMode("both");
+        return new LabelMapper(c);
+    }
+
     @Test
     void mtype_meta_tag_emits_mtype_label() {
         // mtype is load-bearing for OpenNMS late-aggregation. The OpenNMS
@@ -1633,7 +1830,7 @@ class LabelMapperTest {
                 .externalTag("ifDescr", "GigabitEthernet0/0")
                 .externalTag("ifHighSpeed", "1000")
                 .externalTag("ifSpeed", "4294967295")
-                .externalTag("categories", "Routers, ProductionSites");
+                .externalTag("categories", "ProductionSites,Routers"); // OpenNMS pre-sorts; comma, no space
         if (extraKey != null) {
             mb.externalTag(extraKey, extraValue);
         }
@@ -1660,7 +1857,7 @@ class LabelMapperTest {
                 .externalTag("ifHighSpeed", "1000")
                 .externalTag("ifSpeed", "4294967295")
                 .externalTag("nodeId", "42")
-                .externalTag("categories", "Routers, ProductionSites");
+                .externalTag("categories", "ProductionSites,Routers"); // OpenNMS pre-sorts; comma, no space
     }
 
     private static Sample sample(ImmutableMetric.MetricBuilder metricBuilder) {

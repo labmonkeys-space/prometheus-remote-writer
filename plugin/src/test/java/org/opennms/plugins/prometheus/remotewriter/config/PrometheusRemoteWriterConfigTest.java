@@ -477,6 +477,121 @@ class PrometheusRemoteWriterConfigTest {
         assertThatCode(c::validate).doesNotThrowAnyException();
     }
 
+    // ---------- labels.categories-mode --------------------------------------
+
+    @Test
+    void categories_mode_default_is_per_category() {
+        PrometheusRemoteWriterConfig c = minimal();
+        assertThat(c.getCategoriesMode())
+            .isEqualTo(PrometheusRemoteWriterConfig.CategoriesMode.PER_CATEGORY);
+    }
+
+    @Test
+    void categories_mode_accepts_per_category_raw_both_spellings() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setCategoriesMode("per-category");
+        assertThat(c.getCategoriesMode()).isEqualTo(PrometheusRemoteWriterConfig.CategoriesMode.PER_CATEGORY);
+        c.setCategoriesMode("Per-Category");
+        assertThat(c.getCategoriesMode()).isEqualTo(PrometheusRemoteWriterConfig.CategoriesMode.PER_CATEGORY);
+        c.setCategoriesMode("PER_CATEGORY");
+        assertThat(c.getCategoriesMode()).isEqualTo(PrometheusRemoteWriterConfig.CategoriesMode.PER_CATEGORY);
+        c.setCategoriesMode("raw");
+        assertThat(c.getCategoriesMode()).isEqualTo(PrometheusRemoteWriterConfig.CategoriesMode.RAW);
+        c.setCategoriesMode("RAW");
+        assertThat(c.getCategoriesMode()).isEqualTo(PrometheusRemoteWriterConfig.CategoriesMode.RAW);
+        c.setCategoriesMode("both");
+        assertThat(c.getCategoriesMode()).isEqualTo(PrometheusRemoteWriterConfig.CategoriesMode.BOTH);
+        c.setCategoriesMode("Both");
+        assertThat(c.getCategoriesMode()).isEqualTo(PrometheusRemoteWriterConfig.CategoriesMode.BOTH);
+        c.setCategoriesMode("BOTH");
+        assertThat(c.getCategoriesMode()).isEqualTo(PrometheusRemoteWriterConfig.CategoriesMode.BOTH);
+    }
+
+    @Test
+    void categories_mode_empty_string_resets_to_per_category() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setCategoriesMode("raw");
+        c.setCategoriesMode("");
+        assertThat(c.getCategoriesMode()).isEqualTo(PrometheusRemoteWriterConfig.CategoriesMode.PER_CATEGORY);
+        c.setCategoriesMode("raw");
+        c.setCategoriesMode((String) null);
+        assertThat(c.getCategoriesMode()).isEqualTo(PrometheusRemoteWriterConfig.CategoriesMode.PER_CATEGORY);
+    }
+
+    @Test
+    void categories_mode_rejects_unknown_value() {
+        PrometheusRemoteWriterConfig c = minimal();
+        assertThatThrownBy(() -> c.setCategoriesMode("legacy"))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("labels.categories-mode")
+            .hasMessageContaining("legacy")
+            .hasMessageContaining("per-category")
+            .hasMessageContaining("raw")
+            .hasMessageContaining("both");
+    }
+
+    @Test
+    void categories_mode_setter_null_defaults_to_per_category() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setCategoriesMode(PrometheusRemoteWriterConfig.CategoriesMode.RAW);
+        c.setCategoriesMode((PrometheusRemoteWriterConfig.CategoriesMode) null);
+        assertThat(c.getCategoriesMode())
+            .isEqualTo(PrometheusRemoteWriterConfig.CategoriesMode.PER_CATEGORY);
+    }
+
+    @Test
+    void reserved_rename_target_categories_is_rejected_in_per_category_mode() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setLabelsRename("foo -> categories");
+        assertThatThrownBy(c::validate)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("labels.rename")
+            .hasMessageContaining("'categories'")
+            .hasMessageContaining("default label")
+            .hasMessageContaining("labels.categories-mode = raw");
+    }
+
+    @Test
+    void reserved_rename_target_categories_is_rejected_in_raw_mode() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setCategoriesMode("raw");
+        c.setLabelsRename("foo -> categories");
+        assertThatThrownBy(c::validate)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("labels.rename")
+            .hasMessageContaining("'categories'");
+    }
+
+    @Test
+    void reserved_rename_target_categories_is_rejected_in_both_mode() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setCategoriesMode("both");
+        c.setLabelsRename("foo -> categories");
+        assertThatThrownBy(c::validate)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("labels.rename")
+            .hasMessageContaining("'categories'");
+    }
+
+    @Test
+    void cortex_compat_recipe_post_categories_mode_validates() {
+        // Sibling to cortex_compat_recipe_with_if_speed_mode_raw_validates —
+        // pins the canonical post-categories-mode published recipe: the
+        // v0.4.3 5-line rename block PLUS labels.if-speed-mode = raw PLUS
+        // labels.categories-mode = raw. Decoupled from the v0.4.3 sibling so
+        // a future change to either mode knob breaks only its own test.
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setIfSpeedMode("raw");
+        c.setCategoriesMode("raw");
+        c.setLabelsRename(
+            "node_label -> nodeLabel, "
+            + "foreign_source -> foreignSource, "
+            + "foreign_id -> foreignId, "
+            + "if_name -> ifName, "
+            + "if_descr -> ifDescr");
+        assertThatCode(c::validate).doesNotThrowAnyException();
+    }
+
     // ---------- labels.rename reserved-target validation --------------------
 
     @Test
