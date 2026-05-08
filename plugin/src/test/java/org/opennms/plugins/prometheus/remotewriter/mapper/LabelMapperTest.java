@@ -108,6 +108,193 @@ class LabelMapperTest {
         assertThat(out.labels()).containsEntry("if_speed", "1000000000");
     }
 
+    // ---------- labels.if-speed-mode = raw ----------------------------------
+
+    @Test
+    void if_speed_raw_mode_emits_both_source_labels_verbatim() {
+        // Cortex parity. The fixture carries ifHighSpeed=1000, ifSpeed=4294967295.
+        // Raw mode emits both verbatim; no normalization, no if_speed label.
+        MappedSample out = rawModeMapper().map(interfaceSample());
+        assertThat(out.labels()).containsEntry("ifSpeed",     "4294967295");
+        assertThat(out.labels()).containsEntry("ifHighSpeed", "1000");
+        assertThat(out.labels()).doesNotContainKey("if_speed");
+    }
+
+    @Test
+    void if_speed_raw_mode_only_ifspeed_present() {
+        Sample s = sample(ImmutableMetric.builder()
+                .intrinsicTag("name", "ifHCInOctets")
+                .intrinsicTag("resourceId", "node[1].interfaceSnmp[eth0]")
+                .externalTag("ifSpeed", "100000000"));
+        MappedSample out = rawModeMapper().map(s);
+        assertThat(out.labels()).containsEntry("ifSpeed", "100000000");
+        assertThat(out.labels()).doesNotContainKey("ifHighSpeed");
+        assertThat(out.labels()).doesNotContainKey("if_speed");
+    }
+
+    @Test
+    void if_speed_raw_mode_only_ifhighspeed_present() {
+        // DELIBERATE documented behavior: cortex parity. With only ifHighSpeed
+        // source-present, raw mode emits ONLY ifHighSpeed — it does NOT
+        // synthesize ifSpeed from ifHighSpeed × 1_000_000. A future
+        // contributor "fixing" the missing ifSpeed would regress cortex parity.
+        Sample s = sample(ImmutableMetric.builder()
+                .intrinsicTag("name", "ifHCInOctets")
+                .intrinsicTag("resourceId", "node[1].interfaceSnmp[eth0]")
+                .externalTag("ifHighSpeed", "10000"));
+        MappedSample out = rawModeMapper().map(s);
+        assertThat(out.labels()).containsEntry("ifHighSpeed", "10000");
+        assertThat(out.labels()).doesNotContainKey("ifSpeed");
+        assertThat(out.labels()).doesNotContainKey("if_speed");
+    }
+
+    @Test
+    void if_speed_raw_mode_zero_values_are_emitted() {
+        // Cortex parity: zero is a real value the operator's PromQL needs to
+        // filter (`ifHighSpeed > 0 ? … : ifSpeed`); preserving it is correct.
+        Sample s = sample(ImmutableMetric.builder()
+                .intrinsicTag("name", "ifHCInOctets")
+                .intrinsicTag("resourceId", "node[1].interfaceSnmp[eth0]")
+                .externalTag("ifSpeed",     "0")
+                .externalTag("ifHighSpeed", "0"));
+        MappedSample out = rawModeMapper().map(s);
+        assertThat(out.labels()).containsEntry("ifSpeed",     "0");
+        assertThat(out.labels()).containsEntry("ifHighSpeed", "0");
+        assertThat(out.labels()).doesNotContainKey("if_speed");
+    }
+
+    @Test
+    void if_speed_raw_mode_neither_present_emits_nothing() {
+        Sample s = sample(ImmutableMetric.builder()
+                .intrinsicTag("name", "x")
+                .intrinsicTag("resourceId", "node[1].nodeSnmp[]"));
+        MappedSample out = rawModeMapper().map(s);
+        assertThat(out.labels()).doesNotContainKey("ifSpeed");
+        assertThat(out.labels()).doesNotContainKey("ifHighSpeed");
+        assertThat(out.labels()).doesNotContainKey("if_speed");
+    }
+
+    @Test
+    void if_speed_raw_mode_consumed_keys_prevent_attr_double_emission() {
+        // labels.include = * walks every source-tag and emits any not already
+        // consumed. Both modes must mark ifSpeed/ifHighSpeed consumed so the
+        // include pass does not re-emit them under any alias and no
+        // onms_extattr_* prefix-emission duplicates them.
+        PrometheusRemoteWriterConfig c = defaultConfig();
+        c.setIfSpeedMode("raw");
+        c.setLabelsInclude("*");
+        MappedSample out = new LabelMapper(c).map(interfaceSample());
+        assertThat(out.labels()).containsEntry("ifSpeed",     "4294967295");
+        assertThat(out.labels()).containsEntry("ifHighSpeed", "1000");
+        assertThat(out.labels()).doesNotContainKey("onms_extattr_ifSpeed");
+        assertThat(out.labels()).doesNotContainKey("onms_extattr_ifHighSpeed");
+    }
+
+    @Test
+    void if_speed_normalized_mode_consumed_keys_prevent_attr_double_emission() {
+        PrometheusRemoteWriterConfig c = defaultConfig();
+        c.setLabelsInclude("*");
+        MappedSample out = new LabelMapper(c).map(interfaceSample());
+        assertThat(out.labels()).containsEntry("if_speed", "1000000000");
+        assertThat(out.labels()).doesNotContainKey("ifSpeed");
+        assertThat(out.labels()).doesNotContainKey("ifHighSpeed");
+        assertThat(out.labels()).doesNotContainKey("onms_extattr_ifSpeed");
+        assertThat(out.labels()).doesNotContainKey("onms_extattr_ifHighSpeed");
+    }
+
+    @Test
+    void if_speed_raw_mode_skips_whitespace_only_source_values() {
+        // Source-presence filter — whitespace-only ifSpeed / ifHighSpeed are
+        // dropped (not emitted verbatim) so a misconfigured upstream agent
+        // can't stuff arbitrary text into a series-identity label and blow up
+        // cardinality. Same grammar as IfSpeedNormalizer.parseNonNegative.
+        Sample s = sample(ImmutableMetric.builder()
+                .intrinsicTag("name", "ifHCInOctets")
+                .intrinsicTag("resourceId", "node[1].interfaceSnmp[eth0]")
+                .externalTag("ifSpeed",     "   ")
+                .externalTag("ifHighSpeed", "  "));
+        MappedSample out = rawModeMapper().map(s);
+        assertThat(out.labels()).doesNotContainKey("ifSpeed");
+        assertThat(out.labels()).doesNotContainKey("ifHighSpeed");
+        assertThat(out.labels()).doesNotContainKey("if_speed");
+    }
+
+    @Test
+    void if_speed_raw_mode_skips_non_numeric_source_values() {
+        Sample s = sample(ImmutableMetric.builder()
+                .intrinsicTag("name", "ifHCInOctets")
+                .intrinsicTag("resourceId", "node[1].interfaceSnmp[eth0]")
+                .externalTag("ifSpeed",     "abc")
+                .externalTag("ifHighSpeed", "fast"));
+        MappedSample out = rawModeMapper().map(s);
+        assertThat(out.labels()).doesNotContainKey("ifSpeed");
+        assertThat(out.labels()).doesNotContainKey("ifHighSpeed");
+    }
+
+    @Test
+    void if_speed_raw_mode_skips_negative_source_values() {
+        Sample s = sample(ImmutableMetric.builder()
+                .intrinsicTag("name", "ifHCInOctets")
+                .intrinsicTag("resourceId", "node[1].interfaceSnmp[eth0]")
+                .externalTag("ifSpeed",     "-100")
+                .externalTag("ifHighSpeed", "-1"));
+        MappedSample out = rawModeMapper().map(s);
+        assertThat(out.labels()).doesNotContainKey("ifSpeed");
+        assertThat(out.labels()).doesNotContainKey("ifHighSpeed");
+    }
+
+    @Test
+    void if_speed_raw_mode_filter_is_per_label_not_pair() {
+        // One present-and-parseable, one garbage → only the parseable one is
+        // emitted. The filter operates per source-key, not as an all-or-nothing
+        // pair.
+        Sample s = sample(ImmutableMetric.builder()
+                .intrinsicTag("name", "ifHCInOctets")
+                .intrinsicTag("resourceId", "node[1].interfaceSnmp[eth0]")
+                .externalTag("ifSpeed",     "100000000")
+                .externalTag("ifHighSpeed", "garbage"));
+        MappedSample out = rawModeMapper().map(s);
+        assertThat(out.labels()).containsEntry("ifSpeed", "100000000");
+        assertThat(out.labels()).doesNotContainKey("ifHighSpeed");
+    }
+
+    @Test
+    void full_default_label_set_in_raw_mode_with_full_fixture() {
+        // Spec scenario: "Full default-label emission in raw mode"
+        // (specs/tss-plugin/spec.md). Asserts the canonical default-label set
+        // emitted from the full source-tag fixture: every default label is
+        // emitted exactly once, ifSpeed/ifHighSpeed replace if_speed, and the
+        // consumed-source-keys set prevents double emission.
+        MappedSample out = rawModeMapper().map(fullFixtureSample());
+        // Mode-conditional rows
+        assertThat(out.labels()).containsEntry("ifSpeed",     "4294967295");
+        assertThat(out.labels()).containsEntry("ifHighSpeed", "1000");
+        assertThat(out.labels()).doesNotContainKey("if_speed");
+        // Mode-invariant default-label set
+        assertThat(out.labels())
+            .containsEntry("__name__",         "ifHCInOctets")
+            .containsEntry("resourceId",       "nodeSource[NOC:router-42].interfaceSnmp[eth0]")
+            .containsEntry("node",             "NOC:router-42")
+            .containsEntry("instance",         "NOC:router-42")
+            .containsEntry("foreign_source",   "NOC")
+            .containsEntry("foreign_id",       "router-42")
+            .containsEntry("node_label",       "router-42.example.com")
+            .containsEntry("location",         "default")
+            .containsEntry("if_name",          "eth0")
+            .containsEntry("if_descr",         "GigabitEthernet0/0")
+            .containsEntry("resource_type",    "interfaceSnmp")
+            .containsEntry("resource_instance","eth0")
+            .containsEntry("job",              "snmp")
+            .containsEntry("onms_cat_Routers",         "true")
+            .containsEntry("onms_cat_ProductionSites", "true");
+    }
+
+    private static LabelMapper rawModeMapper() {
+        PrometheusRemoteWriterConfig c = defaultConfig();
+        c.setIfSpeedMode("raw");
+        return new LabelMapper(c);
+    }
+
     @Test
     void mtype_meta_tag_emits_mtype_label() {
         // mtype is load-bearing for OpenNMS late-aggregation. The OpenNMS

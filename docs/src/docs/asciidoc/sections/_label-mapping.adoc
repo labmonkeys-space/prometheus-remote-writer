@@ -25,7 +25,9 @@ the corresponding source data is available:
 | `resource_instance`    | parsed from `resourceId`                | e.g. `en0`, `1`, or empty for node-level.
 | `if_name`              | external `ifName`                       |
 | `if_descr`             | external `ifDescr`                      |
-| `if_speed`             | derived                                 | Bits-per-second: `ifHighSpeed × 1_000_000` when non-zero, else `ifSpeed`.
+| `if_speed`             | derived                                 | *Default mode (`labels.if-speed-mode = normalized`).* Bits-per-second: `ifHighSpeed × 1_000_000` when non-zero, else `ifSpeed`. Replaced by two raw labels in `raw` mode — see next two rows.
+| `ifSpeed`              | external `ifSpeed`                      | *Only when `labels.if-speed-mode = raw`.* SNMP `ifSpeed` source value verbatim (bps, 32-bit-capped at ~4.29 Gbps). Cortex-compatible spelling and value semantics. Reserved against `labels.rename` / `labels.copy` targets in both modes.
+| `ifHighSpeed`          | external `ifHighSpeed`                  | *Only when `labels.if-speed-mode = raw`.* SNMP `ifHighSpeed` source value verbatim (Mbps). Cortex-compatible. Reserved against `labels.rename` / `labels.copy` targets in both modes.
 | `onms_cat_<name>`      | surveillance categories                 | One label per category, value `"true"`.
 | `mtype`                | meta tag `MetaTagNames.mtype`           | Metric type (`gauge`, `counter`, `count`, `rate`, `timestamp`). Set by the OpenNMS writer on every Sample. *Load-bearing for graph rendering* — see <<mtype-roundtrip>>.
 | `onms_attr_<key>`      | plain-key Sample meta tags              | MATE-scope tags (`${node:…}` / `${asset:…}` / etc.) and any other plain-key meta tag. One label per plain-key meta tag — see <<attr-roundtrip>>.
@@ -217,6 +219,18 @@ pair. For interface descriptors:
 org.opennms.timeseries.tin.metatags.tag.ifName  = ${interface:if-name}
 org.opennms.timeseries.tin.metatags.tag.ifDescr = ${interface:if-description}
 ----
+
+[NOTE]
+.`labels.if-speed-mode = raw` needs SNMP-speed source tags
+====
+Operators planning to use the cortex-compat `labels.if-speed-mode = raw`
+emission also need `ifSpeed` and `ifHighSpeed` source tags in their
+metatag config — without them, the raw-mode emission has nothing to
+emit. The two normalized-mode source attributes are read from the same
+SNMP `ifTable` / `ifXTable` columns; check your OpenNMS MATE docs for
+the exact attribute names available in your Horizon release before
+adding them here.
+====
 
 === Surveillance categories
 
@@ -429,6 +443,7 @@ targets:
 | Exact  | `location`                                            | OpenNMS monitoring location.
 | Exact  | `resource_type`, `resource_instance`                  | Parsed from `resourceId`.
 | Exact  | `if_name`, `if_descr`, `if_speed`                     | SNMP interface descriptors.
+| Exact  | `ifSpeed`, `ifHighSpeed`                              | Always reserved; emitted as defaults when `labels.if-speed-mode = raw`. Reserved unconditionally so a hot-reload from `normalized` to `raw` cannot unmask a previously-accepted rename collision. To recover cortex-compatible interface-speed labels, set `labels.if-speed-mode = raw` instead of a rename.
 | Exact  | `job`, `instance`                                     | Default labels (since 0.2.0).
 | Exact  | `onms_instance_id`                                    | Multi-instance origin stamp (reserved even when `instance.id` is unset).
 | Prefix | `onms_cat_*`                                          | Per-surveillance-category expansion.
@@ -491,14 +506,33 @@ labels.rename = \
   foreign_source -> foreignSource, \
   foreign_id     -> foreignId,     \
   if_name        -> ifName,        \
-  if_descr       -> ifDescr,       \
-  if_speed       -> ifSpeed
+  if_descr       -> ifDescr
+
+labels.if-speed-mode = raw
 ----
 
 Restart the plugin. Subsequent samples emit the cortex-style spellings;
-the snake_case names disappear from the wire. The recipe is validated
-against the reserved-target rules in <<reserved-rename-copy-targets>> —
-none of the camelCase targets collide.
+the snake_case names disappear from the wire.
+
+The `labels.if-speed-mode = raw` directive matches cortex's two-label-raw
+emission for SNMP interface speed: the plugin emits `ifSpeed` and
+`ifHighSpeed` as separate labels with the SNMP source values verbatim
+(no normalization, no `if_speed` label). This covers the
+value-semantics gap that the rename-only approach can't bridge — high-
+speed interfaces emit `ifSpeed=<32-bit-capped bps>` and `ifHighSpeed=<Mbps>`
+exactly as cortex did. The `ifSpeed` and `ifHighSpeed` label names are
+reserved against `labels.rename` / `labels.copy` targets in **both**
+modes — see <<reserved-rename-copy-targets>>.
+
+[NOTE]
+.WAL flip semantics
+====
+Plan a brief flip window when changing `labels.if-speed-mode` — the WAL
+drains in seconds at default cadence; pre-flip samples flush under the
+old mode, post-flip samples emit under the new mode. Operators see
+briefly mixed-mode series identity at the backend during the flip; old
+series age out of retention naturally.
+====
 
 === What this rename recipe gets you, and what it doesn't
 
@@ -515,7 +549,7 @@ none of the camelCase targets collide.
 | `foreignId`     | restored                    | Same value as cortex.
 | `ifName`        | restored                    | Same value as cortex.
 | `ifDescr`       | restored                    | Same value as cortex.
-| `ifSpeed`       | restored *by name*, *one* label | *Value differs for high-speed interfaces.* Cortex emitted both `ifSpeed` and `ifHighSpeed` raw; this plugin emits a single normalized value: `ifHighSpeed × 1_000_000` when non-zero, else `ifSpeed`. Dashboards that read `ifSpeed` for non-high-speed interfaces see no change; for high-speed interfaces they now get a bps value, not Mbps. There is no `ifHighSpeed` label to recover.
+| `ifSpeed`, `ifHighSpeed` | restored *byte-for-byte* | *Resolved via `labels.if-speed-mode = raw`.* Both labels are emitted with their SNMP source values verbatim — same spellings, same value semantics, same per-interface label set as cortex. The `if_speed` label is not emitted in raw mode. (In default `normalized` mode this plugin would emit a single bps-normalized `if_speed` instead, with high-speed interfaces seeing a value-semantics gap; the knob exists for cortex-fielded dashboards that pre-date this plugin's normalization.)
 | `nodeId`        | *not directly recoverable*  | This plugin consumes `nodeId` and emits `node` instead. The closest substitute is `labels.copy = node -> nodeId`, but the *value* differs: this plugin's `node` is `<foreignSource>:<foreignId>` when both are set, falling back to the numeric dbId; cortex's `nodeId` was always the raw numeric dbId. Dashboards that expect a purely numeric value must be updated.
 | `categories`    | *structurally different*    | Cortex emitted a single `categories` label with comma-separated values. This plugin emits one `onms_cat_<sanitized-name>="true"` label per category — a per-category boolean, not a string. Filters like `categories=~".*Server.*"` must be rewritten to `{onms_cat_Server="true"}` (using whatever sanitized form the category name takes). No rename or copy directive can bridge this difference; it's a dashboard-level rewrite.
 |===

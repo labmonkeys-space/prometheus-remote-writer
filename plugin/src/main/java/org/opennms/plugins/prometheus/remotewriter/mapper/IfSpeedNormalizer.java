@@ -42,6 +42,18 @@ public final class IfSpeedNormalizer {
         return null;
     }
 
+    /**
+     * Predicate over the same input grammar {@link #parseNonNegative} accepts:
+     * non-null, non-empty, parseable as a non-negative {@code long} (after
+     * trimming). Used by {@link LabelMapper}'s raw-mode emission to apply the
+     * same source-presence filter the normalized path applies — so whitespace-
+     * only, non-numeric, or negative source values are dropped instead of being
+     * emitted verbatim into a series-identity label.
+     */
+    static boolean isParseableNonNegative(String raw) {
+        return parseNonNegative(raw) != null;
+    }
+
     private static Long parseNonNegative(String raw) {
         if (raw == null || raw.isEmpty()) return null;
         try {

@@ -46,6 +46,21 @@ public class PrometheusRemoteWriterConfig {
      */
     public enum DiscoveryStrategy { SINGLE_PASS, LABEL_VALUES_FIRST }
 
+    /**
+     * Interface-speed label emission mode. {@code NORMALIZED} (default)
+     * emits a single {@code if_speed} label in bits per second, computed as
+     * {@code ifHighSpeed × 1_000_000} when non-zero, else {@code ifSpeed} —
+     * the v0.4.x default and the right shape for greenfield Prometheus
+     * dashboards. {@code RAW} emits the source tags verbatim as two labels
+     * ({@code ifSpeed} and {@code ifHighSpeed}) and skips {@code if_speed}
+     * entirely; matches the AGPL {@code opennms-cortex-tss-plugin}'s wire
+     * shape so cortex-fielded dashboards and alert rules keep working
+     * without a value-semantics rewrite. The two camelCase label names
+     * are reserved against {@code labels.rename}/{@code labels.copy}
+     * targets in both modes.
+     */
+    public enum IfSpeedMode { NORMALIZED, RAW }
+
     // --- Endpoint ---
     private String writeUrl;
     private String readUrl;
@@ -132,6 +147,7 @@ public class PrometheusRemoteWriterConfig {
     private String labelsRename;
     private String labelsCopy;
     private String metricPrefix;
+    private IfSpeedMode ifSpeedMode = IfSpeedMode.NORMALIZED;
 
     // --- Parsed-map caches ---
     // labelsRenameMap() / labelsCopyMap() are called multiple times per
@@ -302,6 +318,27 @@ public class PrometheusRemoteWriterConfig {
 
         validateWal();
         validateDiscovery();
+        validateIfSpeedMode();
+    }
+
+    /**
+     * Validate the {@code labels.if-speed-mode} knob. Mode parsing already
+     * happened in {@link #setIfSpeedMode(String)} (which throws on bad
+     * input); this method emits a one-shot WARN when the operator set a
+     * {@code labels.rename = if_speed -> X} entry while the mode is
+     * {@code raw} (the rename is a no-op there since {@code if_speed} is
+     * not emitted in raw mode). Don't reject — operators flipping the mode
+     * mid-deployment may keep the rename briefly during transition.
+     */
+    private void validateIfSpeedMode() {
+        if (ifSpeedMode == IfSpeedMode.RAW
+                && labelsRenameMap().containsKey("if_speed")) {
+            org.slf4j.LoggerFactory.getLogger(PrometheusRemoteWriterConfig.class).warn(
+                "labels.rename = if_speed -> {} is a no-op when labels.if-speed-mode=raw, "
+                + "since 'if_speed' is not emitted in raw mode. Remove the rename or set "
+                + "labels.if-speed-mode=normalized.",
+                labelsRenameMap().get("if_speed"));
+        }
     }
 
     /**
@@ -420,9 +457,14 @@ public class PrometheusRemoteWriterConfig {
                 + "[a-zA-Z_][a-zA-Z0-9_]*.";
         }
         if (LabelMapper.RESERVED_LABEL_NAMES.contains(to)) {
-            return primitiveKey + " target '" + to + "' collides with the default label '" + to
+            String base = primitiveKey + " target '" + to + "' collides with the default label '" + to
                 + "'. The plugin already emits this label; " + verbIng + " onto it would silently "
                 + "clobber the default value. Pick a different 'to' name.";
+            if ("ifSpeed".equals(to) || "ifHighSpeed".equals(to)) {
+                base += " To recover cortex-compatible interface-speed labels,"
+                      + " set 'labels.if-speed-mode = raw' instead of a rename.";
+            }
+            return base;
         }
         for (String prefix : LabelMapper.RESERVED_LABEL_PREFIXES) {
             if (to.startsWith(prefix)) {
@@ -655,6 +697,7 @@ public class PrometheusRemoteWriterConfig {
         diffStr(out, "labels.exclude",            other.labelsExclude,         labelsExclude);
         diffStr(out, "labels.rename",             other.labelsRename,          labelsRename);
         diffStr(out, "labels.copy",               other.labelsCopy,            labelsCopy);
+        diffStr(out, "labels.if-speed-mode",      other.ifSpeedMode.name(),    ifSpeedMode.name());
         diffStr(out, "metric.prefix",             other.metricPrefix,          metricPrefix);
         diffBool(out, "metadata.enabled",         other.metadataEnabled,       metadataEnabled);
         diffStr(out, "metadata.include",          other.metadataInclude,       metadataInclude);
@@ -786,6 +829,30 @@ public class PrometheusRemoteWriterConfig {
         }
     }
 
+    public void setIfSpeedMode(String v) {
+        if (isBlank(v)) {
+            ifSpeedMode = IfSpeedMode.NORMALIZED;
+            return;
+        }
+        // Locale.ROOT — under tr_TR, default-locale toUpperCase() turns lowercase
+        // 'i' into dotted-İ which IfSpeedMode.valueOf would reject. Same precedent
+        // as setDiscoveryStrategy's toLowerCase(Locale.ROOT).
+        String normalized = v.trim().toUpperCase(java.util.Locale.ROOT).replace('-', '_');
+        try {
+            ifSpeedMode = IfSpeedMode.valueOf(normalized);
+        } catch (IllegalArgumentException e) {
+            throw new IllegalStateException(
+                "labels.if-speed-mode must be 'normalized' or 'raw', got: " + v);
+        }
+    }
+
+    // Aries Blueprint requires at least one setter to match the getter's
+    // return type. Same pattern as setMetadataCase / setDiscoveryStrategy /
+    // setWireProtocolVersion(int).
+    public void setIfSpeedMode(IfSpeedMode v) {
+        ifSpeedMode = v == null ? IfSpeedMode.NORMALIZED : v;
+    }
+
     // --- WAL setters ---------------------------------------------------------
 
     public void setWalEnabled(boolean v)        { walEnabled = v; }
@@ -910,6 +977,7 @@ public class PrometheusRemoteWriterConfig {
     public String  getLabelsRename()          { return labelsRename; }
     public String  getLabelsCopy()            { return labelsCopy; }
     public String  getMetricPrefix()          { return metricPrefix; }
+    public IfSpeedMode getIfSpeedMode()       { return ifSpeedMode; }
     public boolean isMetadataEnabled()        { return metadataEnabled; }
     public String  getMetadataInclude()       { return metadataInclude; }
     public String  getMetadataExclude()       { return metadataExclude; }
