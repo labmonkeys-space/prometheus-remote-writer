@@ -60,37 +60,22 @@ Core and use the rest of this guide.
                 └──────────────────────┘
 ....
 
-== Quick comparison vs. the legacy Cortex TSS plugin
-
-OpenNMS ships a Prometheus integration today via
-https://github.com/OpenNMS/opennms-cortex-tss-plugin[`opennms-cortex-tss-plugin`].
-That plugin writes numeric samples to a Prometheus backend but keeps
-OpenNMS resource context (node label, foreign source, categories, asset
-record, interface descriptors) in a separate OpenNMS key-value store. To
-turn opaque `resourceId` labels back into human-readable resources, you
-need the
-https://github.com/OpenNMS/grafana-plugin[OpenNMS Plugin for Grafana],
-which round-trips to the OpenNMS REST API at query time.
-
-This plugin fixes that at the write path. Resource context is pushed to
-the backend as first-class Prometheus labels, so PromQL — on any vanilla
-Grafana Prometheus data source — works end-to-end with no OpenNMS
-query-time dependency.
-
 == Supported backends at a glance
 
 [cols="2,1,1,2",options="header"]
 |===
 | Backend                  | Remote Write v1 | Remote Write v2 | Notes
-| Prometheus 3.x           | ✅              | ✅              | v2 receiver default-enabled
+| Prometheus 3.x           | ✅              | ✅              | v2 receiver default-enabled; covered by Testcontainers IT
 | Prometheus 2.55+         | ✅              | ✅              | Receiver must be enabled with `--web.enable-remote-write-receiver`
 | Prometheus 2.50–2.54     | ✅              | ⚠ silently drops | Stay on v1 — see <<wire-protocols>>
-| Grafana Mimir 2.10+      | ✅              | ✅              |
-| VictoriaMetrics          | ✅              | ✅ (with v2 ingest) |
-| Cortex                   | ✅              | ✅              |
-| Thanos Receive           | ✅              | ✅              |
-| Grafana Cloud            | ✅              | ✅              |
+| Grafana Mimir 2.10+      | ✅              | ✅              | Covered by e2e smoke
+| VictoriaMetrics          | ✅              | ✅ (with v2 ingest) | Covered by e2e smoke
+| Cortex                   | ✅              | ✅              | Compatible — not in CI
+| Thanos Receive           | ✅              | ✅              | Compatible — not in CI
+| Grafana Cloud            | ✅              | ✅              | Compatible — not in CI
 |===
+
+See <<backends>> for the full CI matrix and per-backend `read.url` shapes.
 
 == Reference specifications
 

@@ -489,7 +489,7 @@ read-side reconstruction.
 == Migration from `opennms-cortex-tss-plugin`
 
 If you're moving from the AGPL
-https://github.com/OpenNMS-Plugins/opennms-cortex-tss-plugin[`opennms-cortex-tss-plugin`]
+https://github.com/OpenNMS/opennms-cortex-tss-plugin[`opennms-cortex-tss-plugin`]
 and want existing dashboards and alert rules to keep working without a
 wholesale label rewrite, the camelCase label spellings cortex emitted
 (`nodeLabel`, `foreignSource`, `foreignId`, `ifName`, `ifDescr`,
