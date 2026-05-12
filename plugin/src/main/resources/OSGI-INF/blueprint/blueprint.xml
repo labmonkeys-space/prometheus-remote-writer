@@ -137,6 +137,24 @@
     </bean>
 
     <!--
+        Operator-supplied custom HTTP headers — prefix-scanned namespace
+        http.headers.<name> = <value>. Sibling to the scalar config bean
+        above; out of the BlueprintWiringTest 1:1 setter-binding contract by
+        design, because the cardinality of the namespace is operator-driven.
+
+        Aries Blueprint's <cm:managed-properties> delivers the full property
+        dictionary at the PID to the bean's update-method. The bean filters
+        by the http.headers. prefix, validates, and exposes an immutable
+        Map<String,String> via headers().
+    -->
+    <bean id="httpHeadersConfig"
+          class="org.opennms.plugins.prometheus.remotewriter.config.HttpHeadersConfig">
+        <cm:managed-properties persistent-id="org.opennms.plugins.tss.prometheusremotewriter"
+                                update-strategy="component-managed"
+                                update-method="updated"/>
+    </bean>
+
+    <!--
         The TimeSeriesStorage service. OpenNMS discovers it through the
         integration-api service registry and uses it as the active TSS when
         org.opennms.timeseries.strategy=integration.
@@ -146,6 +164,7 @@
           init-method="start"
           destroy-method="stop">
         <argument ref="config"/>
+        <argument ref="httpHeadersConfig"/>
     </bean>
 
     <!--

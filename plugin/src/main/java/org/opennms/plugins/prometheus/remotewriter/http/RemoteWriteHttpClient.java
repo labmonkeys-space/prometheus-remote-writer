@@ -9,6 +9,8 @@ package org.opennms.plugins.prometheus.remotewriter.http;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
+import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -20,6 +22,7 @@ import okhttp3.Request;
 import okhttp3.RequestBody;
 import okhttp3.Response;
 import okhttp3.ResponseBody;
+import org.opennms.plugins.prometheus.remotewriter.config.HttpHeadersConfig;
 import org.opennms.plugins.prometheus.remotewriter.config.PrometheusRemoteWriterConfig;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -66,6 +69,7 @@ public final class RemoteWriteHttpClient {
 
     private final OkHttpClient http;
     private final PrometheusRemoteWriterConfig config;
+    private final HttpHeadersConfig httpHeadersConfig;
 
     private final AtomicLong writesSuccessful     = new AtomicLong();
     private final AtomicLong writes4xx            = new AtomicLong();
@@ -73,8 +77,19 @@ public final class RemoteWriteHttpClient {
     private final AtomicLong writesTransportError = new AtomicLong();
     private final AtomicLong bytesWritten         = new AtomicLong();
 
+    /**
+     * Test-friendly constructor — no operator-supplied custom headers.
+     * Production code wires the two-arg form so headers defined under
+     * {@code http.headers.*} reach the wire.
+     */
     public RemoteWriteHttpClient(PrometheusRemoteWriterConfig config) {
+        this(config, HttpHeadersConfig.empty());
+    }
+
+    public RemoteWriteHttpClient(PrometheusRemoteWriterConfig config,
+                                 HttpHeadersConfig httpHeadersConfig) {
         this.config = config;
+        this.httpHeadersConfig = Objects.requireNonNull(httpHeadersConfig, "httpHeadersConfig");
         Dispatcher dispatcher = new Dispatcher();
         dispatcher.setMaxRequests(config.getHttpMaxConnections());
         dispatcher.setMaxRequestsPerHost(config.getHttpMaxConnections());
@@ -220,6 +235,20 @@ public final class RemoteWriteHttpClient {
         }
         if (config.hasTenant()) {
             b.addHeader("X-Scope-OrgID", config.getTenantOrgId());
+        }
+        // Operator-supplied custom headers — applied AFTER managed headers.
+        // HttpHeadersConfig.validate() has already excluded reserved names,
+        // so no conflict can arise here. User-Agent is the one allowed
+        // override; OkHttp's addHeader is additive and Request.Builder
+        // semantics on a duplicate header overwrites the earlier value
+        // (we use the .header() vs .addHeader() distinction explicitly
+        // for User-Agent to ensure the operator value wins).
+        for (Map.Entry<String, String> h : httpHeadersConfig.headers().entrySet()) {
+            if ("User-Agent".equalsIgnoreCase(h.getKey())) {
+                b.header(h.getKey(), h.getValue());
+            } else {
+                b.addHeader(h.getKey(), h.getValue());
+            }
         }
         b.post(RequestBody.create(body, contentType));
         return b.build();

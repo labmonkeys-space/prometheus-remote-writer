@@ -67,6 +67,155 @@ Used when `wal.enabled=false` (the default). When the WAL is enabled,
 | `http.max-connections`       | `16`    | Per-route OkHttp connection pool size.
 |===
 
+[#custom-http-headers]
+== Custom HTTP headers
+
+Operators can attach arbitrary HTTP headers to every outbound request — the
+write client AND the read client both receive the same set. The use cases
+this unlocks: header-based auth schemes outside Basic/Bearer (Cloudflare
+Access service tokens, vendor API keys), custom tenant routing headers,
+and per-instance `User-Agent` overrides for audit-log distinguishability.
+
+[cols="3,1,4",options="header"]
+|===
+| Key                                  | Default | Purpose
+
+| `http.headers.<header-name>`         | _(none)_ | Each property whose key starts with `http.headers.` is attached as an outbound HTTP header. The suffix after the prefix is the header name; the property value is the header value.
+|===
+
+Properties without the prefix are ignored. Multiple headers are configured
+with multiple properties — there is no delimited-string form.
+
+[NOTE]
+====
+Operator casing on header names is preserved on the request builder, but
+HTTP/2 mandates lowercase header names on the wire (RFC 7540 §8.1.2), and
+OkHttp negotiates HTTP/2 by default with any backend that supports it.
+Operators who care about wire-side header casing (rare — most servers
+match case-insensitively) must verify their backend negotiates HTTP/1.1.
+====
+
+=== Example: Cloudflare Access service tokens
+
+[source,properties]
+----
+http.headers.cf-access-client-id     = 9a4f8c3a2e...
+http.headers.cf-access-client-secret = 7c8eb18f...
+----
+
+Both headers are attached to every outbound request (writes AND reads). A
+Cloudflare-Access-protected Mimir, VictoriaMetrics, or Grafana Cloud
+endpoint will accept both directions transparently.
+
+=== Reserved header names
+
+The following header names are reserved and the plugin refuses to start if
+any appear under `http.headers.*` (case-insensitive comparison):
+
+[cols="2,3",options="header"]
+|===
+| Name                                 | Why reserved
+
+| `Content-Type`                       | Set per `wire.protocol-version`.
+| `Content-Encoding`                   | Must be `snappy` (protocol invariant).
+| `Content-Length`                     | Recomputed by OkHttp from the body.
+| `X-Prometheus-Remote-Write-Version`  | Set per `wire.protocol-version`.
+| `Transfer-Encoding`, `Host`, `Connection`, `Upgrade` | Managed by the HTTP/HTTP2 layer.
+| `Authorization`                      | Managed by `auth.basic.*` / `auth.bearer.token`. Use those instead.
+| `X-Scope-OrgID`                      | Managed by `tenant.org-id`. Use that instead.
+|===
+
+`User-Agent` is allowed; an operator-supplied value **overrides** the
+plugin default — useful for distinguishing multiple OpenNMS instances in a
+shared backend's audit log:
+
+[source,properties]
+----
+http.headers.User-Agent = onms-edge-site-7/1.0
+----
+
+=== Validation
+
+Validation runs at bean activation; invalid configuration fails to start
+the plugin with a name-only diagnostic in the Karaf log (the offending
+*value* is never echoed — secret hygiene).
+
+* Header names must match the RFC 7230 token grammar: letters, digits, and
+  `!#$%&'*+-.^_\`|~` only. No whitespace; no `:`, `(`, `)`, `,`, `/`, `<`,
+  `=`, `>`, `?`, `@`, `[`, `\`, `]`, `{`, `}`.
+* Header values must be non-empty after trimming leading and trailing
+  whitespace.
+* Header values must not contain CR or LF (CRLF-injection guard).
+* Header values must be printable ASCII (`0x20`–`0x7E`) plus horizontal
+  tab. Operators with binary tokens should base64-encode at the source.
+
+=== Karaf shell editing
+
+[source]
+----
+karaf@root> config:edit org.opennms.plugins.tss.prometheusremotewriter
+karaf@root> property-set http.headers.cf-access-client-id 9a4f...
+karaf@root> property-set http.headers.cf-access-client-secret 7c8e...
+karaf@root> config:update
+----
+
+Configuration reloads atomically on save; the next outbound request
+carries the new header set. No bundle restart required.
+
+=== Startup confirmation
+
+When `http.headers.*` is non-empty, the plugin emits an `INFO` log line
+listing the detected header names (values redacted) so operators can
+verify intent without round-tripping through the backend:
+
+[source]
+----
+INFO HttpHeadersConfig - Custom HTTP headers attached: cf-access-client-id (value redacted), cf-access-client-secret (value redacted)
+----
+
+A property-name typo (e.g., `http.header.foo` missing the `s`) shows up
+here as a missing entry; check the log immediately after activation.
+
+[NOTE]
+====
+**Secrets are stored cleartext in `{cfg-file}`.** The plugin does not
+currently expand `${env:NAME}` in configuration values — header values,
+like `auth.basic.password` and `auth.bearer.token`, must be literal
+cleartext. Use one of:
+
+* Restrict filesystem permissions on `{cfg-file}` (owner-readable only).
+* Deploy-time templating via `envsubst`, an init container, or a
+  Kubernetes `ConfigMap` rendered from a `Secret`:
++
+[source,shell]
+----
+envsubst < cortex.cfg.template > /opennms/etc/{cfg-file}
+----
++
+[source,properties]
+----
+# cortex.cfg.template — $CLIENT_ID and $CLIENT_SECRET expanded at deploy time
+http.headers.cf-access-client-id     = $CLIENT_ID
+http.headers.cf-access-client-secret = $CLIENT_SECRET
+----
+
+Plugin-wide `${env:NAME}` resolution is tracked as a separate enhancement.
+====
+
+=== What is explicitly out of scope
+
+* **Environment-variable interpolation in values** — see the note above.
+* **Dynamic auth providers** (AWS SigV4, GCP Identity Tokens, OAuth
+  refresh) — request signing and token refresh require behavior beyond
+  static header attachment; a future enhancement.
+* **Multi-value headers** (same name, repeated, e.g. Accept-style). One
+  value per header name.
+* **Custom `Authorization:` schemes** — hard-rejected; file an
+  enhancement request with a real scheme spec if needed.
+* **Split write/read header sets** — single key drives both clients. Real
+  Zero-Trust deployments (Cloudflare Access, GCP IAP) gate both
+  endpoints with the same credentials, so this is the right shape today.
+
 == Read path
 
 [cols="2,1,4",options="header"]
