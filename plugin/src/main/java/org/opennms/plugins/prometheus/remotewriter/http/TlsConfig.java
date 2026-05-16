@@ -124,6 +124,12 @@ public final class TlsConfig {
     private static void applyInsecureSkipVerify(OkHttpClient.Builder builder) {
         logInsecureWarn();
         try {
+            // CodeQL flags this as java/insecure-trustmanager (CWE-295) and that
+            // is correct by the rule's letter — the TrustManager below accepts
+            // any certificate. The behavior is the documented intent of this
+            // opt-in mode (see the class javadoc); the alert is dismissed as
+            // "won't fix" with that justification. See:
+            // https://github.com/opennms-forge/prometheus-remote-writer/security/code-scanning/1
             X509TrustManager allTrusting = new X509TrustManager() {
                 @Override public void checkClientTrusted(X509Certificate[] chain, String authType) {}
                 @Override public void checkServerTrusted(X509Certificate[] chain, String authType) {}
