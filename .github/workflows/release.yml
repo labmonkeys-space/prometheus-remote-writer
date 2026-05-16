@@ -75,17 +75,41 @@ jobs:
         # the entire trust path on the workflow side. The maintainer's
         # private key only ever sits on their workstation (used at
         # `git tag -s` time, per RELEASING.md pre-flight).
+        #
+        # `git tag -v` returns 0 for ANY good signature by ANY imported
+        # key, including keys with no GPG web-of-trust. That is fine
+        # here — the trust assertion is "the key is on the maintainer's
+        # GitHub profile", not GPG's trust model. The asserted-key-count
+        # check below is what enforces "the .gpg fetch actually
+        # returned keys."
+        shell: bash
         run: |
+          set -euo pipefail
           TAG="${{ steps.resolve.outputs.tag }}"
           # Import all public keys registered on the maintainer's GitHub
           # profile. github.com/<user>.gpg is the canonical trust path.
-          curl -sSL "https://github.com/${RELEASE_MAINTAINER}.gpg" \
+          # --fail makes curl exit non-zero on 4xx/5xx; --retry guards
+          # against transient GitHub blips. Without --fail an HTTP 404
+          # (e.g., maintainer renamed) would silently feed an empty
+          # body into gpg --import.
+          curl --fail --silent --show-error --location \
+               --retry 3 --retry-delay 5 \
+               "https://github.com/${RELEASE_MAINTAINER}.gpg" \
             | gpg --import
+          # Belt-and-braces: confirm at least one public key actually
+          # landed in the keyring. Catches the corner case where the
+          # GitHub profile has zero keys (empty body, no keys imported,
+          # gpg exits 0).
+          KEY_COUNT=$(gpg --list-keys --with-colons | grep -c '^pub:')
+          if [ "$KEY_COUNT" -eq 0 ]; then
+            echo "::error::No public keys imported from https://github.com/${RELEASE_MAINTAINER}.gpg. Add a GPG key under your GitHub Settings → SSH and GPG keys before tagging." >&2
+            exit 1
+          fi
           # The Checkout step's `ref` may not have populated tag refs.
           # Fetch the tag explicitly so `git tag -v` can find it.
           git fetch origin "+refs/tags/${TAG}:refs/tags/${TAG}" --no-tags
           if ! git tag -v "${TAG}"; then
-            echo "::error::Tag ${TAG} is not signed by a key on github.com/${RELEASE_MAINTAINER}'s profile (or the signature does not verify). Sign with 'git tag -s' using a key registered on your GitHub profile and re-tag." >&2
+            echo "::error::Tag ${TAG} is not signed by a key on github.com/${RELEASE_MAINTAINER}.gpg (or the signature does not verify). Sign with 'git tag -s' using a key registered on github.com/${RELEASE_MAINTAINER}'s profile and re-tag." >&2
             exit 1
           fi
 
@@ -137,11 +161,21 @@ jobs:
         # inlined into Create GitHub Release) so the attestation step
         # can take subject-path against the final on-disk path.
         id: sbom
+        shell: bash
         run: |
+          set -euo pipefail
           VERSION="${{ steps.resolve.outputs.version }}"
           SBOM="prometheus-remote-writer-${VERSION}.cdx.json"
           if [ ! -f target/bom.json ]; then
             echo "::error::target/bom.json missing; the Generate SBOM step did not produce the expected file." >&2
+            exit 1
+          fi
+          # Validate the SBOM is well-formed JSON before we attest it.
+          # An empty or malformed bom.json would still get a valid
+          # provenance attestation over its SHA-256 — consumers would
+          # then see a "verified" file they cannot parse.
+          if ! jq empty target/bom.json >/dev/null 2>&1; then
+            echo "::error::target/bom.json is not valid JSON; refusing to attest a corrupt SBOM." >&2
             exit 1
           fi
           cp target/bom.json "$SBOM"
