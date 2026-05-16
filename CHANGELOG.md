@@ -33,7 +33,12 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the KAR and the SBOM. Authenticity, integrity, and signer identity
   are encoded in the build-provenance attestation; the standalone
   checksum and the public-key bundle are redundant under the new
-  trust model.
+  trust model. **Heads up for scripted consumers:** the URL
+  `https://github.com/opennms-forge/prometheus-remote-writer/releases/latest/download/KEYS`
+  will 404 once v0.5.0 lands (`latest` follows the newest release).
+  Pin to the explicit `v0.4.3` tag URL to keep the legacy path
+  working, or switch to `gh attestation verify` against the new
+  releases.
 - **The dedicated project signing key
   (`0x1FC793D7F2E3FDDD`) has been retired** for new signing
   operations. The maintainer's personal GitHub-registered GPG key

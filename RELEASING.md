@@ -52,12 +52,21 @@ Releases predating v0.5.0 were signed by a dedicated project GPG key
 `53BC D4E3 C0CC 9ACF 40F4  6669 1FC7 93D7 F2E3 FDDD`). Their release
 pages still carry the `KEYS` file, the `.asc` signatures, and the
 `.sha512` checksums. The verification flow for those releases is the
-one previously documented in this file (GPG-based) and remains valid
-indefinitely.
+GPG-based one documented in the historical RELEASING.md at the
+[`v0.4.3` tag](https://github.com/opennms-forge/prometheus-remote-writer/blob/v0.4.3/RELEASING.md#verifying-a-release)
+(import `KEYS`, cross-check the canonical fingerprint above, then
+`gpg --verify <file>.asc`) and remains valid indefinitely.
 
 The project key has been retired for *new* signing operations. It is
 not destroyed; it sits in the maintainer's keyring as a verifier of
 record for pre-v0.5.0 releases.
+
+> **Note on `releases/latest/download/KEYS`:** consumers who scripted
+> against `https://github.com/opennms-forge/prometheus-remote-writer/releases/latest/download/KEYS`
+> will see a 404 once v0.5.0 is published — `latest` resolves to the
+> newest release, which no longer ships `KEYS`. To pin to the last
+> release that does, use the explicit tag URL:
+> `…/releases/download/v0.4.3/KEYS`.
 
 ## Pre-flight checklist
 
@@ -180,6 +189,26 @@ This is idempotent — `gh release create` will fail if the release already
 exists, so delete the previous release and its asset first if you're
 recovering from a partial run.
 
+> **Heads up on partial-failure re-runs:** the workflow publishes
+> attestations *before* it creates the GitHub Release. If a re-run
+> reaches the attest steps again (i.e., you deleted the release but
+> not the attestations), each `actions/attest-build-provenance`
+> invocation produces a fresh attestation for the same artifact.
+> Verification still succeeds against any valid attestation, but the
+> repo's attestations endpoint accumulates duplicates and the
+> Sigstore transparency log shows extra entries. To avoid this,
+> delete only the GitHub Release (`gh release delete <tag>`) before
+> re-running; the attestation from the partial run remains usable.
+>
+> **Heads up on running the v0.5.0+ workflow against a pre-v0.5.0
+> tag** (e.g., `gh workflow run release.yml -f tag=v0.4.3`): the
+> tag-verify step imports keys from `github.com/<RELEASE_MAINTAINER>.gpg`,
+> but pre-v0.5.0 tags were signed by the retired project key, which
+> is **not** on the maintainer's GitHub profile. Verification will
+> fail. The supported way to re-issue a pre-v0.5.0 release is to
+> check out RELEASING.md and release.yml at the v0.4.3 tag and run
+> the legacy GPG-based flow against that historical workflow shape.
+
 ## Hotfix releases
 
 For a patch release (e.g. `v0.5.1`) on top of `v0.5.0`:
@@ -241,8 +270,18 @@ gh attestation verify \
 A successful verification prints the signer identity (the workflow
 path: `https://github.com/opennms-forge/prometheus-remote-writer/.github/workflows/release.yml@refs/tags/v0.5.0`),
 the predicate type (`https://slsa.dev/provenance/v1`), and the commit
-SHA the artifact was built from. Pin against `--signer-workflow .github/workflows/release.yml`
-for an extra defense-in-depth assertion.
+SHA the artifact was built from. For an extra defense-in-depth
+assertion, pin against the workflow ref via `--signer-workflow`:
+
+```bash
+gh attestation verify \
+  prometheus-remote-writer-kar-${TAG#v}.kar \
+  --repo opennms-forge/prometheus-remote-writer \
+  --signer-workflow opennms-forge/prometheus-remote-writer/.github/workflows/release.yml
+```
+
+The `--signer-workflow` flag takes an `[host/]<owner>/<repo>/<path>/<to>/<workflow>`
+form; a bare workflow path will not match.
 
 ### Air-gap verification
 
@@ -292,11 +331,17 @@ transparency log.
 
 For the **tag** (not the artifact): trust resolves through
 `github.com/<RELEASE_MAINTAINER>.gpg`. A consumer who trusts GitHub to
-correctly serve that file gets a valid signature check. Out-of-band
-fingerprint cross-checks (e.g. via a maintainer's personal site or a
-public keyserver) are an additional defense layer if the GitHub
-trust path is insufficient for the threat model — but the workflow
-itself reduces to GitHub-trust either way.
+correctly serve that file gets a valid signature check. Note that
+the `<RELEASE_MAINTAINER>` value itself lives in the workflow file in
+this repository — so a repo-write compromise can both rewrite the
+maintainer pointer *and* forge a new attestation. The tag-verify
+path is not a fully-independent second factor on the CI side; it is
+a defense against a maintainer who forgot `git tag -s` or used the
+wrong key. Out-of-band fingerprint cross-checks (e.g. via a
+maintainer's personal site or a public keyserver) are an additional
+defense layer if the GitHub trust path is insufficient for the
+threat model — but the workflow itself reduces to GitHub-trust
+either way.
 
 ## Docs site (GitHub Pages)
 
