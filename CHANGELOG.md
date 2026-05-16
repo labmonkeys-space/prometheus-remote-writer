@@ -7,6 +7,44 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **Release artifacts are now signed with Sigstore attestations instead
+  of detached GPG signatures.** Verify with `gh attestation verify
+  <file> --repo opennms-forge/prometheus-remote-writer` rather than
+  `gpg --verify`. The release pipeline produces one SLSA Build
+  Provenance attestation per artifact (KAR and SBOM), signed by
+  Sigstore via the GitHub Actions OIDC token. See `RELEASING.md` →
+  "Verifying a release" for the new verification flow, and an air-gap
+  workaround using `gh attestation download`. The minimum required
+  `gh` CLI version is 2.49.0. (Captured in
+  `openspec/changes/replace-gpg-with-sigstore/`.)
+- **The release tag is verified against the maintainer's
+  GitHub-registered GPG keys** rather than against a dedicated project
+  signing key in CI secrets. The workflow fetches public keys from
+  `https://github.com/<maintainer>.gpg` at verify time. Tag-signing
+  on the maintainer's workstation continues with `git tag -s` — only
+  the trust anchor changes.
+
+### Removed
+
+- **Release assets `*.asc`, `*.sha512`, `*.sha512.asc`, and `KEYS` are
+  no longer published.** Each release now ships exactly two files:
+  the KAR and the SBOM. Authenticity, integrity, and signer identity
+  are encoded in the build-provenance attestation; the standalone
+  checksum and the public-key bundle are redundant under the new
+  trust model.
+- **The dedicated project signing key
+  (`0x1FC793D7F2E3FDDD`) has been retired** for new signing
+  operations. The maintainer's personal GitHub-registered GPG key
+  signs release tags going forward. The project key is preserved in
+  the maintainer's keyring as the verifier of record for pre-v0.5.0
+  releases — older release pages keep their original signed assets
+  and remain verifiable indefinitely via the previous GPG-based flow.
+- **`crazy-max/ghaction-import-gpg` removed** from the release
+  workflow. No third-party action consumes GPG key material in CI
+  anymore.
+
 ## [0.4.3] — 2026-05-09
 
 ### Added

@@ -12,9 +12,24 @@ on:
 
 permissions:
   contents: write
+  # OIDC token for Sigstore — required by actions/attest-build-provenance
+  # to mint an ephemeral signing certificate against this workflow run's
+  # identity.
+  id-token: write
+  # GitHub Artifact Attestations API — required to upload the provenance
+  # attestation bundle to the repo's /attestations endpoint.
+  attestations: write
   # Needed by the final "Trigger docs publish" step, which dispatches
   # publish-docs.yml via `gh workflow run` after the release is created.
   actions: write
+
+env:
+  # Maintainer whose GitHub-registered GPG key(s) sign release tags.
+  # Trust anchor: https://github.com/<RELEASE_MAINTAINER>.gpg — the URL
+  # returns all keys ever added to the profile, so historical keys also
+  # verify (key rotation does not invalidate prior releases unless the
+  # key is removed from the GitHub profile).
+  RELEASE_MAINTAINER: indigo423
 
 jobs:
   release:
@@ -25,6 +40,7 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
+          persist-credentials: false
 
       - name: Set up JDK 21
         uses: actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654  # v5.2.0
@@ -48,33 +64,28 @@ jobs:
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
-      - name: Import GPG key
-        # Imports the project release-signing key from secrets. Used both
-        # for verifying the pushed tag's signature and for signing the
-        # release artifacts. SHA-pinned per project convention; Dependabot
-        # keeps `crazy-max/ghaction-import-gpg` updates flowing.
-        uses: crazy-max/ghaction-import-gpg@2dc316deee8e90f13e1a351ab510b4d5bc0c82cd  # v7.0.0
-        with:
-          gpg_private_key: ${{ secrets.PRW_GPG_PRIVATE_KEY }}
-          passphrase: ${{ secrets.PRW_GPG_PASSPHRASE }}
-          # No git config side effects — release-tag signing happens on
-          # the maintainer's laptop per RELEASING.md pre-flight, not in
-          # this workflow.
-          git_user_signingkey: false
-          git_commit_gpgsign: false
-
       - name: Verify tag signature
-        # Refuse to release from an unsigned tag. The maintainer is
-        # expected to run `git tag -s vX.Y.Z` per RELEASING.md pre-flight;
-        # this step is the failsafe that catches an accidental plain
-        # `git tag`.
+        # Refuse to release from a tag not signed by a key on the
+        # maintainer's GitHub profile. The .gpg URL returns all keys
+        # ever added to that profile, so historical keys also verify
+        # — key rotation does not invalidate prior releases unless the
+        # key is removed from the GitHub profile.
+        #
+        # No GPG key material in CI secrets: the public-key fetch is
+        # the entire trust path on the workflow side. The maintainer's
+        # private key only ever sits on their workstation (used at
+        # `git tag -s` time, per RELEASING.md pre-flight).
         run: |
           TAG="${{ steps.resolve.outputs.tag }}"
+          # Import all public keys registered on the maintainer's GitHub
+          # profile. github.com/<user>.gpg is the canonical trust path.
+          curl -sSL "https://github.com/${RELEASE_MAINTAINER}.gpg" \
+            | gpg --import
           # The Checkout step's `ref` may not have populated tag refs.
           # Fetch the tag explicitly so `git tag -v` can find it.
           git fetch origin "+refs/tags/${TAG}:refs/tags/${TAG}" --no-tags
           if ! git tag -v "${TAG}"; then
-            echo "::error::Tag ${TAG} is not GPG-signed by the project key (or signature does not verify). Sign with 'git tag -s' and re-tag." >&2
+            echo "::error::Tag ${TAG} is not signed by a key on github.com/${RELEASE_MAINTAINER}'s profile (or the signature does not verify). Sign with 'git tag -s' using a key registered on your GitHub profile and re-tag." >&2
             exit 1
           fi
 
@@ -120,74 +131,55 @@ jobs:
           fi
           echo "path=$KAR" >> "$GITHUB_OUTPUT"
 
-      - name: Sign release artifacts
-        # Produces:
-        #   ${KAR}.asc           — detached GPG signature on the KAR
-        #   ${KAR}.sha512        — SHA-512 checksum of the KAR (basename only)
-        #   ${KAR}.sha512.asc    — detached GPG signature on the checksum
-        #   ${SBOM}              — versioned-renamed CycloneDX SBOM
-        #   ${SBOM}.asc          — detached GPG signature on the SBOM
-        #   KEYS                 — the project public key, ASCII-armored
-        # All signing uses the project key whose fingerprint is documented
-        # in RELEASING.md "Release signing key".
-        env:
-          KEY_ID: ${{ secrets.PRW_GPG_KEY_ID }}
+      - name: Stage SBOM at release name
+        # Copy target/bom.json to the versioned filename consumers will
+        # see on the release page. Kept as a separate step (rather than
+        # inlined into Create GitHub Release) so the attestation step
+        # can take subject-path against the final on-disk path.
+        id: sbom
         run: |
-          KAR="${{ steps.kar.outputs.path }}"
           VERSION="${{ steps.resolve.outputs.version }}"
           SBOM="prometheus-remote-writer-${VERSION}.cdx.json"
-
-          # SBOM is at target/bom.json from Generate SBOM — copy to the
-          # versioned name (matches add-sbom-to-release naming).
           if [ ! -f target/bom.json ]; then
             echo "::error::target/bom.json missing; the Generate SBOM step did not produce the expected file." >&2
             exit 1
           fi
           cp target/bom.json "$SBOM"
+          echo "path=$SBOM" >> "$GITHUB_OUTPUT"
 
-          # Detached signature on the KAR.
-          gpg --batch --yes --pinentry-mode loopback \
-              --local-user "$KEY_ID" \
-              --detach-sign --armor "$KAR"
+      - name: Attest KAR build provenance
+        # SLSA Build Provenance attestation for the KAR. Signed by
+        # Sigstore using a Fulcio-issued ephemeral certificate bound to
+        # this workflow run's GitHub OIDC token. Attestation is stored
+        # on the repo's /attestations endpoint and surfaced to verifiers
+        # via `gh attestation verify`.
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32  # v4.1.0
+        with:
+          subject-path: ${{ steps.kar.outputs.path }}
 
-          # SHA-512 checksum. cd into the KAR's directory so the checksum
-          # file's filename column is the basename — keeps `sha512sum -c`
-          # portable for consumers who download both into one directory.
-          (cd "$(dirname "$KAR")" && sha512sum "$(basename "$KAR")" > "$(basename "$KAR").sha512")
-
-          # Sign the checksum file.
-          gpg --batch --yes --pinentry-mode loopback \
-              --local-user "$KEY_ID" \
-              --detach-sign --armor "${KAR}.sha512"
-
-          # Sign the SBOM.
-          gpg --batch --yes --pinentry-mode loopback \
-              --local-user "$KEY_ID" \
-              --detach-sign --armor "$SBOM"
-
-          # Export the public key as the KEYS release asset.
-          gpg --armor --export "$KEY_ID" > KEYS
+      - name: Attest SBOM build provenance
+        # Same treatment for the SBOM. Two attestations, one per
+        # release artifact — verifiers run `gh attestation verify`
+        # against each downloaded file independently.
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32  # v4.1.0
+        with:
+          subject-path: ${{ steps.sbom.outputs.path }}
 
       - name: Create GitHub Release
-        # Single upload point: KAR + KAR.asc + checksum + checksum.asc +
-        # SBOM + SBOM.asc + KEYS. Replaces the prior "Create + Rename
-        # and upload SBOM" two-step flow now that the Sign step produces
-        # all the files in one place.
+        # Two assets only: the KAR and the SBOM. Authenticity is verified
+        # via the build provenance attestations (one per artifact),
+        # fetched server-side by `gh attestation verify`. No .asc / KEYS
+        # / checksum files — the attestation encodes the artifact's
+        # SHA-256 and binds it to this workflow's OIDC identity.
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="${{ steps.resolve.outputs.tag }}"
           KAR="${{ steps.kar.outputs.path }}"
-          VERSION="${{ steps.resolve.outputs.version }}"
-          SBOM="prometheus-remote-writer-${VERSION}.cdx.json"
+          SBOM="${{ steps.sbom.outputs.path }}"
           ASSETS=(
             "$KAR"
-            "${KAR}.asc"
-            "${KAR}.sha512"
-            "${KAR}.sha512.asc"
             "$SBOM"
-            "${SBOM}.asc"
-            "KEYS"
           )
           if [ -n "${{ steps.notes.outputs.notes-file }}" ]; then
             gh release create "$TAG" \

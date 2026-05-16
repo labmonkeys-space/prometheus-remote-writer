@@ -8,53 +8,56 @@ passing locally, KAR install verified against a Horizon 35 target).
 
 Releases are driven by **pushing a `v*.*.*` git tag**. The
 [`release.yml`](.github/workflows/release.yml) workflow picks up the tag push,
-builds the KAR, extracts the matching section from `CHANGELOG.md`, and
-creates a GitHub Release with the KAR attached.
+verifies the tag's signature against the maintainer's GitHub-registered
+GPG keys, builds the KAR, extracts the matching section from `CHANGELOG.md`,
+attests the artifacts via Sigstore, and creates a GitHub Release with the
+KAR and SBOM attached.
 
 Tags follow [SemVer](https://semver.org): `vMAJOR.MINOR.PATCH` (`v0.1.0`,
 `v0.2.0`, `v1.0.0-rc1`).
 
-## Release signing key
+## Maintainer signing identity
 
-The project signs every release with a single project-specific GPG key.
-The same key signs the git tag (locally on the maintainer's laptop) and
-the release artifacts (in CI from **organization-scoped secrets**
-`PRW_GPG_PRIVATE_KEY`, `PRW_GPG_PASSPHRASE`, `PRW_GPG_KEY_ID` set at the
-`opennms-forge` org level, visible to all public repositories in the
-org). The workflow accesses them via the standard
-`${{ secrets.PRW_GPG_* }}` syntax — GitHub merges org-level and
-repo-level secrets transparently. To inspect or rotate them: `gh secret
-list --org opennms-forge | grep PRW_GPG`.
+Starting with **v0.5.0**, the release pipeline does **not** use a dedicated
+project GPG key. Two distinct trust paths cover the release:
+
+1. **The git tag** is signed locally on the maintainer's workstation with
+   a personal GPG key that is **registered on their GitHub profile**.
+   The canonical trust path for verifiers is `https://github.com/<maintainer>.gpg`,
+   which returns every key the maintainer has ever registered on the
+   profile (active + historical).
+2. **The release artifacts (KAR, SBOM)** are signed in CI via Sigstore
+   using GitHub Artifact Attestations. The signature is bound to the
+   workflow run's OIDC token — no long-lived key, nothing for a repo-admin
+   compromise to ex-filtrate.
+
+Current maintainer (single-maintainer model; this section grows when
+co-maintainers join):
 
 | Field | Value |
 |---|---|
-| UID | `prometheus-remote-writer release signing (opennms-forge) <ronny@no42.org>` |
-| Algorithm | RSA 4096 |
-| Long key ID | `0x1FC793D7F2E3FDDD` |
-| Fingerprint | `53BC D4E3 C0CC 9ACF 40F4  6669 1FC7 93D7 F2E3 FDDD` |
-| Validity | `2026-04-27 through 2028-04-26` (2-year expiry) |
+| GitHub user | [`indigo423`](https://github.com/indigo423) |
+| Public keys (canonical) | <https://github.com/indigo423.gpg> |
+| Configured in workflow | `.github/workflows/release.yml` → `env.RELEASE_MAINTAINER` |
 
-**This is the canonical fingerprint.** Cross-check against the `KEYS`
-file on any GitHub Release before trusting that release's signatures —
-the on-release `KEYS` is convenience; this fingerprint is the trust anchor.
+**Operational policy:** retired GPG keys remain on the maintainer's
+GitHub profile so older tags stay re-verifiable. Do not delete a key
+from the GitHub profile after it has signed a release; rotate by adding
+a new key and leaving the old one in place.
 
-### Key rotation
+### Older releases (`v0.1.0` through `v0.4.x`)
 
-Keys can leak, expire, or need replacing. The procedure (manual, but
-documented so it's not invented under pressure):
+Releases predating v0.5.0 were signed by a dedicated project GPG key
+(long key ID `0x1FC793D7F2E3FDDD`, fingerprint
+`53BC D4E3 C0CC 9ACF 40F4  6669 1FC7 93D7 F2E3 FDDD`). Their release
+pages still carry the `KEYS` file, the `.asc` signatures, and the
+`.sha512` checksums. The verification flow for those releases is the
+one previously documented in this file (GPG-based) and remains valid
+indefinitely.
 
-1. Generate a new keypair following the same UID convention. Document the
-   new long key ID + fingerprint in this section, **alongside** the old
-   one — do not remove the old entry; old releases were signed by it and
-   verifiers need it to keep working.
-2. Export the new public key and append it to a fresh `KEYS` file. The
-   release workflow exports just the active key; rotation transitions
-   are visible in this README, not in the on-release `KEYS`.
-3. Update the three GitHub secrets to the new key.
-4. Cut a transition release whose CHANGELOG entry calls out the rotation
-   and includes both fingerprints in the release notes.
-5. Retire the old key after a transition window (suggested ≥ 30 days).
-   Mark the old fingerprint as `(retired YYYY-MM-DD)` in the table above.
+The project key has been retired for *new* signing operations. It is
+not destroyed; it sits in the maintainer's keyring as a verifier of
+record for pre-v0.5.0 releases.
 
 ## Pre-flight checklist
 
@@ -68,26 +71,26 @@ Before tagging, confirm:
       the changes since the previous release. Move `[Unreleased]` content
       into the new version section if needed.
 - [ ] The `<version>` in `pom.xml` matches the tag (without the `v` prefix).
-      For `v0.1.0` the version is `0.1.0`; once shipped, bump the pom to
+      For `v0.5.0` the version is `0.5.0`; once shipped, bump the pom to
       the next `-SNAPSHOT` on `main`.
 - [ ] `README.md` Quick-start references match the target version.
 - [ ] **The git tag will be GPG-signed** — use `git tag -s vX.Y.Z -m "vX.Y.Z"`
       (NOT `git tag` plain or `git tag -a`). The `release.yml` workflow
       verifies the tag signature and refuses to publish if it's missing.
-- [ ] **The signing key matches the project key** — the fingerprint
-      reported by `git tag -v vX.Y.Z` MUST equal the canonical one in
-      "Release signing key" above. A personal key may sign in-tree
-      commits, but release tags MUST use the project key.
+- [ ] **The tag signing key is on your GitHub profile** — the workflow
+      fetches public keys from `https://github.com/${RELEASE_MAINTAINER}.gpg`
+      and accepts a tag signature by any of them. Add the key under
+      Settings → SSH and GPG keys before tagging.
 
 ## Release steps
 
 ### 1. Update version and CHANGELOG
 
-If the pom is still on `0.1.0-SNAPSHOT` and you're cutting `v0.1.0`, strip the
+If the pom is still on `0.5.0-SNAPSHOT` and you're cutting `v0.5.0`, strip the
 `-SNAPSHOT`:
 
 ```bash
-./mvnw versions:set -DnewVersion=0.1.0 -DgenerateBackupPoms=false
+./mvnw versions:set -DnewVersion=0.5.0 -DgenerateBackupPoms=false
 git status   # sanity-check — versions:set updates ALL 5 poms
             # (root + 4 child modules), not just the root
 ```
@@ -103,7 +106,7 @@ git status   # sanity-check — versions:set updates ALL 5 poms
 
 Edit `CHANGELOG.md`:
 
-- Move content under `## [Unreleased]` into a new `## [0.1.0] — YYYY-MM-DD`
+- Move content under `## [Unreleased]` into a new `## [0.5.0] — YYYY-MM-DD`
   section.
 - Add a fresh empty `## [Unreleased]` at the top.
 - Update the comparison links at the bottom of the file.
@@ -114,32 +117,32 @@ already-tracked files):
 
 ```bash
 git add pom.xml */pom.xml */**/pom.xml CHANGELOG.md
-git commit -m "release: v0.1.0"
+git commit -m "release: v0.5.0"
 ```
 
 ### 2. Tag the release
 
 ```bash
-# Sign the tag with the project key (NOT plain `git tag`).
-git tag -s v0.1.0 -m "v0.1.0"
+# Sign the tag with a GPG key registered on your GitHub profile.
+git tag -s v0.5.0 -m "v0.5.0"
 
 # Verify the signature locally before pushing.
-git tag -v v0.1.0
-# expected: "Good signature from prometheus-remote-writer release signing ..."
+git tag -v v0.5.0
+# expected: "Good signature from <your name> <your email> ..."
 
 git push origin main
-git push origin v0.1.0
+git push origin v0.5.0
 ```
 
 Pushing the tag triggers `.github/workflows/release.yml`:
 
 - Resolves the tag and version.
-- Imports the project signing key from secrets.
-- Verifies the pushed tag's GPG signature; **fails the workflow if the tag is unsigned**.
+- Fetches the maintainer's public keys from `github.com/<RELEASE_MAINTAINER>.gpg`.
+- Verifies the pushed tag's GPG signature; **fails the workflow if the tag is unsigned or signed by a key not on the maintainer's profile**.
 - Builds the KAR via `make kar`; generates the SBOM via `make sbom`.
-- Extracts the `## [0.1.0]` section from `CHANGELOG.md` as the release body.
-- Signs the KAR, the SHA-512 checksum, and the SBOM with the project key.
-- Creates a GitHub Release named `v0.1.0` with the KAR + signatures + checksum + SBOM + KEYS attached as assets.
+- Extracts the `## [0.5.0]` section from `CHANGELOG.md` as the release body.
+- Produces SLSA Build Provenance attestations (one for the KAR, one for the SBOM) via Sigstore.
+- Creates a GitHub Release named `v0.5.0` with the KAR and SBOM attached as assets.
 
 Watch the run:
 
@@ -152,9 +155,9 @@ gh run watch --repo opennms-forge/prometheus-remote-writer
 Bump `main` to the next development version:
 
 ```bash
-./mvnw versions:set -DnewVersion=0.2.0-SNAPSHOT -DgenerateBackupPoms=false
+./mvnw versions:set -DnewVersion=0.6.0-SNAPSHOT -DgenerateBackupPoms=false
 git add pom.xml
-git commit -m "chore: bump to 0.2.0-SNAPSHOT"
+git commit -m "chore: bump to 0.6.0-SNAPSHOT"
 git push origin main
 ```
 
@@ -170,7 +173,7 @@ can re-run it manually via the `workflow_dispatch` trigger:
 Or via CLI:
 
 ```bash
-gh workflow run release.yml -f tag=v0.1.0
+gh workflow run release.yml -f tag=v0.5.0
 ```
 
 This is idempotent — `gh release create` will fail if the release already
@@ -179,75 +182,121 @@ recovering from a partial run.
 
 ## Hotfix releases
 
-For a patch release (e.g. `v0.1.1`) on top of `v0.1.0`:
+For a patch release (e.g. `v0.5.1`) on top of `v0.5.0`:
 
-1. Branch off the previous tag: `git checkout -b hotfix/0.1.1 v0.1.0`.
+1. Branch off the previous tag: `git checkout -b hotfix/0.5.1 v0.5.0`.
 2. Apply the fix, commit, update CHANGELOG and pom version.
 3. Merge back to `main` (or cherry-pick).
-4. **GPG-sign** tag `v0.1.1` on the hotfix branch with the project key:
-   `git tag -s v0.1.1 -m "v0.1.1"` and verify with `git tag -v v0.1.1`.
+4. **GPG-sign** tag `v0.5.1` on the hotfix branch with a key registered
+   on your GitHub profile: `git tag -s v0.5.1 -m "v0.5.1"` and verify
+   with `git tag -v v0.5.1`.
 5. Push the tag.
 
 ## What gets published
 
 | Artifact | Where | How consumed |
 |---|---|---|
-| `prometheus-remote-writer-kar-<version>.kar` | GitHub Release asset | Download and install via Karaf `kar:install <path>`. |
-| `prometheus-remote-writer-kar-<version>.kar.asc` | GitHub Release asset | Detached GPG signature on the KAR. Verify with `gpg --verify <file>.asc`. |
-| `prometheus-remote-writer-kar-<version>.kar.sha512` | GitHub Release asset | SHA-512 checksum of the KAR (GNU coreutils format). Verify integrity with `sha512sum -c <file>.sha512`. |
-| `prometheus-remote-writer-kar-<version>.kar.sha512.asc` | GitHub Release asset | Detached GPG signature on the checksum file. Verify with `gpg --verify <file>.sha512.asc`. |
-| `prometheus-remote-writer-<version>.cdx.json` | GitHub Release asset | CycloneDX 1.6 SBOM (aggregate across the full Maven reactor); fed to Trivy / Grype / Dependency-Track / FOSSA-style consumers. Generate locally with `make sbom`. |
-| `prometheus-remote-writer-<version>.cdx.json.asc` | GitHub Release asset | Detached GPG signature on the SBOM. |
-| `KEYS` | GitHub Release asset | ASCII-armored public key of the project signing key. Cross-check the imported key's fingerprint against "Release signing key" above before trusting it. |
-| `prometheus-remote-writer-<version>.jar` (bundle) | Not auto-published in v0.1 | Planned. The repo's migration to `opennms-forge` is done; remaining decision is the Maven-repo target (Central via Sonatype, GitHub Packages, or a private Nexus). The same project signing key is reusable for Maven Central PGP requirements. |
-| `prometheus-remote-writer-features-<version>-features.xml` | Not auto-published in v0.1 | Same as above — consumed via `feature:repo-add mvn:…/xml/features` when a Maven repo is available. |
+| `prometheus-remote-writer-kar-<version>.kar` | GitHub Release asset | Download and install via Karaf `kar:install <path>`. Verify with `gh attestation verify` — see "Verifying a release" below. |
+| `prometheus-remote-writer-<version>.cdx.json` | GitHub Release asset | CycloneDX 1.6 SBOM (aggregate across the full Maven reactor); fed to Trivy / Grype / Dependency-Track / FOSSA-style consumers. Generate locally with `make sbom`. Verify with `gh attestation verify`. |
+| Build provenance attestations | <https://github.com/opennms-forge/prometheus-remote-writer/attestations> | One per artifact (KAR + SBOM). SLSA Build Provenance signed by Sigstore via GitHub Actions OIDC. Fetched server-side by `gh attestation verify`; not a downloadable release asset. |
+| `prometheus-remote-writer-<version>.jar` (bundle) | Not auto-published | Planned. The repo's migration to `opennms-forge` is done; remaining decision is the Maven-repo target (Central via Sonatype, GitHub Packages, or a private Nexus). When Maven Central publication lands, the maintainer's personal GPG key serves as the Central PGP identity (a common pattern for single-maintainer projects). |
+| `prometheus-remote-writer-features-<version>-features.xml` | Not auto-published | Same as above — consumed via `feature:repo-add mvn:…/xml/features` when a Maven repo is available. |
 
 ## Verifying a release
 
-The signed assets give a consumer two layers of verification: integrity
-(via the SHA-512 checksum) and authenticity (via the GPG signature).
-For full trust, pair both with the canonical fingerprint cross-check
-documented in "Release signing key".
+Each release artifact carries a SLSA Build Provenance attestation that
+encodes (a) the artifact's SHA-256, (b) the workflow file path that
+produced it, (c) the source commit, and (d) the GitHub Actions run that
+generated the attestation — all signed by Sigstore via the workflow's
+OIDC token. Verification resolves through Sigstore root CAs and
+GitHub's identity binding, not through a maintainer-published key
+fingerprint.
+
+**Prerequisite:** `gh` CLI **2.49.0 or newer** (released 2024-04-30).
+Check with `gh --version`.
 
 ```bash
-# 1. Import the project public key (one-time per workstation).
-curl -sSL https://github.com/opennms-forge/prometheus-remote-writer/releases/latest/download/KEYS \
-  | gpg --import
-
-# 2. Cross-check the imported key's fingerprint against the canonical one
-#    in "Release signing key" above. This is the trust anchor.
-gpg --fingerprint <KEY_ID>
-# expected: matches the fingerprint listed in this README
-
-# 3. Download the artifacts you want to verify.
-TAG=v0.1.0
+TAG=v0.5.0
 BASE=https://github.com/opennms-forge/prometheus-remote-writer/releases/download/${TAG}
+
+# 1. Download the artifact(s) you want to verify.
 curl -O ${BASE}/prometheus-remote-writer-kar-${TAG#v}.kar
-curl -O ${BASE}/prometheus-remote-writer-kar-${TAG#v}.kar.asc
-curl -O ${BASE}/prometheus-remote-writer-kar-${TAG#v}.kar.sha512
-curl -O ${BASE}/prometheus-remote-writer-kar-${TAG#v}.kar.sha512.asc
-
-# 4. Verify the KAR signature (authenticity).
-gpg --verify prometheus-remote-writer-kar-${TAG#v}.kar.asc
-
-# 5. Verify the checksum signature, then the checksum itself (integrity).
-gpg --verify prometheus-remote-writer-kar-${TAG#v}.kar.sha512.asc
-sha512sum -c prometheus-remote-writer-kar-${TAG#v}.kar.sha512
-
-# 6. (Optional) Verify the SBOM the same way.
 curl -O ${BASE}/prometheus-remote-writer-${TAG#v}.cdx.json
-curl -O ${BASE}/prometheus-remote-writer-${TAG#v}.cdx.json.asc
-gpg --verify prometheus-remote-writer-${TAG#v}.cdx.json.asc
+
+# 2. Verify the KAR. `gh attestation verify` fetches the attestation
+#    bundle from the repository's /attestations endpoint, checks the
+#    Sigstore signature, confirms the certificate identity (the
+#    workflow path), and compares the artifact's SHA-256 against the
+#    attestation subject digest.
+gh attestation verify \
+  prometheus-remote-writer-kar-${TAG#v}.kar \
+  --repo opennms-forge/prometheus-remote-writer
+
+# 3. Verify the SBOM the same way.
+gh attestation verify \
+  prometheus-remote-writer-${TAG#v}.cdx.json \
+  --repo opennms-forge/prometheus-remote-writer
 ```
 
-**Honest trust note:** A consumer who downloads `KAR + KAR.asc + KEYS`
-from the same GitHub Release page is implicitly trusting GitHub. For
-strong trust, cross-check the fingerprint against the one published in
-this README on a path the consumer trusts independently (the README itself
-also lives on GitHub, so the strongest path is to confirm the fingerprint
-out of band — e.g. via a maintainer-curated personal site, a public
-keyserver, or a printed copy). Documented honestly so the trust model is
-clear; the signatures are still meaningful even with weak trust.
+A successful verification prints the signer identity (the workflow
+path: `https://github.com/opennms-forge/prometheus-remote-writer/.github/workflows/release.yml@refs/tags/v0.5.0`),
+the predicate type (`https://slsa.dev/provenance/v1`), and the commit
+SHA the artifact was built from. Pin against `--signer-workflow .github/workflows/release.yml`
+for an extra defense-in-depth assertion.
+
+### Air-gap verification
+
+`gh attestation verify` contacts GitHub by default to fetch the
+attestation bundle. For air-gapped environments, download the bundle
+on a connected host once and transport it into the air-gap.
+
+```bash
+# On a connected host:
+gh attestation download \
+  prometheus-remote-writer-kar-${TAG#v}.kar \
+  --repo opennms-forge/prometheus-remote-writer
+# Produces: prometheus-remote-writer-kar-<version>.kar.jsonl
+
+# Inside the air-gap, with the .kar and the .jsonl both present:
+gh attestation verify \
+  prometheus-remote-writer-kar-${TAG#v}.kar \
+  --bundle prometheus-remote-writer-kar-${TAG#v}.kar.jsonl \
+  --repo opennms-forge/prometheus-remote-writer
+```
+
+The `--bundle` flag short-circuits the network fetch; Sigstore's
+trusted root keys ship inside `gh` so the cryptographic verification
+itself is fully offline.
+
+### Honest trust note
+
+Verification of a v0.5.0+ release resolves to two trust roots that
+sit upstream of this project:
+
+1. **Sigstore's trusted root CAs** (Fulcio, Rekor public keys). `gh`
+   ships them; the Sigstore project rotates them publicly. Compromise
+   of these is a global ecosystem event, not a project-specific risk.
+2. **GitHub's OIDC identity binding for this repository.** The
+   attestation says "the workflow at `.github/workflows/release.yml`
+   in this repo, running on a tag, produced this artifact." Compromise
+   of the workflow file or the repository's branch protection on `main`
+   would let an attacker forge a valid attestation.
+
+That's the trust model, end to end. It is not "the maintainer's key
+signs the artifact directly" — Sigstore replaces that with "the
+maintainer's workflow, vouched for by GitHub, signed the artifact via
+a short-lived certificate." Different shape; comparable or stronger
+properties in 2026 because (a) there is no long-lived key to leak and
+(b) every signing event is publicly logged in the Sigstore
+transparency log.
+
+For the **tag** (not the artifact): trust resolves through
+`github.com/<RELEASE_MAINTAINER>.gpg`. A consumer who trusts GitHub to
+correctly serve that file gets a valid signature check. Out-of-band
+fingerprint cross-checks (e.g. via a maintainer's personal site or a
+public keyserver) are an additional defense layer if the GitHub
+trust path is insufficient for the threat model — but the workflow
+itself reduces to GitHub-trust either way.
 
 ## Docs site (GitHub Pages)
 
@@ -274,7 +323,7 @@ workflow against the same tag — the published site updates without
 cutting a new release:
 
 ```bash
-gh workflow run publish-docs.yml -f tag=v0.3.0
+gh workflow run publish-docs.yml -f tag=v0.5.0
 ```
 
 The `release: published` trigger fires once per release; `workflow_dispatch`
@@ -286,10 +335,18 @@ is for these out-of-band republishes.
   `feature:repo-add mvn:…` install flow shown in the README. The repo
   now lives under the `opennms-forge` namespace; remaining decision is
   the Maven-repo target (Central via Sonatype, GitHub Packages, or a
-  private Nexus). The same project signing key documented in
-  "Release signing key" satisfies Maven Central's PGP requirement —
-  no additional key infrastructure needed.
-- **Provenance attestation** — SLSA-style build provenance is a v0.2+ goal.
-  Pairs well with the existing GPG signing as a parallel modern-verifier
-  path; could be layered via `actions/attest-build-provenance` and
-  `actions/attest-sbom` without disturbing the GPG flow.
+  private Nexus). The maintainer's personal GPG key (the same one
+  that signs release tags) serves as the Central PGP identity when
+  that work lands — no additional key infrastructure needed, no
+  conflict with the Sigstore artifact-signing path.
+- **Dedicated SBOM attestation** (`actions/attest-sbom`). The current
+  pipeline emits a build-provenance attestation for the SBOM file,
+  which encodes its hash and binds it to the workflow run. A
+  dedicated SBOM attestation predicate becomes worthwhile if a
+  downstream consumer (Dependency-Track, Grype) asks for it
+  specifically.
+- **Multi-maintainer signing roster.** The workflow's
+  `RELEASE_MAINTAINER` env value is currently a single GitHub
+  username. Promoting it to a list (or a repo variable) so any
+  named maintainer can release is a small future change when the
+  project gains co-maintainers.
