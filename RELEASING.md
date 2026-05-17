@@ -18,7 +18,7 @@ Tags follow [SemVer](https://semver.org): `vMAJOR.MINOR.PATCH` (`v0.1.0`,
 
 ## Maintainer signing identity
 
-Starting with **v0.5.0**, the release pipeline does **not** use a dedicated
+Starting with **v0.4.4**, the release pipeline does **not** use a dedicated
 project GPG key. Two distinct trust paths cover the release:
 
 1. **The git tag** is signed locally on the maintainer's workstation with
@@ -47,7 +47,7 @@ a new key and leaving the old one in place.
 
 ### Older releases (`v0.1.0` through `v0.4.x`)
 
-Releases predating v0.5.0 were signed by a dedicated project GPG key
+Releases predating v0.4.4 were signed by a dedicated project GPG key
 (long key ID `0x1FC793D7F2E3FDDD`, fingerprint
 `53BC D4E3 C0CC 9ACF 40F4  6669 1FC7 93D7 F2E3 FDDD`). Their release
 pages still carry the `KEYS` file, the `.asc` signatures, and the
@@ -59,11 +59,11 @@ GPG-based one documented in the historical RELEASING.md at the
 
 The project key has been retired for *new* signing operations. It is
 not destroyed; it sits in the maintainer's keyring as a verifier of
-record for pre-v0.5.0 releases.
+record for pre-v0.4.4 releases.
 
 > **Note on `releases/latest/download/KEYS`:** consumers who scripted
 > against `https://github.com/opennms-forge/prometheus-remote-writer/releases/latest/download/KEYS`
-> will see a 404 once v0.5.0 is published — `latest` resolves to the
+> will see a 404 once v0.4.4 is published — `latest` resolves to the
 > newest release, which no longer ships `KEYS`. To pin to the last
 > release that does, use the explicit tag URL:
 > `…/releases/download/v0.4.3/KEYS`.
@@ -80,7 +80,7 @@ Before tagging, confirm:
       the changes since the previous release. Move `[Unreleased]` content
       into the new version section if needed.
 - [ ] The `<version>` in `pom.xml` matches the tag (without the `v` prefix).
-      For `v0.5.0` the version is `0.5.0`; once shipped, bump the pom to
+      For `v0.4.4` the version is `0.4.4`; once shipped, bump the pom to
       the next `-SNAPSHOT` on `main`.
 - [ ] `README.md` Quick-start references match the target version.
 - [ ] **The git tag will be GPG-signed** — use `git tag -s vX.Y.Z -m "vX.Y.Z"`
@@ -95,11 +95,11 @@ Before tagging, confirm:
 
 ### 1. Update version and CHANGELOG
 
-If the pom is still on `0.5.0-SNAPSHOT` and you're cutting `v0.5.0`, strip the
+If the pom is still on `0.4.4-SNAPSHOT` and you're cutting `v0.4.4`, strip the
 `-SNAPSHOT`:
 
 ```bash
-./mvnw versions:set -DnewVersion=0.5.0 -DgenerateBackupPoms=false
+./mvnw versions:set -DnewVersion=0.4.4 -DgenerateBackupPoms=false
 git status   # sanity-check — versions:set updates ALL 5 poms
             # (root + 4 child modules), not just the root
 ```
@@ -115,7 +115,7 @@ git status   # sanity-check — versions:set updates ALL 5 poms
 
 Edit `CHANGELOG.md`:
 
-- Move content under `## [Unreleased]` into a new `## [0.5.0] — YYYY-MM-DD`
+- Move content under `## [Unreleased]` into a new `## [0.4.4] — YYYY-MM-DD`
   section.
 - Add a fresh empty `## [Unreleased]` at the top.
 - Update the comparison links at the bottom of the file.
@@ -126,21 +126,21 @@ already-tracked files):
 
 ```bash
 git add pom.xml */pom.xml */**/pom.xml CHANGELOG.md
-git commit -m "release: v0.5.0"
+git commit -m "release: v0.4.4"
 ```
 
 ### 2. Tag the release
 
 ```bash
 # Sign the tag with a GPG key registered on your GitHub profile.
-git tag -s v0.5.0 -m "v0.5.0"
+git tag -s v0.4.4 -m "v0.4.4"
 
 # Verify the signature locally before pushing.
-git tag -v v0.5.0
+git tag -v v0.4.4
 # expected: "Good signature from <your name> <your email> ..."
 
 git push origin main
-git push origin v0.5.0
+git push origin v0.4.4
 ```
 
 Pushing the tag triggers `.github/workflows/release.yml`:
@@ -149,9 +149,9 @@ Pushing the tag triggers `.github/workflows/release.yml`:
 - Fetches the maintainer's public keys from `github.com/<RELEASE_MAINTAINER>.gpg`.
 - Verifies the pushed tag's GPG signature; **fails the workflow if the tag is unsigned or signed by a key not on the maintainer's profile**.
 - Builds the KAR via `make kar`; generates the SBOM via `make sbom`.
-- Extracts the `## [0.5.0]` section from `CHANGELOG.md` as the release body.
+- Extracts the `## [0.4.4]` section from `CHANGELOG.md` as the release body.
 - Produces SLSA Build Provenance attestations (one for the KAR, one for the SBOM) via Sigstore.
-- Creates a GitHub Release named `v0.5.0` with the KAR and SBOM attached as assets.
+- Creates a GitHub Release named `v0.4.4` with the KAR and SBOM attached as assets.
 
 Watch the run:
 
@@ -164,9 +164,9 @@ gh run watch --repo opennms-forge/prometheus-remote-writer
 Bump `main` to the next development version:
 
 ```bash
-./mvnw versions:set -DnewVersion=0.6.0-SNAPSHOT -DgenerateBackupPoms=false
+./mvnw versions:set -DnewVersion=0.4.5-SNAPSHOT -DgenerateBackupPoms=false
 git add pom.xml
-git commit -m "chore: bump to 0.6.0-SNAPSHOT"
+git commit -m "chore: bump to 0.4.5-SNAPSHOT"
 git push origin main
 ```
 
@@ -182,7 +182,7 @@ can re-run it manually via the `workflow_dispatch` trigger:
 Or via CLI:
 
 ```bash
-gh workflow run release.yml -f tag=v0.5.0
+gh workflow run release.yml -f tag=v0.4.4
 ```
 
 This is idempotent — `gh release create` will fail if the release already
@@ -200,25 +200,25 @@ recovering from a partial run.
 > delete only the GitHub Release (`gh release delete <tag>`) before
 > re-running; the attestation from the partial run remains usable.
 >
-> **Heads up on running the v0.5.0+ workflow against a pre-v0.5.0
+> **Heads up on running the v0.4.4+ workflow against a pre-v0.4.4
 > tag** (e.g., `gh workflow run release.yml -f tag=v0.4.3`): the
 > tag-verify step imports keys from `github.com/<RELEASE_MAINTAINER>.gpg`,
-> but pre-v0.5.0 tags were signed by the retired project key, which
+> but pre-v0.4.4 tags were signed by the retired project key, which
 > is **not** on the maintainer's GitHub profile. Verification will
-> fail. The supported way to re-issue a pre-v0.5.0 release is to
+> fail. The supported way to re-issue a pre-v0.4.4 release is to
 > check out RELEASING.md and release.yml at the v0.4.3 tag and run
 > the legacy GPG-based flow against that historical workflow shape.
 
 ## Hotfix releases
 
-For a patch release (e.g. `v0.5.1`) on top of `v0.5.0`:
+For a patch release (e.g. `v0.4.5`) on top of `v0.4.4`:
 
-1. Branch off the previous tag: `git checkout -b hotfix/0.5.1 v0.5.0`.
+1. Branch off the previous tag: `git checkout -b hotfix/0.4.5 v0.4.4`.
 2. Apply the fix, commit, update CHANGELOG and pom version.
 3. Merge back to `main` (or cherry-pick).
-4. **GPG-sign** tag `v0.5.1` on the hotfix branch with a key registered
-   on your GitHub profile: `git tag -s v0.5.1 -m "v0.5.1"` and verify
-   with `git tag -v v0.5.1`.
+4. **GPG-sign** tag `v0.4.5` on the hotfix branch with a key registered
+   on your GitHub profile: `git tag -s v0.4.5 -m "v0.4.5"` and verify
+   with `git tag -v v0.4.5`.
 5. Push the tag.
 
 ## What gets published
@@ -245,7 +245,7 @@ fingerprint.
 Check with `gh --version`.
 
 ```bash
-TAG=v0.5.0
+TAG=v0.4.4
 BASE=https://github.com/opennms-forge/prometheus-remote-writer/releases/download/${TAG}
 
 # 1. Download the artifact(s) you want to verify.
@@ -268,7 +268,7 @@ gh attestation verify \
 ```
 
 A successful verification prints the signer identity (the workflow
-path: `https://github.com/opennms-forge/prometheus-remote-writer/.github/workflows/release.yml@refs/tags/v0.5.0`),
+path: `https://github.com/opennms-forge/prometheus-remote-writer/.github/workflows/release.yml@refs/tags/v0.4.4`),
 the predicate type (`https://slsa.dev/provenance/v1`), and the commit
 SHA the artifact was built from. For an extra defense-in-depth
 assertion, pin against the workflow ref via `--signer-workflow`:
@@ -309,7 +309,7 @@ itself is fully offline.
 
 ### Honest trust note
 
-Verification of a v0.5.0+ release resolves to two trust roots that
+Verification of a v0.4.4+ release resolves to two trust roots that
 sit upstream of this project:
 
 1. **Sigstore's trusted root CAs** (Fulcio, Rekor public keys). `gh`
@@ -368,7 +368,7 @@ workflow against the same tag — the published site updates without
 cutting a new release:
 
 ```bash
-gh workflow run publish-docs.yml -f tag=v0.5.0
+gh workflow run publish-docs.yml -f tag=v0.4.4
 ```
 
 The `release: published` trigger fires once per release; `workflow_dispatch`
