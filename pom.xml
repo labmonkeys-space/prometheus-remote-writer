@@ -6,7 +6,7 @@
 
     <groupId>org.opennms.plugins</groupId>
     <artifactId>prometheus-remote-writer-parent</artifactId>
-    <version>0.4.4-SNAPSHOT</version>
+    <version>0.4.4</version>
     <packaging>pom</packaging>
 
     <name>OpenNMS Prometheus Remote Writer :: Parent</name>

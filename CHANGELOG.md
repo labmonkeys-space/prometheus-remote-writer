@@ -7,24 +7,49 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.4] — 2026-05-17
+
+**Release-engineering release.** No plugin runtime behavior changes
+since v0.4.3 — the KAR you install and the wire format on the way out
+are identical. What changes is how the release itself is signed and
+how operators verify it.
+
+> ⚠️ **Verifier flow changes for consumers.** Use
+> `gh attestation verify <file> --repo opennms-forge/prometheus-remote-writer`
+> instead of `gpg --verify`. Requires `gh` CLI **2.49.0** or newer.
+> See `RELEASING.md` → "Verifying a release" for the new flow and an
+> air-gap workaround using `gh attestation download`.
+
 ### Changed
 
 - **Release artifacts are now signed with Sigstore attestations instead
-  of detached GPG signatures.** Verify with `gh attestation verify
-  <file> --repo opennms-forge/prometheus-remote-writer` rather than
-  `gpg --verify`. The release pipeline produces one SLSA Build
-  Provenance attestation per artifact (KAR and SBOM), signed by
-  Sigstore via the GitHub Actions OIDC token. See `RELEASING.md` →
-  "Verifying a release" for the new verification flow, and an air-gap
-  workaround using `gh attestation download`. The minimum required
-  `gh` CLI version is 2.49.0. (Captured in
-  `openspec/changes/replace-gpg-with-sigstore/`.)
+  of detached GPG signatures.** The release pipeline produces one SLSA
+  Build Provenance attestation per artifact (KAR and SBOM), signed by
+  Sigstore via the GitHub Actions OIDC token. Verification resolves
+  through Sigstore root CAs and GitHub's identity binding — no
+  long-lived signing key on the workflow side. Captured in
+  `openspec/changes/replace-gpg-with-sigstore/`.
 - **The release tag is verified against the maintainer's
   GitHub-registered GPG keys** rather than against a dedicated project
   signing key in CI secrets. The workflow fetches public keys from
   `https://github.com/<maintainer>.gpg` at verify time. Tag-signing
   on the maintainer's workstation continues with `git tag -s` — only
   the trust anchor changes.
+
+### Added
+
+- **CodeQL security-scanning workflow** at `.github/workflows/codeql.yml`.
+  Runs on push to `main`, on PRs targeting `main`, weekly, and on
+  demand. Uses the `security-extended` query suite (broader than the
+  default suite — appropriate for a plugin that handles HTTP auth
+  headers, network I/O, and protobuf wire format). Findings surface
+  under the repository's Security tab.
+- **In-source comment in `TlsConfig.java`** documenting the dismissed
+  CodeQL alert (`java/insecure-trustmanager`, CWE-295) against the
+  opt-in `tls.insecure-skip-verify` mode. The alert is correct by the
+  rule's letter but flags documented intentional behavior; the
+  dismissal lives in the GitHub Security tab and the comment points
+  readers at it.
 
 ### Removed
 
@@ -35,7 +60,7 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   checksum and the public-key bundle are redundant under the new
   trust model. **Heads up for scripted consumers:** the URL
   `https://github.com/opennms-forge/prometheus-remote-writer/releases/latest/download/KEYS`
-  will 404 once v0.5.0 lands (`latest` follows the newest release).
+  will 404 once v0.4.4 lands (`latest` follows the newest release).
   Pin to the explicit `v0.4.3` tag URL to keep the legacy path
   working, or switch to `gh attestation verify` against the new
   releases.
@@ -43,7 +68,7 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (`0x1FC793D7F2E3FDDD`) has been retired** for new signing
   operations. The maintainer's personal GitHub-registered GPG key
   signs release tags going forward. The project key is preserved in
-  the maintainer's keyring as the verifier of record for pre-v0.5.0
+  the maintainer's keyring as the verifier of record for pre-v0.4.4
   releases — older release pages keep their original signed assets
   and remain verifiable indefinitely via the previous GPG-based flow.
 - **`crazy-max/ghaction-import-gpg` removed** from the release
