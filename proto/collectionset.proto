@@ -1,0 +1,76 @@
+// Vendored from OpenNMS (Apache-2.0).
+// Source: features/kafka/producer/src/main/proto/collectionset.proto
+//   https://github.com/OpenNMS/opennms (branch: develop)
+//   fetched 2026-06-08
+// This is the wire contract emitted by the OpenNMS Kafka Producer when
+// forwarding collected metrics. Kept verbatim except for this provenance note;
+// do not edit field numbers — they are the wire contract.
+
+syntax = "proto3";
+option java_package = "org.opennms.features.kafka.producer.model";
+option java_outer_classname = "CollectionSetProtos";
+
+import "google/protobuf/wrappers.proto";
+
+message StringAttribute {
+  string name = 1;
+  string value = 2;
+}
+
+message NumericAttribute {
+  string group = 1;
+  string name = 2;
+  double value = 3;
+  enum Type {
+    GAUGE = 0;
+    COUNTER = 1;
+  }
+  Type type = 4;
+  // Copy of `value` that is ALWAYS serialized, even when zero
+  google.protobuf.DoubleValue metric_value = 5;
+}
+
+message NodeLevelResource {
+  int64 node_id = 1;
+  string foreign_source = 2;
+  string foreign_id= 3;
+  string node_label = 4;
+  string location = 5;
+}
+
+message InterfaceLevelResource {
+  NodeLevelResource node = 1;
+  string instance = 2;
+  int32 if_index = 3;
+}
+
+message GenericTypeResource {
+  NodeLevelResource node = 1;
+  string type = 2;
+  string instance = 3;
+}
+
+message ResponseTimeResource {
+  string instance = 1;
+  string location = 2;
+  NodeLevelResource node = 3;
+}
+
+message CollectionSetResource {
+  oneof resource {
+     NodeLevelResource node = 1;
+     InterfaceLevelResource interface = 2;
+     GenericTypeResource generic = 3;
+     ResponseTimeResource response = 4;
+  }
+  string resource_id = 5;
+  string resource_name = 6;
+  string resource_type_name = 7;
+  repeated StringAttribute string = 10;
+  repeated NumericAttribute numeric = 11;
+}
+
+message CollectionSet {
+  int64 timestamp = 1;
+  repeated CollectionSetResource resource = 2;
+}

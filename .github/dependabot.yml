@@ -10,7 +10,7 @@ updates:
       - dependencies
       - github-actions
 
-  - package-ecosystem: maven
+  - package-ecosystem: cargo
     directory: /
     schedule:
       interval: weekly
@@ -19,4 +19,4 @@ updates:
       prefix: build
     labels:
       - dependencies
-      - maven
+      - cargo

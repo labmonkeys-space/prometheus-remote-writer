@@ -1,0 +1,28 @@
+[package]
+name = "gateway"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Standalone gateway: consumes OpenNMS CollectionSet metrics from Kafka and writes Prometheus Remote Write"
+
+[[bin]]
+name = "onms-remote-write-gateway"
+path = "src/main.rs"
+
+[dependencies]
+gateway-core = { path = "../core" }
+anyhow.workspace = true
+prost.workspace = true
+serde.workspace = true
+tracing.workspace = true
+
+tokio = { version = "1", features = ["full"] }
+rdkafka = { version = "0.37", features = ["cmake-build", "tokio"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+figment = { version = "0.10", features = ["env", "toml"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+metrics = "0.24"
+metrics-exporter-prometheus = { version = "0.16", default-features = false }
+axum = "0.7"

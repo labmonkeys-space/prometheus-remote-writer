@@ -4,9 +4,8 @@ _bmad/
 openspec/
 .claude/
 
-# Maven / build output
+# Build output
 target/
-.mvn/wrapper/maven-wrapper.jar
 *.log
 
 # IDE
