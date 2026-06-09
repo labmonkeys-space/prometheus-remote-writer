@@ -27,6 +27,7 @@ use rdkafka::config::ClientConfig;
 use rdkafka::consumer::{CommitMode, Consumer, StreamConsumer};
 use rdkafka::message::Message as _;
 use rdkafka::{Offset, TopicPartitionList};
+use tokio::signal::unix::{signal, SignalKind};
 use tracing::{error, info, warn};
 
 use crate::sender::Sender;
@@ -60,6 +61,8 @@ pub async fn run(config: &Config, sender: Sender, ready: Arc<AtomicBool>) -> Res
     // Highest (offset + 1) seen per (topic, partition) since the last commit.
     let mut pending: HashMap<(String, i32), i64> = HashMap::new();
 
+    let mut sigterm = signal(SignalKind::terminate()).context("installing SIGTERM handler")?;
+
     // Subscription succeeded; the consumer is live.
     ready.store(true, Ordering::Relaxed);
     info!(topic = %config.kafka.topic, group = %config.kafka.group_id, "consumer started");
@@ -67,6 +70,15 @@ pub async fn run(config: &Config, sender: Sender, ready: Arc<AtomicBool>) -> Res
     loop {
         tokio::select! {
             biased;
+
+            _ = sigterm.recv() => {
+                info!("SIGTERM received; draining and committing before exit");
+                break;
+            }
+            _ = tokio::signal::ctrl_c() => {
+                info!("SIGINT received; draining and committing before exit");
+                break;
+            }
 
             received = consumer.recv() => {
                 match received {
@@ -124,6 +136,13 @@ pub async fn run(config: &Config, sender: Sender, ready: Arc<AtomicBool>) -> Res
             }
         }
     }
+
+    // Graceful shutdown: stop reporting ready, drain the in-flight batch, and
+    // commit so we don't reprocess what was already written.
+    ready.store(false, Ordering::Relaxed);
+    flush(&consumer, &sender, &mut batch, &mut pending).await;
+    info!("gateway stopped");
+    Ok(())
 }
 
 /// Flush the current batch, then commit its offsets. No-op on an empty batch.

@@ -136,3 +136,97 @@ impl Sender {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn sample() -> MappedSample {
+        MappedSample {
+            labels: vec![("__name__".to_string(), "onms_x".to_string())],
+            timestamp_ms: 1,
+            value: 1.0,
+            is_counter: false,
+        }
+    }
+
+    fn sender(uri: String) -> Sender {
+        Sender::new(uri, WireVersion::V1, &BTreeMap::new()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn writes_on_2xx() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+
+        assert_eq!(
+            sender(server.uri()).send(&[sample()]).await,
+            FlushOutcome::Written
+        );
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn drops_on_4xx() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(400))
+            .mount(&server)
+            .await;
+
+        assert_eq!(
+            sender(server.uri()).send(&[sample()]).await,
+            FlushOutcome::Dropped
+        );
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    }
+
+    // wiremock evaluates mocks in registration order, so mount the limited
+    // transient mock first; once its single hit is consumed the success mock
+    // takes over — exercising the retry path to a terminal Written.
+    #[tokio::test]
+    async fn retries_5xx_then_writes() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(503))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+
+        assert_eq!(
+            sender(server.uri()).send(&[sample()]).await,
+            FlushOutcome::Written
+        );
+        assert!(server.received_requests().await.unwrap().len() >= 2);
+    }
+
+    #[tokio::test]
+    async fn retries_429_then_writes() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(429))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+
+        assert_eq!(
+            sender(server.uri()).send(&[sample()]).await,
+            FlushOutcome::Written
+        );
+        assert!(server.received_requests().await.unwrap().len() >= 2);
+    }
+}
