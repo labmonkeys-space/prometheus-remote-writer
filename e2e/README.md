@@ -48,13 +48,23 @@ docker compose -f e2e/compose.<backend>.yml down -v --remove-orphans
 | Mimir | http://localhost:9009 (tenant `X-Scope-OrgID: e2e`) |
 | VictoriaMetrics | http://localhost:8428 |
 
-## How metrics are produced
+## How the smoke works vs. the full pipeline
 
-The base stack provisions nothing on its own. The smoke harness adds a
-requisition with one node monitored over **ICMP** (the core container's own
-loopback), so Pollerd persists response-time collection sets — which the Kafka
-Producer forwards. To exercise SNMP collection instead, provision a node
-pointing at an SNMP agent/simulator on the compose network.
+There are two ways to get data flowing:
+
+- **`make smoke` (deterministic, CI-grade):** brings up only `kafka` + the
+  backend + `gateway`, then a host-run seeder
+  (`cargo run -p gateway --example seed`) publishes synthetic
+  `CollectionSetProtos` to the `metrics` topic via the host listener
+  (`localhost:29092`). It asserts `onms_*` series reach the backend. This proves
+  the **Kafka → gateway → backend** path without depending on OpenNMS collection
+  timing. Tune with `SEED_COUNT`, `SMOKE_TIMEOUT`, `SMOKE_POLL`.
+
+- **Full pipeline (manual):** `docker compose -f e2e/compose.<backend>.yml up -d
+  --build` starts OpenNMS too. OpenNMS forwards *collected* metrics — so you
+  need a `collectd` source (SNMP/JMX); provision a node pointing at an SNMP
+  agent/simulator on the compose network. Pollerd/ICMP latency alone is **not**
+  forwarded by the Kafka Producer.
 
 ## Notes
 

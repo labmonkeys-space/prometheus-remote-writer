@@ -45,7 +45,7 @@ services:
       kafka:
         condition: service_healthy
       victoriametrics:
-        condition: service_healthy
+        condition: service_started
 
   grafana:
     extends:
@@ -64,11 +64,11 @@ services:
       - "8428:8428"
     volumes:
       - vm-data:/vm-data
+    # VictoriaMetrics ships as a scratch image (no shell/wget), so an
+    # in-container healthcheck can't run. The gateway retries remote-write until
+    # VM is ready, and the smoke polls VM from the host.
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8428/health"]
-      interval: 5s
-      timeout:  3s
-      retries:  20
+      disable: true
 
 volumes:
   postgres-data:

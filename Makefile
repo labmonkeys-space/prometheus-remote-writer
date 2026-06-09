@@ -25,8 +25,9 @@ IMAGE_TAG   ?= dev
 # Smoke harness: per-backend deadline/poll and which backends to exercise.
 SMOKE_DEFAULT_BACKENDS ?= prometheus mimir victoriametrics
 BACKENDS               ?= $(SMOKE_DEFAULT_BACKENDS)
-SMOKE_TIMEOUT          ?= 600
-SMOKE_POLL             ?= 15
+SMOKE_TIMEOUT          ?= 120
+SMOKE_POLL             ?= 5
+SEED_COUNT             ?= 60
 
 .PHONY: help build test verify fmt fmt-check clippy run image release \
         smoke smoke-prometheus smoke-mimir smoke-victoriametrics clean
@@ -63,7 +64,7 @@ release: ## Compile the workspace (release)
 image: ## Build the OCI container image ($(IMAGE):$(IMAGE_TAG))
 	docker build -t $(IMAGE):$(IMAGE_TAG) .
 
-smoke: ## E2E smoke for BACKENDS: OpenNMS -> Kafka -> gateway -> backend (needs Docker)
+smoke: ## E2E smoke: seed Kafka -> gateway -> backend, assert onms_* queryable (needs Docker)
 	@set -o pipefail; \
 	failed=""; passed=""; cur=""; \
 	cleanup() { [ -n "$$cur" ] && docker compose -f "e2e/compose.$$cur.yml" down -v --remove-orphans >/dev/null 2>&1 || true; }; \
@@ -76,20 +77,16 @@ smoke: ## E2E smoke for BACKENDS: OpenNMS -> Kafka -> gateway -> backend (needs 
 	        victoriametrics) q="http://localhost:8428/api/v1/query"; hdr="" ;; \
 	        *) echo "ERROR: unknown backend '$$be'" >&2; failed="$$failed $$be"; continue ;; \
 	    esac; \
-	    echo; echo "=== [$$be] bringing up stack (building gateway) ==="; \
+	    echo; echo "=== [$$be] bringing up kafka + $$be + gateway ==="; \
 	    docker compose -f "$$file" down -v --remove-orphans >/dev/null 2>&1 || true; \
-	    docker compose -f "$$file" up -d --build >/dev/null; \
-	    echo "=== [$$be] waiting for the OpenNMS REST API ==="; \
-	    for i in $$(seq 1 90); do \
-	        curl -sf -u admin:admin http://localhost:8980/opennms/rest/info >/dev/null 2>&1 && break; \
-	        sleep 5; \
-	    done; \
-	    echo "=== [$$be] provisioning an ICMP node so collection produces metrics ==="; \
-	    curl -sf -u admin:admin -X POST http://localhost:8980/opennms/rest/requisitions \
-	        -H 'Content-Type: application/xml' \
-	        -d '<model-import foreign-source="e2e"><node foreign-id="onms-core" node-label="onms-core"><interface ip-addr="127.0.0.1" snmp-primary="N"><monitored-service service-name="ICMP"/></interface></node></model-import>' >/dev/null 2>&1 || true; \
-	    curl -sf -u admin:admin -X PUT 'http://localhost:8980/opennms/rest/requisitions/e2e/import?rescanExisting=true' >/dev/null 2>&1 || true; \
-	    echo "=== [$$be] waiting up to $(SMOKE_TIMEOUT)s for onms_* series at the backend ==="; \
+	    if ! docker compose -f "$$file" up -d --build --wait kafka "$$be" gateway >/dev/null; then \
+	        echo "=== [$$be] FAIL: stack did not become healthy ===" >&2; \
+	        failed="$$failed $$be"; cleanup; cur=""; continue; \
+	    fi; \
+	    echo "=== [$$be] seeding synthetic CollectionSetProtos into Kafka ==="; \
+	    ( SEED_BROKERS=localhost:29092 SEED_TOPIC=metrics SEED_COUNT=$(SEED_COUNT) \
+	        $(CARGO) run --quiet -p gateway --example seed >/dev/null 2>&1 & ); \
+	    echo "=== [$$be] waiting up to $(SMOKE_TIMEOUT)s for onms_* series ==="; \
 	    start=$$SECONDS; ok=0; \
 	    while [ $$((SECONDS - start)) -lt $(SMOKE_TIMEOUT) ]; do \
 	        n=$$(curl -sfG $$hdr "$$q" --data-urlencode 'query=count({__name__=~"onms_.+"})' 2>/dev/null \

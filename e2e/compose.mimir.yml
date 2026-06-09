@@ -48,7 +48,7 @@ services:
       kafka:
         condition: service_healthy
       mimir:
-        condition: service_healthy
+        condition: service_started
 
   grafana:
     extends:
@@ -66,11 +66,11 @@ services:
     volumes:
       - ./mimir/mimir.yaml:/etc/mimir/mimir.yaml:ro
       - mimir-data:/data
+    # The grafana/mimir image is distroless (no shell/wget), so an in-container
+    # healthcheck can't run. The gateway retries remote-write until Mimir is
+    # ready, and the smoke polls Mimir from the host.
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:9009/ready"]
-      interval: 5s
-      timeout:  3s
-      retries:  30
+      disable: true
 
 volumes:
   postgres-data:
