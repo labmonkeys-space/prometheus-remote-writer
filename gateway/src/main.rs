@@ -8,15 +8,12 @@
 //! Standalone gateway entry point: load config, start observability, then run
 //! the Kafka → Remote Write loop.
 
-mod ingest;
-mod observability;
-mod sender;
-
 use anyhow::{Context, Result};
 use figment::providers::{Env, Format, Toml};
 use figment::Figment;
+use gateway::sender::Sender;
+use gateway::{ingest, observability};
 use gateway_core::{Config, WireVersion};
-use sender::Sender;
 use tracing::info;
 
 #[tokio::main]

@@ -7,6 +7,7 @@
 #   make build     Compile the workspace (debug)
 #   make test      Run unit tests
 #   make verify    fmt check + clippy + tests (what CI runs)
+#   make integration  Kafka integration tests (testcontainers; needs Docker)
 #   make fmt       Format the workspace
 #   make clippy    Lint with warnings denied
 #   make run       Run the gateway locally
@@ -29,7 +30,7 @@ SMOKE_TIMEOUT          ?= 120
 SMOKE_POLL             ?= 5
 SEED_COUNT             ?= 60
 
-.PHONY: help build test verify fmt fmt-check clippy run image release \
+.PHONY: help build test verify integration fmt fmt-check clippy run image release \
         smoke smoke-prometheus smoke-mimir smoke-victoriametrics clean
 
 .DEFAULT_GOAL := help
@@ -45,6 +46,9 @@ test: ## Run unit tests
 	$(CARGO) test --workspace
 
 verify: fmt-check clippy test ## fmt check + clippy + tests (CI entrypoint)
+
+integration: ## Kafka integration tests via testcontainers (needs Docker)
+	$(CARGO) test -p gateway --test kafka_integration -- --ignored --test-threads=1
 
 fmt: ## Format the workspace
 	$(CARGO) fmt --all

@@ -29,3 +29,5 @@ axum = "0.7"
 
 [dev-dependencies]
 wiremock = "0.6"
+snap.workspace = true
+testcontainers-modules = { version = "0.15", features = ["kafka"] }
