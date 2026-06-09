@@ -12,16 +12,15 @@ on:
 
 permissions:
   contents: write
+  # Push the gateway image to GitHub Container Registry (ghcr.io).
+  packages: write
   # OIDC token for Sigstore — required by actions/attest-build-provenance
   # to mint an ephemeral signing certificate against this workflow run's
   # identity.
   id-token: write
   # GitHub Artifact Attestations API — required to upload the provenance
-  # attestation bundle to the repo's /attestations endpoint.
+  # attestation bundles to the repo's /attestations endpoint.
   attestations: write
-  # Needed by the final "Trigger docs publish" step, which dispatches
-  # publish-docs.yml via `gh workflow run` after the release is created.
-  actions: write
 
 env:
   # Maintainer whose GitHub-registered GPG key(s) sign release tags.
@@ -33,7 +32,7 @@ env:
 
 jobs:
   release:
-    name: Build KAR and create GitHub Release
+    name: Build image and create GitHub Release
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout
@@ -41,20 +40,6 @@ jobs:
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
           persist-credentials: false
-
-      - name: Set up JDK 21
-        uses: actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654  # v5.2.0
-        with:
-          distribution: temurin
-          java-version: '21'
-
-      - name: Cache Maven repository
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
-        with:
-          path: ~/.m2/repository
-          key: ${{ runner.os }}-m2-${{ hashFiles('**/pom.xml') }}
-          restore-keys: |
-            ${{ runner.os }}-m2-
 
       - name: Resolve tag and version
         id: resolve
@@ -113,128 +98,118 @@ jobs:
             exit 1
           fi
 
-      - name: Build KAR
-        # Skip tests on the release path — CI already ran `make verify` on
-        # the tagged commit before it was pushed. Shipping an untested
-        # build would be a problem, but gating here is belt-and-braces.
-        run: make kar MAVEN_FLAGS="-B --no-transfer-progress -U"
+      - name: Compute image reference
+        id: image
+        # GHCR requires a lowercase path; ${GITHUB_REPOSITORY,,} lowercases
+        # owner/repo so an owner with uppercase letters still resolves.
+        run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
 
-      - name: Generate SBOM
-        # Activate the opt-in `sbom` profile to produce a CycloneDX 1.6
-        # aggregate SBOM at target/bom.json. The profile is gated so that
-        # local `make build` and `make kar` stay fast; only the release
-        # path generates the SBOM.
-        run: make sbom MAVEN_FLAGS="-B --no-transfer-progress -U"
+      - name: Set up QEMU
+        # Register binfmt handlers so the arm64 layer of the multi-arch
+        # build can run under emulation on the amd64 runner.
+        uses: docker/setup-qemu-action@29109295f81e9208d7d86ff1c6c12d2833863392  # v3.6.0
 
-      - name: Extract release notes from CHANGELOG
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435  # v3.11.1
+
+      - name: Log in to GHCR
+        uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772  # v3.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push multi-arch image
+        id: build
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83  # v6.18.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ steps.image.outputs.name }}:${{ steps.resolve.outputs.version }}
+            ${{ steps.image.outputs.name }}:latest
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ steps.resolve.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          # We attest provenance separately via attest-build-provenance with
+          # push-to-registry; disabling BuildKit's inline provenance keeps a
+          # clean image index whose digest is what we attest and pin.
+          provenance: false
+
+      - name: Generate CycloneDX SBOM
+        # Syft scans the just-pushed image by its immutable digest and emits
+        # a CycloneDX SBOM describing the shipped image (OS packages + the
+        # Rust dependency tree). For a multi-arch index syft resolves the
+        # runner's native platform (linux/amd64); the package set is
+        # identical across arches.
+        uses: anchore/sbom-action@7b36ad622f042cab6f59a75c2ac24ccb256e9b45  # v0.20.4
+        with:
+          image: ${{ steps.image.outputs.name }}@${{ steps.build.outputs.digest }}
+          format: cyclonedx-json
+          output-file: prometheus-remote-writer-${{ steps.resolve.outputs.version }}.cdx.json
+          upload-artifact: false
+
+      - name: Attest image build provenance
+        # SLSA Build Provenance for the image, signed by Sigstore using a
+        # Fulcio-issued ephemeral certificate bound to this run's GitHub
+        # OIDC token, and pushed to the registry alongside the image so
+        # `gh attestation verify oci://<image>@<digest>` resolves it.
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32  # v4.1.0
+        with:
+          subject-name: ${{ steps.image.outputs.name }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+      - name: Attest SBOM build provenance
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32  # v4.1.0
+        with:
+          subject-path: prometheus-remote-writer-${{ steps.resolve.outputs.version }}.cdx.json
+
+      - name: Assemble release notes
         id: notes
-        run: |
-          VERSION="${{ steps.resolve.outputs.version }}"
-          if [ ! -f CHANGELOG.md ]; then
-            echo "CHANGELOG.md not found; using auto-generated notes" >&2
-            exit 0
-          fi
-          awk -v ver="$VERSION" '
-            $0 ~ "^## \\[" ver "\\]" { p=1; next }
-            p && /^## \[/ { exit }
-            p { print }
-          ' CHANGELOG.md > release-notes.md
-          if [ ! -s release-notes.md ]; then
-            echo "No CHANGELOG entry for $VERSION; using auto-generated notes" >&2
-          else
-            echo "notes-file=release-notes.md" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Locate KAR artifact
-        id: kar
-        run: |
-          KAR=$(find assembly/kar/target -maxdepth 1 -name '*.kar' -type f | head -1)
-          if [ -z "$KAR" ]; then
-            echo "::error::No KAR found in assembly/kar/target" >&2
-            exit 1
-          fi
-          echo "path=$KAR" >> "$GITHUB_OUTPUT"
-
-      - name: Stage SBOM at release name
-        # Copy target/bom.json to the versioned filename consumers will
-        # see on the release page. Kept as a separate step (rather than
-        # inlined into Create GitHub Release) so the attestation step
-        # can take subject-path against the final on-disk path.
-        id: sbom
+        # Always produce a notes file: the per-version CHANGELOG section (if
+        # present) followed by the image reference pinned by @sha256:<digest>
+        # and the verification command, so the release records exactly which
+        # image it corresponds to.
         shell: bash
         run: |
           set -euo pipefail
           VERSION="${{ steps.resolve.outputs.version }}"
-          SBOM="prometheus-remote-writer-${VERSION}.cdx.json"
-          if [ ! -f target/bom.json ]; then
-            echo "::error::target/bom.json missing; the Generate SBOM step did not produce the expected file." >&2
-            exit 1
+          IMAGE="${{ steps.image.outputs.name }}"
+          DIGEST="${{ steps.build.outputs.digest }}"
+          : > release-notes.md
+          if [ -f CHANGELOG.md ]; then
+            awk -v ver="$VERSION" '
+              $0 ~ "^## \\[" ver "\\]" { p=1; next }
+              p && /^## \[/ { exit }
+              p { print }
+            ' CHANGELOG.md >> release-notes.md
           fi
-          # Validate the SBOM is well-formed JSON before we attest it.
-          # An empty or malformed bom.json would still get a valid
-          # provenance attestation over its SHA-256 — consumers would
-          # then see a "verified" file they cannot parse.
-          if ! jq empty target/bom.json >/dev/null 2>&1; then
-            echo "::error::target/bom.json is not valid JSON; refusing to attest a corrupt SBOM." >&2
-            exit 1
-          fi
-          cp target/bom.json "$SBOM"
-          echo "path=$SBOM" >> "$GITHUB_OUTPUT"
-
-      - name: Attest KAR build provenance
-        # SLSA Build Provenance attestation for the KAR. Signed by
-        # Sigstore using a Fulcio-issued ephemeral certificate bound to
-        # this workflow run's GitHub OIDC token. Attestation is stored
-        # on the repo's /attestations endpoint and surfaced to verifiers
-        # via `gh attestation verify`.
-        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32  # v4.1.0
-        with:
-          subject-path: ${{ steps.kar.outputs.path }}
-
-      - name: Attest SBOM build provenance
-        # Same treatment for the SBOM. Two attestations, one per
-        # release artifact — verifiers run `gh attestation verify`
-        # against each downloaded file independently.
-        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32  # v4.1.0
-        with:
-          subject-path: ${{ steps.sbom.outputs.path }}
+          {
+            printf '\n## Container image\n\n'
+            printf 'Published to GHCR and pinned by immutable digest:\n\n'
+            printf '```\n%s@%s\n```\n' "$IMAGE" "$DIGEST"
+            printf '\nVerify build provenance:\n\n'
+            printf '```\ngh attestation verify oci://%s@%s --repo %s\n```\n' \
+              "$IMAGE" "$DIGEST" "$GITHUB_REPOSITORY"
+          } >> release-notes.md
+          echo "file=release-notes.md" >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub Release
-        # Two assets only: the KAR and the SBOM. Authenticity is verified
-        # via the build provenance attestations (one per artifact),
-        # fetched server-side by `gh attestation verify`. No .asc / KEYS
-        # / checksum files — the attestation encodes the artifact's
-        # SHA-256 and binds it to this workflow's OIDC identity.
+        # One uploaded asset: the versioned CycloneDX SBOM. The image is not
+        # uploaded — it lives in GHCR and is referenced by digest in the
+        # notes; authenticity is established by the SLSA provenance
+        # attestation, verified with `gh attestation verify`.
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="${{ steps.resolve.outputs.tag }}"
-          KAR="${{ steps.kar.outputs.path }}"
-          SBOM="${{ steps.sbom.outputs.path }}"
-          ASSETS=(
-            "$KAR"
+          SBOM="prometheus-remote-writer-${{ steps.resolve.outputs.version }}.cdx.json"
+          gh release create "$TAG" \
+            --title "$TAG" \
+            --notes-file "${{ steps.notes.outputs.file }}" \
             "$SBOM"
-          )
-          if [ -n "${{ steps.notes.outputs.notes-file }}" ]; then
-            gh release create "$TAG" \
-              --title "$TAG" \
-              --notes-file "${{ steps.notes.outputs.notes-file }}" \
-              "${ASSETS[@]}"
-          else
-            gh release create "$TAG" \
-              --title "$TAG" \
-              --generate-notes \
-              "${ASSETS[@]}"
-          fi
-
-      # The `release: published` event fired by `gh release create` runs
-      # under GITHUB_TOKEN, so by design GitHub Actions does NOT cascade
-      # it to other workflows. Manually dispatch publish-docs against
-      # the just-released tag — `workflow_dispatch` is allowed even
-      # when initiated by GITHUB_TOKEN.
-      - name: Trigger docs publish
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          TAG="${{ steps.resolve.outputs.tag }}"
-          gh workflow run publish-docs.yml --ref main -f tag="$TAG"
