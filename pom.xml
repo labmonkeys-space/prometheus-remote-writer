@@ -89,7 +89,7 @@
         <assertj.version>3.27.7</assertj.version>
         <mockito.version>5.23.0</mockito.version>
         <testcontainers.version>2.0.5</testcontainers.version>
-        <okhttp-mockwebserver.version>5.3.2</okhttp-mockwebserver.version>
+        <okhttp-mockwebserver.version>5.4.0</okhttp-mockwebserver.version>
         <awaitility.version>4.3.0</awaitility.version>
 
         <!-- Build plugin versions -->
