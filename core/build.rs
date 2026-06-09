@@ -1,3 +1,10 @@
+/*
+ * Copyright 2026 The OpenNMS Group, Inc.
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Created by Ronny Trommer <ronny@opennms.com>
+ */
+
 // Compiles the Prometheus Remote Write v1/v2 protos and the OpenNMS
 // CollectionSet proto into Rust types via prost-build. The generated code is
 // emitted into a single include file (`_protos.rs`) under OUT_DIR so that the
@@ -18,10 +25,27 @@ fn main() {
         proto_dir.join("collectionset.proto"),
     ];
 
+    // `collectionset.proto` imports `google/protobuf/wrappers.proto`. Some
+    // protoc packages bundle the well-known types (e.g. Homebrew); others
+    // (Debian/Ubuntu `protobuf-compiler`) ship them under a system include via
+    // `libprotobuf-dev`. Add whichever include dir actually has them so the
+    // build works on macOS, in CI, and in the container image alike.
+    let mut includes: Vec<PathBuf> = vec![proto_dir.clone()];
+    for candidate in [
+        "/usr/include",
+        "/usr/local/include",
+        "/opt/homebrew/include",
+    ] {
+        let dir = PathBuf::from(candidate);
+        if dir.join("google/protobuf/wrappers.proto").exists() {
+            includes.push(dir);
+        }
+    }
+
     let mut config = prost_build::Config::new();
     config.include_file("_protos.rs");
     config
-        .compile_protos(&protos, &[&proto_dir])
+        .compile_protos(&protos, &includes)
         .expect("failed to compile protobuf definitions");
 
     println!("cargo:rerun-if-changed={}", proto_dir.display());

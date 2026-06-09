@@ -1,9 +1,8 @@
 # E2E sandbox — VictoriaMetrics backend.
 #
 # Usage:
-#   make -C .. kar                             # build the KAR once
-#   docker compose -f compose.victoriametrics.yml up -d
-#   docker compose -f compose.victoriametrics.yml down -v
+#   docker compose -f compose.victoriametrics.yml up -d --build
+#   docker compose -f compose.victoriametrics.yml down -v --remove-orphans
 #
 # UI endpoints:
 #   http://localhost:8980   OpenNMS (admin/admin)
@@ -21,6 +20,11 @@ services:
       file: compose.base.yml
       service: postgres
 
+  kafka:
+    extends:
+      file: compose.base.yml
+      service: kafka
+
   core:
     extends:
       file: compose.base.yml
@@ -28,8 +32,20 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-    volumes:
-      - ./opennms/victoriametrics.cfg:/opt/opennms-etc-overlay/org.opennms.plugins.tss.prometheusremotewriter.cfg:ro
+      kafka:
+        condition: service_healthy
+
+  gateway:
+    extends:
+      file: compose.base.yml
+      service: gateway
+    environment:
+      GATEWAY_REMOTE_WRITE__ENDPOINT: http://victoriametrics:8428/api/v1/write
+    depends_on:
+      kafka:
+        condition: service_healthy
+      victoriametrics:
+        condition: service_healthy
 
   grafana:
     extends:

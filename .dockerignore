@@ -1,0 +1,8 @@
+target/
+.git/
+openspec/
+_bmad/
+_bmad-output/
+.claude/
+e2e/
+**/*.md

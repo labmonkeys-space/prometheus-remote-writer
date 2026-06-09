@@ -1,9 +1,8 @@
 # E2E sandbox — Grafana Mimir backend (single-binary).
 #
 # Usage:
-#   make -C .. kar                             # build the KAR once
-#   docker compose -f compose.mimir.yml up -d
-#   docker compose -f compose.mimir.yml down -v
+#   docker compose -f compose.mimir.yml up -d --build
+#   docker compose -f compose.mimir.yml down -v --remove-orphans
 #
 # UI endpoints:
 #   http://localhost:8980   OpenNMS (admin/admin)
@@ -21,6 +20,11 @@ services:
       file: compose.base.yml
       service: postgres
 
+  kafka:
+    extends:
+      file: compose.base.yml
+      service: kafka
+
   core:
     extends:
       file: compose.base.yml
@@ -28,8 +32,23 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      kafka:
+        condition: service_healthy
+
+  gateway:
+    extends:
+      file: compose.base.yml
+      service: gateway
+    environment:
+      GATEWAY_REMOTE_WRITE__ENDPOINT: http://mimir:9009/api/v1/push
+      CONFIG_FILE: /etc/gateway/config.toml
     volumes:
-      - ./opennms/mimir.cfg:/opt/opennms-etc-overlay/org.opennms.plugins.tss.prometheusremotewriter.cfg:ro
+      - ./gateway/mimir.toml:/etc/gateway/config.toml:ro
+    depends_on:
+      kafka:
+        condition: service_healthy
+      mimir:
+        condition: service_healthy
 
   grafana:
     extends:

@@ -62,6 +62,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      kafka:
+        condition: service_healthy
     environment:
       POSTGRES_HOST:     postgres
       POSTGRES_PORT:     "5432"
@@ -76,16 +78,65 @@ services:
       - "8101:8101"   # Karaf SSH shell (admin/admin by default)
     volumes:
       - ./opennms/opennms.properties.d:/opt/opennms-etc-overlay/opennms.properties.d:ro
-      - ../assembly/kar/target:/opt/opennms/deploy:ro
+      # OpenNMS Kafka Producer: forward collected metrics (CollectionSetProtos)
+      # to the `metrics` topic that the gateway consumes.
+      - ./opennms/org.opennms.features.kafka.producer.client.cfg:/opt/opennms-etc-overlay/org.opennms.features.kafka.producer.client.cfg:ro
+      - ./opennms/org.opennms.features.kafka.producer.cfg:/opt/opennms-etc-overlay/org.opennms.features.kafka.producer.cfg:ro
+      - ./opennms/featuresBoot.d:/opt/opennms-etc-overlay/featuresBoot.d:ro
       - opennms-data:/opennms-data
-      # Per-backend plugin cfg is appended by the including compose
-      # file (compose.<backend>.yml).
     healthcheck:
       test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://localhost:8980/opennms/login.jsp"]
       interval: 10s
       timeout:  5s
       retries:  60   # first boot can take several minutes
       start_period: 30s
+
+  # Single-node KRaft broker carrying the OpenNMS Kafka Producer metrics topic.
+  kafka:
+    image: apache/kafka:4.1.1
+    environment:
+      TZ: UTC
+      KAFKA_KRAFT_MODE: "true"
+      KAFKA_PROCESS_ROLES: "broker,controller"
+      KAFKA_NODE_ID: "1"
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka:9093"
+      KAFKA_LISTENERS: "PLAINTEXT://:9092,CONTROLLER://:9093"
+      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://kafka:9092"
+      KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+      KAFKA_INTER_BROKER_LISTENER_NAME: "PLAINTEXT"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server kafka:9092 >/dev/null 2>&1"]
+      interval: 5s
+      timeout:  5s
+      retries:  20
+
+  # Standalone Rust gateway: consume CollectionSetProtos from Kafka, fan out to
+  # the backend via Prometheus Remote Write. The per-backend compose file
+  # `extends` this and supplies the remote-write endpoint + depends_on.
+  gateway:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    environment:
+      GATEWAY_KAFKA__BROKERS:  kafka:9092
+      GATEWAY_KAFKA__TOPIC:    metrics
+      GATEWAY_KAFKA__GROUP_ID: onms-remote-write-gateway
+      GATEWAY_MAPPING__NAMESPACE: onms
+      GATEWAY_REMOTE_WRITE__WIRE_VERSION: "1"
+      GATEWAY_REMOTE_WRITE__BATCH_MAX_INTERVAL_MS: "1000"
+      GATEWAY_RUNTIME__LISTEN: "0.0.0.0:9100"
+      GATEWAY_RUNTIME__LOG_LEVEL: info
+    ports:
+      - "9100:9100"   # /metrics, /healthz, /readyz
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9100/healthz >/dev/null 2>&1"]
+      interval: 5s
+      timeout:  3s
+      retries:  20
 
 volumes:
   postgres-data:

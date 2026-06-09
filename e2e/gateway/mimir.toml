@@ -1,0 +1,6 @@
+# Gateway overlay for the Mimir backend. Mimir is multi-tenant, so every
+# Remote Write request needs the X-Scope-OrgID header. Header names can't be
+# expressed as GATEWAY_* env vars (hyphens), so they live here; the rest of the
+# config still comes from the environment and is merged over this file.
+[remote_write.headers]
+"X-Scope-OrgID" = "e2e"
