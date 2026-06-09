@@ -276,6 +276,7 @@ async fn crash_replay_redelivers_uncommitted_records() {
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
     gw2.abort();
+    let _ = gw2.await;
 
     assert!(
         replayed,
@@ -323,12 +324,28 @@ async fn batching_is_bounded_by_max_samples() {
         );
     }
     gw.abort();
+    let _ = gw.await;
 
     let reqs = backend.received_requests().await.unwrap_or_default();
+    // Guard against a vacuous pass: require requests that actually decode, so
+    // `max` below reflects real payloads rather than `unwrap_or(0)` over an
+    // empty decoded set.
+    let decoded = reqs.iter().filter_map(decode_v1).count();
+    assert!(
+        decoded >= 5,
+        "expected >=5 decodable flushes, only {decoded} decoded"
+    );
+
     let max = max_samples_per_request(&reqs);
     assert!(
         max <= CAP,
         "a request carried {max} samples, exceeding the batch_max_samples bound of {CAP}"
     );
-    assert!(reqs.len() >= 5, "expected several bounded flushes");
+    // The cap must be the *active* flush trigger, not something smaller — at
+    // least one flush reached exactly CAP. (One sample per record, fast
+    // producer, long interval ⇒ size-triggered flushes of exactly CAP.)
+    assert_eq!(
+        max, CAP,
+        "size cap should be the active flush trigger; largest request had {max} samples, expected {CAP}"
+    );
 }
