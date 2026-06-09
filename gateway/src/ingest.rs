@@ -62,6 +62,7 @@ pub async fn run(config: &Config, sender: Sender, ready: Arc<AtomicBool>) -> Res
     let mut pending: HashMap<(String, i32), i64> = HashMap::new();
 
     let mut sigterm = signal(SignalKind::terminate()).context("installing SIGTERM handler")?;
+    let mut sigint = signal(SignalKind::interrupt()).context("installing SIGINT handler")?;
 
     // Subscription succeeded; the consumer is live.
     ready.store(true, Ordering::Relaxed);
@@ -75,7 +76,7 @@ pub async fn run(config: &Config, sender: Sender, ready: Arc<AtomicBool>) -> Res
                 info!("SIGTERM received; draining and committing before exit");
                 break;
             }
-            _ = tokio::signal::ctrl_c() => {
+            _ = sigint.recv() => {
                 info!("SIGINT received; draining and committing before exit");
                 break;
             }
@@ -137,10 +138,22 @@ pub async fn run(config: &Config, sender: Sender, ready: Arc<AtomicBool>) -> Res
         }
     }
 
-    // Graceful shutdown: stop reporting ready, drain the in-flight batch, and
-    // commit so we don't reprocess what was already written.
+    // Graceful shutdown: stop reporting ready, then drain the in-flight batch
+    // within a bounded grace period and commit. If the drain can't finish (e.g.
+    // the backend is down and `send` is retrying), exit anyway without
+    // committing — the un-committed records replay on restart, preserving
+    // at-least-once.
     ready.store(false, Ordering::Relaxed);
-    flush(&consumer, &sender, &mut batch, &mut pending).await;
+    let grace = Duration::from_millis(config.runtime.shutdown_grace_ms);
+    if tokio::time::timeout(grace, flush(&consumer, &sender, &mut batch, &mut pending))
+        .await
+        .is_err()
+    {
+        warn!(
+            grace_ms = config.runtime.shutdown_grace_ms,
+            "shutdown drain timed out; exiting without committing (records will replay)"
+        );
+    }
     info!("gateway stopped");
     Ok(())
 }

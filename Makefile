@@ -66,9 +66,14 @@ image: ## Build the OCI container image ($(IMAGE):$(IMAGE_TAG))
 
 smoke: ## E2E smoke: seed Kafka -> gateway -> backend, assert onms_* queryable (needs Docker)
 	@set -o pipefail; \
-	failed=""; passed=""; cur=""; \
-	cleanup() { [ -n "$$cur" ] && docker compose -f "e2e/compose.$$cur.yml" down -v --remove-orphans >/dev/null 2>&1 || true; }; \
+	failed=""; passed=""; cur=""; seed_pid=""; \
+	cleanup() { \
+	    [ -n "$$seed_pid" ] && kill "$$seed_pid" 2>/dev/null || true; \
+	    [ -n "$$cur" ] && docker compose -f "e2e/compose.$$cur.yml" down -v --remove-orphans >/dev/null 2>&1 || true; \
+	}; \
 	trap 'cleanup; echo; echo "=== interrupted ==="; exit 130' INT TERM; \
+	echo "=== building seeder ==="; \
+	$(CARGO) build --quiet -p gateway --example seed || { echo "seeder build failed" >&2; exit 1; }; \
 	for be in $(BACKENDS); do \
 	    cur="$$be"; file="e2e/compose.$$be.yml"; \
 	    case "$$be" in \
@@ -84,8 +89,9 @@ smoke: ## E2E smoke: seed Kafka -> gateway -> backend, assert onms_* queryable (
 	        failed="$$failed $$be"; cleanup; cur=""; continue; \
 	    fi; \
 	    echo "=== [$$be] seeding synthetic CollectionSetProtos into Kafka ==="; \
-	    ( SEED_BROKERS=localhost:29092 SEED_TOPIC=metrics SEED_COUNT=$(SEED_COUNT) \
-	        $(CARGO) run --quiet -p gateway --example seed >/dev/null 2>&1 & ); \
+	    SEED_BROKERS=localhost:29092 SEED_TOPIC=metrics SEED_COUNT=$(SEED_COUNT) \
+	        ./target/debug/examples/seed >"/tmp/smoke-seed-$$be.log" 2>&1 & \
+	    seed_pid=$$!; \
 	    echo "=== [$$be] waiting up to $(SMOKE_TIMEOUT)s for onms_* series ==="; \
 	    start=$$SECONDS; ok=0; \
 	    while [ $$((SECONDS - start)) -lt $(SMOKE_TIMEOUT) ]; do \
@@ -102,9 +108,10 @@ smoke: ## E2E smoke: seed Kafka -> gateway -> backend, assert onms_* queryable (
 	        echo "=== [$$be] FAIL: no onms_* series within $(SMOKE_TIMEOUT)s ===" >&2; \
 	        echo "--- last 40 gateway log lines ---" >&2; \
 	        docker compose -f "$$file" logs --tail 40 gateway >&2 2>/dev/null || true; \
+	        echo "--- seeder log ---" >&2; tail -20 "/tmp/smoke-seed-$$be.log" >&2 2>/dev/null || true; \
 	        failed="$$failed $$be"; \
 	    fi; \
-	    cleanup; cur=""; \
+	    cleanup; cur=""; seed_pid=""; \
 	done; \
 	echo; echo "=== SUMMARY ==="; \
 	for b in $$passed; do echo "  PASS  $$b"; done; \

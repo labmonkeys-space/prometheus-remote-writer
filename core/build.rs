@@ -41,6 +41,17 @@ fn main() {
             includes.push(dir);
         }
     }
+    if includes.len() == 1 {
+        // Only proto_dir; rely on protoc bundling the well-known types. If it
+        // doesn't, compile_protos fails with a cryptic "wrappers.proto not
+        // found" — surface the actionable fix up front.
+        println!(
+            "cargo:warning=google/protobuf/wrappers.proto not found under /usr/include, \
+             /usr/local/include, or /opt/homebrew/include; if protoc lacks the bundled \
+             well-known types the build will fail — install libprotobuf-dev (Debian/Ubuntu) \
+             or the protobuf package (Homebrew)."
+        );
+    }
 
     let mut config = prost_build::Config::new();
     config.include_file("_protos.rs");

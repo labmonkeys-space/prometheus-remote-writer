@@ -76,6 +76,10 @@ pub struct RuntimeConfig {
     /// Log level (`error`|`warn`|`info`|`debug`|`trace`).
     #[serde(default = "default_log_level")]
     pub log_level: String,
+    /// Max time, in milliseconds, to drain the in-flight batch on shutdown
+    /// before exiting anyway (un-committed records replay on restart).
+    #[serde(default = "default_shutdown_grace_ms")]
+    pub shutdown_grace_ms: u64,
 }
 
 impl Default for MappingConfig {
@@ -91,6 +95,7 @@ impl Default for RuntimeConfig {
         Self {
             listen: default_listen(),
             log_level: default_log_level(),
+            shutdown_grace_ms: default_shutdown_grace_ms(),
         }
     }
 }
@@ -112,4 +117,7 @@ fn default_listen() -> String {
 }
 fn default_log_level() -> String {
     "info".to_string()
+}
+fn default_shutdown_grace_ms() -> u64 {
+    10_000
 }
