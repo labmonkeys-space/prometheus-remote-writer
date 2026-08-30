@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: 📖 Documentation
+    url: https://labmonkeys-space.github.io/prometheus-remote-writer/
+    about: Configuration, wire formats, WAL, label mapping, operations, troubleshooting.
+  - name: 🔒 Report a security vulnerability
+    url: https://github.com/labmonkeys-space/prometheus-remote-writer/security/advisories/new
+    about: Please report security issues privately, never as a public issue.

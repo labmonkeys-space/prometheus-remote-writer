@@ -1,0 +1,53 @@
+name: Bug report
+description: Something doesn't work as documented
+labels: [bug, triage]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: Plugin version
+      description: Release tag or KAR filename (e.g. v0.4.4).
+    validations:
+      required: true
+  - type: input
+    id: opennms
+    attributes:
+      label: OpenNMS Horizon version
+    validations:
+      required: true
+  - type: input
+    id: backend
+    attributes:
+      label: Remote Write backend and version
+      description: e.g. Prometheus 3.14, Mimir 3.2, VictoriaMetrics 1.106
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you expect, and what happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Configure …
+        2. Restart …
+        3. Observe …
+    validations:
+      required: true
+  - type: textarea
+    id: config
+    attributes:
+      label: Plugin configuration
+      description: Contents of org.opennms.plugins.tss.prometheus-remote-writer.cfg, with secrets redacted.
+      render: properties
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log output
+      description: Karaf log excerpts, output of opennms:prometheus-writer-stats.
+      render: shell
