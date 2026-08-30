@@ -15,7 +15,7 @@
         Prometheus-compatible Remote Write endpoint, exposing OpenNMS
         resource context as native Prometheus labels.
     </description>
-    <url>https://github.com/opennms-forge/prometheus-remote-writer</url>
+    <url>https://github.com/labmonkeys-space/prometheus-remote-writer</url>
 
     <licenses>
         <license>
@@ -42,15 +42,15 @@
     </developers>
 
     <scm>
-        <connection>scm:git:git://github.com/opennms-forge/prometheus-remote-writer.git</connection>
-        <developerConnection>scm:git:ssh://git@github.com/opennms-forge/prometheus-remote-writer.git</developerConnection>
-        <url>https://github.com/opennms-forge/prometheus-remote-writer</url>
+        <connection>scm:git:git://github.com/labmonkeys-space/prometheus-remote-writer.git</connection>
+        <developerConnection>scm:git:ssh://git@github.com/labmonkeys-space/prometheus-remote-writer.git</developerConnection>
+        <url>https://github.com/labmonkeys-space/prometheus-remote-writer</url>
         <tag>HEAD</tag>
     </scm>
 
     <issueManagement>
         <system>GitHub Issues</system>
-        <url>https://github.com/opennms-forge/prometheus-remote-writer/issues</url>
+        <url>https://github.com/labmonkeys-space/prometheus-remote-writer/issues</url>
     </issueManagement>
 
     <modules>

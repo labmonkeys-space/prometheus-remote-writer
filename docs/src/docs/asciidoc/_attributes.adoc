@@ -3,8 +3,8 @@
 
 :project-name:           OpenNMS Prometheus Remote Writer
 :project-artifact:       prometheus-remote-writer
-:project-repo-url:       https://github.com/opennms-forge/prometheus-remote-writer
-:project-pages-url:      https://opennms-forge.github.io/prometheus-remote-writer/
+:project-repo-url:       https://github.com/labmonkeys-space/prometheus-remote-writer
+:project-pages-url:      https://labmonkeys-space.github.io/prometheus-remote-writer/
 
 :horizon-min-version:    35
 :karaf-version:          4.4.x

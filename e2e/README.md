@@ -6,7 +6,7 @@ backends.
 
 📖 **Full documentation:** the "End-to-end sandbox" section of the
 project docs site —
-<https://opennms-forge.github.io/prometheus-remote-writer/#e2e-sandbox>
+<https://labmonkeys-space.github.io/prometheus-remote-writer/#e2e-sandbox>
 
 ## Quick reference
 

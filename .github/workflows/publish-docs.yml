@@ -1,7 +1,7 @@
 name: Publish docs to GitHub Pages
 
 # Renders docs/src/docs/asciidoc/index.adoc to a single self-contained HTML
-# file and publishes it to https://opennms-forge.github.io/prometheus-remote-writer/.
+# file and publishes it to https://labmonkeys-space.github.io/prometheus-remote-writer/.
 # Triggered when a GitHub Release is published, so the live site always
 # reflects the most recent release tag. workflow_dispatch lets a maintainer
 # republish a chosen tag manually (e.g. after fixing a typo in the docs of
