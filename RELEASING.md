@@ -8,10 +8,15 @@ passing locally, KAR install verified against a Horizon 35 target).
 
 Releases are driven by **pushing a `v*.*.*` git tag**. The
 [`release.yml`](.github/workflows/release.yml) workflow picks up the tag push,
-verifies the tag's signature against the maintainer's GitHub-registered
-GPG keys, builds the KAR, extracts the matching section from `CHANGELOG.md`,
-attests the artifacts via Sigstore, and creates a GitHub Release with the
-KAR and SBOM attached.
+runs the same quality gates CI enforces on PRs
+([`quality-gates.yml`](.github/workflows/quality-gates.yml) — nothing publishes
+on red), verifies the tag's signature against the maintainer's
+GitHub-registered GPG keys, builds the KAR, extracts the matching section from
+`CHANGELOG.md`, attests the artifacts via Sigstore, and creates a GitHub
+Release with the KAR (versioned plus a stable-name
+`prometheus-remote-writer.kar` alias for `releases/latest/download/` URLs)
+and SBOM attached. Prerelease tags (e.g. `v1.0.0-rc1`) are marked as
+prereleases and never become `latest`.
 
 Tags follow [SemVer](https://semver.org): `vMAJOR.MINOR.PATCH` (`v0.1.0`,
 `v0.2.0`, `v1.0.0-rc1`).
@@ -53,7 +58,7 @@ Releases predating v0.4.4 were signed by a dedicated project GPG key
 pages still carry the `KEYS` file, the `.asc` signatures, and the
 `.sha512` checksums. The verification flow for those releases is the
 GPG-based one documented in the historical RELEASING.md at the
-[`v0.4.3` tag](https://github.com/opennms-forge/prometheus-remote-writer/blob/v0.4.3/RELEASING.md#verifying-a-release)
+[`v0.4.3` tag](https://github.com/labmonkeys-space/prometheus-remote-writer/blob/v0.4.3/RELEASING.md#verifying-a-release)
 (import `KEYS`, cross-check the canonical fingerprint above, then
 `gpg --verify <file>.asc`) and remains valid indefinitely.
 
@@ -62,7 +67,7 @@ not destroyed; it sits in the maintainer's keyring as a verifier of
 record for pre-v0.4.4 releases.
 
 > **Note on `releases/latest/download/KEYS`:** consumers who scripted
-> against `https://github.com/opennms-forge/prometheus-remote-writer/releases/latest/download/KEYS`
+> against `https://github.com/labmonkeys-space/prometheus-remote-writer/releases/latest/download/KEYS`
 > will see a 404 once v0.4.4 is published — `latest` resolves to the
 > newest release, which no longer ships `KEYS`. To pin to the last
 > release that does, use the explicit tag URL:
@@ -156,7 +161,7 @@ Pushing the tag triggers `.github/workflows/release.yml`:
 Watch the run:
 
 ```bash
-gh run watch --repo opennms-forge/prometheus-remote-writer
+gh run watch --repo labmonkeys-space/prometheus-remote-writer
 ```
 
 ### 3. Post-release
@@ -226,9 +231,10 @@ For a patch release (e.g. `v0.4.5`) on top of `v0.4.4`:
 | Artifact | Where | How consumed |
 |---|---|---|
 | `prometheus-remote-writer-kar-<version>.kar` | GitHub Release asset | Download and install via Karaf `kar:install <path>`. Verify with `gh attestation verify` — see "Verifying a release" below. |
+| `prometheus-remote-writer.kar` | GitHub Release asset | Stable-name alias of the versioned KAR (same bytes, same SHA-256, so the same attestation verifies it). Exists so `releases/latest/download/prometheus-remote-writer.kar` — the README install URL — keeps working across releases. |
 | `prometheus-remote-writer-<version>.cdx.json` | GitHub Release asset | CycloneDX 1.6 SBOM (aggregate across the full Maven reactor); fed to Trivy / Grype / Dependency-Track / FOSSA-style consumers. Generate locally with `make sbom`. Verify with `gh attestation verify`. |
-| Build provenance attestations | <https://github.com/opennms-forge/prometheus-remote-writer/attestations> | One per artifact (KAR + SBOM). SLSA Build Provenance signed by Sigstore via GitHub Actions OIDC. Fetched server-side by `gh attestation verify`; not a downloadable release asset. |
-| `prometheus-remote-writer-<version>.jar` (bundle) | Not auto-published | Planned. The repo's migration to `opennms-forge` is done; remaining decision is the Maven-repo target (Central via Sonatype, GitHub Packages, or a private Nexus). When Maven Central publication lands, the maintainer's personal GPG key serves as the Central PGP identity (a common pattern for single-maintainer projects). |
+| Build provenance attestations | <https://github.com/labmonkeys-space/prometheus-remote-writer/attestations> | One per artifact (KAR + SBOM). SLSA Build Provenance signed by Sigstore via GitHub Actions OIDC. Fetched server-side by `gh attestation verify`; not a downloadable release asset. |
+| `prometheus-remote-writer-<version>.jar` (bundle) | Not auto-published | Planned. The repo's migration to `labmonkeys-space` is done; remaining decision is the Maven-repo target (Central via Sonatype, GitHub Packages, or a private Nexus). When Maven Central publication lands, the maintainer's personal GPG key serves as the Central PGP identity (a common pattern for single-maintainer projects). |
 | `prometheus-remote-writer-features-<version>-features.xml` | Not auto-published | Same as above — consumed via `feature:repo-add mvn:…/xml/features` when a Maven repo is available. |
 
 ## Verifying a release
@@ -246,7 +252,7 @@ Check with `gh --version`.
 
 ```bash
 TAG=v0.4.4
-BASE=https://github.com/opennms-forge/prometheus-remote-writer/releases/download/${TAG}
+BASE=https://github.com/labmonkeys-space/prometheus-remote-writer/releases/download/${TAG}
 
 # 1. Download the artifact(s) you want to verify.
 curl -O ${BASE}/prometheus-remote-writer-kar-${TAG#v}.kar
@@ -259,16 +265,16 @@ curl -O ${BASE}/prometheus-remote-writer-${TAG#v}.cdx.json
 #    attestation subject digest.
 gh attestation verify \
   prometheus-remote-writer-kar-${TAG#v}.kar \
-  --repo opennms-forge/prometheus-remote-writer
+  --repo labmonkeys-space/prometheus-remote-writer
 
 # 3. Verify the SBOM the same way.
 gh attestation verify \
   prometheus-remote-writer-${TAG#v}.cdx.json \
-  --repo opennms-forge/prometheus-remote-writer
+  --repo labmonkeys-space/prometheus-remote-writer
 ```
 
 A successful verification prints the signer identity (the workflow
-path: `https://github.com/opennms-forge/prometheus-remote-writer/.github/workflows/release.yml@refs/tags/v0.4.4`),
+path: `https://github.com/labmonkeys-space/prometheus-remote-writer/.github/workflows/release.yml@refs/tags/v0.4.4`),
 the predicate type (`https://slsa.dev/provenance/v1`), and the commit
 SHA the artifact was built from. For an extra defense-in-depth
 assertion, pin against the workflow ref via `--signer-workflow`:
@@ -276,8 +282,8 @@ assertion, pin against the workflow ref via `--signer-workflow`:
 ```bash
 gh attestation verify \
   prometheus-remote-writer-kar-${TAG#v}.kar \
-  --repo opennms-forge/prometheus-remote-writer \
-  --signer-workflow opennms-forge/prometheus-remote-writer/.github/workflows/release.yml
+  --repo labmonkeys-space/prometheus-remote-writer \
+  --signer-workflow labmonkeys-space/prometheus-remote-writer/.github/workflows/release.yml
 ```
 
 The `--signer-workflow` flag takes an `[host/]<owner>/<repo>/<path>/<to>/<workflow>`
@@ -293,14 +299,14 @@ on a connected host once and transport it into the air-gap.
 # On a connected host:
 gh attestation download \
   prometheus-remote-writer-kar-${TAG#v}.kar \
-  --repo opennms-forge/prometheus-remote-writer
+  --repo labmonkeys-space/prometheus-remote-writer
 # Produces: prometheus-remote-writer-kar-<version>.kar.jsonl
 
 # Inside the air-gap, with the .kar and the .jsonl both present:
 gh attestation verify \
   prometheus-remote-writer-kar-${TAG#v}.kar \
   --bundle prometheus-remote-writer-kar-${TAG#v}.kar.jsonl \
-  --repo opennms-forge/prometheus-remote-writer
+  --repo labmonkeys-space/prometheus-remote-writer
 ```
 
 The `--bundle` flag short-circuits the network fetch; Sigstore's
@@ -348,7 +354,7 @@ either way.
 A separate workflow,
 [`.github/workflows/publish-docs.yml`](.github/workflows/publish-docs.yml),
 publishes the rendered single-page HTML documentation to
-<https://opennms-forge.github.io/prometheus-remote-writer/> whenever a GitHub
+<https://labmonkeys-space.github.io/prometheus-remote-writer/> whenever a GitHub
 Release is published. The site always reflects the most recent release
 tag — older versions are not retained as separate URLs in this release line.
 
@@ -378,7 +384,7 @@ is for these out-of-band republishes.
 
 - **Maven artifact publication** — required for the Karaf
   `feature:repo-add mvn:…` install flow shown in the README. The repo
-  now lives under the `opennms-forge` namespace; remaining decision is
+  now lives under the `labmonkeys-space` namespace; remaining decision is
   the Maven-repo target (Central via Sonatype, GitHub Packages, or a
   private Nexus). The maintainer's personal GPG key (the same one
   that signs release tags) serves as the Central PGP identity when
