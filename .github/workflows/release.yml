@@ -187,7 +187,7 @@ jobs:
         # this workflow run's GitHub OIDC token. Attestation is stored
         # on the repo's /attestations endpoint and surfaced to verifiers
         # via `gh attestation verify`.
-        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32  # v4.1.0
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
         with:
           subject-path: ${{ steps.kar.outputs.path }}
 
@@ -195,7 +195,7 @@ jobs:
         # Same treatment for the SBOM. Two attestations, one per
         # release artifact — verifiers run `gh attestation verify`
         # against each downloaded file independently.
-        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32  # v4.1.0
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
         with:
           subject-path: ${{ steps.sbom.outputs.path }}
 
