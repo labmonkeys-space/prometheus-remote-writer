@@ -10,6 +10,16 @@ updates:
       - dependencies
       - github-actions
 
+  - package-ecosystem: docker-compose
+    directory: /e2e
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: build
+    labels:
+      - dependencies
+      - docker
+
   - package-ecosystem: maven
     directory: /
     schedule:
