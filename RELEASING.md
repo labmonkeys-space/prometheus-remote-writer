@@ -8,10 +8,15 @@ passing locally, KAR install verified against a Horizon 35 target).
 
 Releases are driven by **pushing a `v*.*.*` git tag**. The
 [`release.yml`](.github/workflows/release.yml) workflow picks up the tag push,
-verifies the tag's signature against the maintainer's GitHub-registered
-GPG keys, builds the KAR, extracts the matching section from `CHANGELOG.md`,
-attests the artifacts via Sigstore, and creates a GitHub Release with the
-KAR and SBOM attached.
+runs the same quality gates CI enforces on PRs
+([`quality-gates.yml`](.github/workflows/quality-gates.yml) — nothing publishes
+on red), verifies the tag's signature against the maintainer's
+GitHub-registered GPG keys, builds the KAR, extracts the matching section from
+`CHANGELOG.md`, attests the artifacts via Sigstore, and creates a GitHub
+Release with the KAR (versioned plus a stable-name
+`prometheus-remote-writer.kar` alias for `releases/latest/download/` URLs)
+and SBOM attached. Prerelease tags (e.g. `v1.0.0-rc1`) are marked as
+prereleases and never become `latest`.
 
 Tags follow [SemVer](https://semver.org): `vMAJOR.MINOR.PATCH` (`v0.1.0`,
 `v0.2.0`, `v1.0.0-rc1`).
@@ -226,6 +231,7 @@ For a patch release (e.g. `v0.4.5`) on top of `v0.4.4`:
 | Artifact | Where | How consumed |
 |---|---|---|
 | `prometheus-remote-writer-kar-<version>.kar` | GitHub Release asset | Download and install via Karaf `kar:install <path>`. Verify with `gh attestation verify` — see "Verifying a release" below. |
+| `prometheus-remote-writer.kar` | GitHub Release asset | Stable-name alias of the versioned KAR (same bytes, same SHA-256, so the same attestation verifies it). Exists so `releases/latest/download/prometheus-remote-writer.kar` — the README install URL — keeps working across releases. |
 | `prometheus-remote-writer-<version>.cdx.json` | GitHub Release asset | CycloneDX 1.6 SBOM (aggregate across the full Maven reactor); fed to Trivy / Grype / Dependency-Track / FOSSA-style consumers. Generate locally with `make sbom`. Verify with `gh attestation verify`. |
 | Build provenance attestations | <https://github.com/labmonkeys-space/prometheus-remote-writer/attestations> | One per artifact (KAR + SBOM). SLSA Build Provenance signed by Sigstore via GitHub Actions OIDC. Fetched server-side by `gh attestation verify`; not a downloadable release asset. |
 | `prometheus-remote-writer-<version>.jar` (bundle) | Not auto-published | Planned. The repo's migration to `labmonkeys-space` is done; remaining decision is the Maven-repo target (Central via Sonatype, GitHub Packages, or a private Nexus). When Maven Central publication lands, the maintainer's personal GPG key serves as the Central PGP identity (a common pattern for single-maintainer projects). |

@@ -11,17 +11,13 @@ on:
         required: true
 
 permissions:
-  contents: write
-  # OIDC token for Sigstore — required by actions/attest-build-provenance
-  # to mint an ephemeral signing certificate against this workflow run's
-  # identity.
-  id-token: write
-  # GitHub Artifact Attestations API — required to upload the provenance
-  # attestation bundle to the repo's /attestations endpoint.
-  attestations: write
-  # Needed by the final "Trigger docs publish" step, which dispatches
-  # publish-docs.yml via `gh workflow run` after the release is created.
-  actions: write
+  contents: read
+
+# Serialize releases, and NEVER cancel one in flight: a half-cancelled
+# release can leave a GitHub Release with partial assets.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 env:
   # Maintainer whose GitHub-registered GPG key(s) sign release tags.
@@ -32,9 +28,27 @@ env:
   RELEASE_MAINTAINER: indigo423
 
 jobs:
+  gates:
+    # Same gates PRs enforce — a tag on a red commit must not release.
+    uses: ./.github/workflows/quality-gates.yml
+
   release:
     name: Build KAR and create GitHub Release
+    needs: gates
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: write
+      # OIDC token for Sigstore — required by actions/attest-build-provenance
+      # to mint an ephemeral signing certificate against this workflow run's
+      # identity.
+      id-token: write
+      # GitHub Artifact Attestations API — required to upload the provenance
+      # attestation bundle to the repo's /attestations endpoint.
+      attestations: write
+      # Needed by the final "Trigger docs publish" step, which dispatches
+      # publish-docs.yml via `gh workflow run` after the release is created.
+      actions: write
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -48,18 +62,17 @@ jobs:
           distribution: temurin
           java-version: '21'
 
-      - name: Cache Maven repository
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
-        with:
-          path: ~/.m2/repository
-          key: ${{ runner.os }}-m2-${{ hashFiles('**/pom.xml') }}
-          restore-keys: |
-            ${{ runner.os }}-m2-
+      # No Maven cache on the release path (unlike CI): a poisoned cache
+      # entry would flow straight into published, attested artifacts.
+      # Releases are rare; the cold dependency fetch is an acceptable cost.
 
       - name: Resolve tag and version
         id: resolve
+        env:
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+          REF_NAME: ${{ github.ref_name }}
         run: |
-          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          TAG="${INPUT_TAG:-$REF_NAME}"
           VERSION="${TAG#v}"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
@@ -83,9 +96,10 @@ jobs:
         # check below is what enforces "the .gpg fetch actually
         # returned keys."
         shell: bash
+        env:
+          TAG: ${{ steps.resolve.outputs.tag }}
         run: |
           set -euo pipefail
-          TAG="${{ steps.resolve.outputs.tag }}"
           # Import all public keys registered on the maintainer's GitHub
           # profile. github.com/<user>.gpg is the canonical trust path.
           # --fail makes curl exit non-zero on 4xx/5xx; --retry guards
@@ -114,9 +128,8 @@ jobs:
           fi
 
       - name: Build KAR
-        # Skip tests on the release path — CI already ran `make verify` on
-        # the tagged commit before it was pushed. Shipping an untested
-        # build would be a problem, but gating here is belt-and-braces.
+        # Skip tests on the release path — the gates job above already ran
+        # `make verify` on this ref before anything gets published.
         run: make kar MAVEN_FLAGS="-B --no-transfer-progress -U"
 
       - name: Generate SBOM
@@ -128,8 +141,9 @@ jobs:
 
       - name: Extract release notes from CHANGELOG
         id: notes
+        env:
+          VERSION: ${{ steps.resolve.outputs.version }}
         run: |
-          VERSION="${{ steps.resolve.outputs.version }}"
           if [ ! -f CHANGELOG.md ]; then
             echo "CHANGELOG.md not found; using auto-generated notes" >&2
             exit 0
@@ -154,6 +168,11 @@ jobs:
             exit 1
           fi
           echo "path=$KAR" >> "$GITHUB_OUTPUT"
+          # Stable-name alias so the README's
+          # releases/latest/download/prometheus-remote-writer.kar URL
+          # keeps working across releases. Same bytes, same SHA-256, so
+          # `gh attestation verify` accepts either filename.
+          cp "$KAR" prometheus-remote-writer.kar
 
       - name: Stage SBOM at release name
         # Copy target/bom.json to the versioned filename consumers will
@@ -162,9 +181,10 @@ jobs:
         # can take subject-path against the final on-disk path.
         id: sbom
         shell: bash
+        env:
+          VERSION: ${{ steps.resolve.outputs.version }}
         run: |
           set -euo pipefail
-          VERSION="${{ steps.resolve.outputs.version }}"
           SBOM="prometheus-remote-writer-${VERSION}.cdx.json"
           if [ ! -f target/bom.json ]; then
             echo "::error::target/bom.json missing; the Generate SBOM step did not produce the expected file." >&2
@@ -200,30 +220,42 @@ jobs:
           subject-path: ${{ steps.sbom.outputs.path }}
 
       - name: Create GitHub Release
-        # Two assets only: the KAR and the SBOM. Authenticity is verified
-        # via the build provenance attestations (one per artifact),
-        # fetched server-side by `gh attestation verify`. No .asc / KEYS
-        # / checksum files — the attestation encodes the artifact's
-        # SHA-256 and binds it to this workflow's OIDC identity.
+        # Three assets: the versioned KAR, its stable-name alias, and the
+        # SBOM. Authenticity is verified via the build provenance
+        # attestations, fetched server-side by `gh attestation verify`.
+        # No .asc / KEYS / checksum files — the attestation encodes the
+        # artifact's SHA-256 and binds it to this workflow's OIDC identity.
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.resolve.outputs.tag }}
+          KAR: ${{ steps.kar.outputs.path }}
+          SBOM: ${{ steps.sbom.outputs.path }}
+          NOTES_FILE: ${{ steps.notes.outputs.notes-file }}
         run: |
-          TAG="${{ steps.resolve.outputs.tag }}"
-          KAR="${{ steps.kar.outputs.path }}"
-          SBOM="${{ steps.sbom.outputs.path }}"
+          # The v*.*.* trigger glob also matches prerelease tags like
+          # v1.0.0-rc1; mark those as prereleases so `latest` (and the
+          # stable-alias download URL) keeps pointing at the newest
+          # stable release.
+          case "$TAG" in
+            *-*) FLAGS=(--prerelease) ;;
+            *)   FLAGS=() ;;
+          esac
           ASSETS=(
             "$KAR"
+            prometheus-remote-writer.kar
             "$SBOM"
           )
-          if [ -n "${{ steps.notes.outputs.notes-file }}" ]; then
+          if [ -n "$NOTES_FILE" ]; then
             gh release create "$TAG" \
               --title "$TAG" \
-              --notes-file "${{ steps.notes.outputs.notes-file }}" \
+              --notes-file "$NOTES_FILE" \
+              "${FLAGS[@]}" \
               "${ASSETS[@]}"
           else
             gh release create "$TAG" \
               --title "$TAG" \
               --generate-notes \
+              "${FLAGS[@]}" \
               "${ASSETS[@]}"
           fi
 
@@ -235,6 +267,6 @@ jobs:
       - name: Trigger docs publish
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.resolve.outputs.tag }}
         run: |
-          TAG="${{ steps.resolve.outputs.tag }}"
           gh workflow run publish-docs.yml --ref main -f tag="$TAG"

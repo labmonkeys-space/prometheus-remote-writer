@@ -1,0 +1,87 @@
+name: Quality gates
+
+# Reusable quality gates, defined once and referenced by both the CI and
+# Release workflows. Adding a gate or bumping a pin is a one-file change —
+# no chance of a release publishing through a gate that PRs enforce.
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build and test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@dd06d9cba3e5552c54d9f8ea23572deb30010f7c  # v6.0.0
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Cache Maven repository
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ~/.m2/repository
+          key: ${{ runner.os }}-m2-${{ hashFiles('**/pom.xml') }}
+          restore-keys: |
+            ${{ runner.os }}-m2-
+
+      - name: Build, run unit tests, and assemble the KAR
+        run: make verify MAVEN_FLAGS="-B --no-transfer-progress -U"
+
+      - name: Upload KAR artifact
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: prometheus-remote-writer-kar
+          path: assembly/kar/target/*.kar
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload surefire reports on failure
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: surefire-reports
+          path: '**/target/surefire-reports/**'
+          if-no-files-found: ignore
+          retention-days: 7
+
+  workflow-lint:
+    # Lints the workflows themselves: unpinned actions, script injection,
+    # bad expressions, invalid schema. Cheap, and enforces the pinning and
+    # injection-safety rules mechanically instead of by review memory.
+    name: Lint workflows
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: actionlint
+        # docker:// refs pin by image digest, not commit SHA.
+        uses: docker://rhysd/actionlint@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667  # v1.7.12
+        with:
+          args: -color
+
+      - name: zizmor
+        uses: zizmorcore/zizmor-action@70fb788f84895a7701f5643d103d587e460b5c99  # v0.6.3
+        with:
+          # Code scanning upload needs GHAS/code-scanning enabled; emit
+          # inline annotations instead and fail the job on findings.
+          advanced-security: false
+          annotations: true
+          # Low findings are stylistic (e.g. ./ vs $/ reusable-workflow
+          # refs); fail the gate on medium and above.
+          min-severity: medium
