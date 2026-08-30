@@ -2,6 +2,7 @@
 
 [![CI](https://github.com/opennms-forge/prometheus-remote-writer/actions/workflows/ci.yml/badge.svg)](https://github.com/opennms-forge/prometheus-remote-writer/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+[![OpenNMS Horizon](https://img.shields.io/badge/OpenNMS_Horizon-36.0.3-4c9141.svg)](https://github.com/OpenNMS/opennms/releases/tag/opennms-36.0.3-1)
 
 An OpenNMS Horizon plugin that pushes performance data to any
 Prometheus-compatible Remote Write endpoint — Prometheus, Cortex, Grafana

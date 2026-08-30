@@ -52,7 +52,8 @@ services:
       retries:  20
 
   core:
-    image: opennms/horizon:latest
+    # Keep the README "OpenNMS Horizon" badge in sync when bumping this tag.
+    image: opennms/horizon:36.0.3
     command: ["-s"]
     # Karaf's orderly bundle shutdown routinely hits the full default
     # 10s SIGTERM grace before SIGKILL. For this sandbox the data in
