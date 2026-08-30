@@ -27,7 +27,9 @@ services:
       timeout:  3s
       retries:  20
     volumes:
-      - postgres-data:/var/lib/postgresql/data
+      # postgres 18+ images store data under /var/lib/postgresql (the
+      # old /var/lib/postgresql/data mount is rejected at startup).
+      - postgres-data:/var/lib/postgresql
 
   grafana:
     image: grafana/grafana-oss:13.0.1
