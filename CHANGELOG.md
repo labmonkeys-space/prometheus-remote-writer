@@ -7,6 +7,51 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.5] — 2026-08-31
+
+**Maintenance release.** Runtime dependency refresh plus release-pipeline
+hardening after the repository's move to `labmonkeys-space`. No plugin
+feature or wire-format changes.
+
+> ⚠️ **The repository moved** from `opennms-forge` to `labmonkeys-space`.
+> `github.com` URLs redirect; the docs site does not — it now lives at
+> <https://labmonkeys-space.github.io/prometheus-remote-writer/>. Verify
+> releases with
+> `gh attestation verify <file> --repo labmonkeys-space/prometheus-remote-writer`.
+> Attestations for v0.4.4 did not survive the move and can no longer be
+> fetched; releases before v0.4.4 remain verifiable via their GPG
+> `.asc` signatures.
+
+### Added
+
+- **Stable-name release asset `prometheus-remote-writer.kar`** — an
+  alias of the versioned KAR (same bytes, same SHA-256, verified by the
+  same attestation), so
+  `releases/latest/download/prometheus-remote-writer.kar` works across
+  releases. Also uploaded retroactively to v0.4.4.
+- **Release pipeline is gated on the CI quality gates** — a tag on a
+  commit that fails build, tests, or workflow lint no longer publishes.
+  The gates (including new actionlint + zizmor workflow linting) live in
+  a reusable workflow shared by CI and Release. (#107)
+- **Dependency review on PRs and an OpenSSF Scorecard workflow**;
+  secret scanning, push protection, and private vulnerability reporting
+  enabled. See the new `SECURITY.md` for reporting. (#107)
+- **Community docs**: `CONTRIBUTING.md` (DCO sign-off + AI-assistance
+  trailer policy + clean-room license hygiene), `SUPPORT.md`,
+  `CODE_OF_CONDUCT.md`, issue forms, and a PR template. (#107)
+
+### Changed
+
+- **Runtime dependencies refreshed**: `opennms-integration-api` 2.0.1,
+  `protobuf-java` 4.36.0, OkHttp 5.5.0, Dropwizard `metrics-core`
+  4.2.39, SLF4J 2.0.18, `org.json` 20260814.
+- **Prerelease tags** (e.g. `v1.0.0-rc1`) are now created as GitHub
+  prereleases and never become `latest`.
+- **e2e stack modernized** and pinned: Prometheus v3.14.0, Mimir 3.2.0,
+  VictoriaMetrics v1.150.0, Grafana 13.0.2, PostgreSQL 18, OpenNMS
+  Horizon 36.0.3; the smoke suite now runs per PR against all three
+  backends. (#93, #106)
+
 ## [0.4.4] — 2026-05-17
 
 **Release-engineering release.** No plugin runtime behavior changes
@@ -1158,15 +1203,19 @@ Go sanitization rules.
 - Karaf feature `prometheus-remote-writer` shipping a pre-populated
   `etc/org.opennms.plugins.tss.prometheusremotewriter.cfg` on install.
 
-[Unreleased]: https://github.com/opennms-forge/prometheus-remote-writer/compare/v0.4.1...HEAD
-[0.4.1]: https://github.com/opennms-forge/prometheus-remote-writer/compare/v0.4.0...v0.4.1
-[0.4.0]: https://github.com/opennms-forge/prometheus-remote-writer/compare/v0.3.3...v0.4.0
-[0.3.3]: https://github.com/opennms-forge/prometheus-remote-writer/compare/v0.3.2...v0.3.3
-[0.3.2]: https://github.com/opennms-forge/prometheus-remote-writer/compare/v0.3.1...v0.3.2
-[0.3.1]: https://github.com/opennms-forge/prometheus-remote-writer/compare/v0.3.0...v0.3.1
-[0.3.0]: https://github.com/opennms-forge/prometheus-remote-writer/compare/v0.2.0...v0.3.0
-[0.2.0]: https://github.com/opennms-forge/prometheus-remote-writer/compare/v0.1.0...v0.2.0
-[0.1.0]: https://github.com/opennms-forge/prometheus-remote-writer/releases/tag/v0.1.0
+[Unreleased]: https://github.com/labmonkeys-space/prometheus-remote-writer/compare/v0.4.5...HEAD
+[0.4.5]: https://github.com/labmonkeys-space/prometheus-remote-writer/compare/v0.4.4...v0.4.5
+[0.4.4]: https://github.com/labmonkeys-space/prometheus-remote-writer/compare/v0.4.3...v0.4.4
+[0.4.3]: https://github.com/labmonkeys-space/prometheus-remote-writer/compare/v0.4.2...v0.4.3
+[0.4.2]: https://github.com/labmonkeys-space/prometheus-remote-writer/compare/v0.4.1...v0.4.2
+[0.4.1]: https://github.com/labmonkeys-space/prometheus-remote-writer/compare/v0.4.0...v0.4.1
+[0.4.0]: https://github.com/labmonkeys-space/prometheus-remote-writer/compare/v0.3.3...v0.4.0
+[0.3.3]: https://github.com/labmonkeys-space/prometheus-remote-writer/compare/v0.3.2...v0.3.3
+[0.3.2]: https://github.com/labmonkeys-space/prometheus-remote-writer/compare/v0.3.1...v0.3.2
+[0.3.1]: https://github.com/labmonkeys-space/prometheus-remote-writer/compare/v0.3.0...v0.3.1
+[0.3.0]: https://github.com/labmonkeys-space/prometheus-remote-writer/compare/v0.2.0...v0.3.0
+[0.2.0]: https://github.com/labmonkeys-space/prometheus-remote-writer/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/labmonkeys-space/prometheus-remote-writer/releases/tag/v0.1.0
 
-[#48]: https://github.com/opennms-forge/prometheus-remote-writer/pull/48
-[#49]: https://github.com/opennms-forge/prometheus-remote-writer/pull/49
+[#48]: https://github.com/labmonkeys-space/prometheus-remote-writer/pull/48
+[#49]: https://github.com/labmonkeys-space/prometheus-remote-writer/pull/49
