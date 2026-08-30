@@ -39,7 +39,7 @@ services:
       - ./grafana/datasources/mimir.yml:/etc/grafana/provisioning/datasources/datasource.yml:ro
 
   mimir:
-    image: grafana/mimir:2.14.0
+    image: grafana/mimir:3.2.0
     command:
       - "-config.file=/etc/mimir/mimir.yaml"
     ports:
