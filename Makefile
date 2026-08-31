@@ -104,10 +104,10 @@ smoke: kar ## Run e2e smoke against BACKENDS (defaults exclude sentinel; SMOKE_T
 	        echo "=== [$$current_backend] tearing down ==="; \
 	        docker compose -f "$$current_file" down -v --remove-orphans >/dev/null 2>&1 || true; \
 	    fi; \
-	    [ -n "$$keydir" ] && rm -rf "$$keydir"; \
 	}; \
+	cleanup_key() { [ -n "$$keydir" ] && rm -rf "$$keydir"; keydir=""; }; \
 	keydir=""; \
-	trap 'cleanup; echo; echo "=== interrupted ==="; exit 130' INT TERM; \
+	trap 'cleanup; cleanup_key; echo; echo "=== interrupted ==="; exit 130' INT TERM; \
 	pub=""; \
 	keydir=$$(mktemp -d) \
 	    && ssh-keygen -q -t rsa -b 2048 -N '' -f "$$keydir/id_rsa" \
@@ -187,23 +187,35 @@ smoke: kar ## Run e2e smoke against BACKENDS (defaults exclude sentinel; SMOKE_T
 	                echo "=== [$$backend] PASS (label-values): $$rid_count resourceIds enumerated ==="; \
 	                echo "=== [$$backend] probing opennms:prometheus-writer-stats via Karaf SSH ==="; \
 	                { [ -n "$$pub" ] \
-	                    && docker compose -f "$$file" exec -T core sh -c 'cat > /tmp/karaf-test-key && chmod 600 /tmp/karaf-test-key' < "$$keydir/id_rsa" \
+	                    && docker compose -f "$$file" exec -T "$$log_container" sh -c 'cat > /tmp/karaf-test-key && chmod 600 /tmp/karaf-test-key' < "$$keydir/id_rsa" \
 	                    && printf '\nadmin=%s,_g_:admingroup\n' "$$pub" \
 	                        | docker compose -f "$$file" exec -T core sh -c 'cat >> /opt/opennms/etc/keys.properties'; } \
 	                    || { echo "=== [$$backend] FAIL: could not stage the Karaf SSH test key (keygen/injection) ===" >&2; \
 	                         failed="$$failed $$backend"; cleanup_backend=1; }; \
 	                if [ "$${cleanup_backend:-0}" = 1 ]; then cleanup_backend=0; cleanup; current_file=""; current_backend=""; continue; fi; \
-	                stats_out=$$(docker compose -f "$$file" exec -T core ssh -i /tmp/karaf-test-key -p 8101 \
-	                    -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR \
-	                    -o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=4 \
-	                    admin@localhost opennms:prometheus-writer-stats 2>"$$keydir/ssh.err" || true); \
+	                stats_out=""; \
+	                for attempt in 1 2 3; do \
+	                    stats_out=$$(docker compose -f "$$file" exec -T "$$log_container" ssh -i /tmp/karaf-test-key -p 8101 \
+	                        -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR \
+	                        -o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=4 \
+	                        admin@localhost opennms:prometheus-writer-stats 2>"$$keydir/ssh.err" || true); \
+	                    [ -n "$$stats_out" ] && break; \
+	                    sleep 5; \
+	                done; \
 	                stats_err=$$(cat "$$keydir/ssh.err" 2>/dev/null); \
 	                want_shards=1; \
-	                if [ -n "$$plugin_cfg" ] && [ -f "$$plugin_cfg" ] \
-	                    && ! grep -Eq '^[[:space:]]*wal\.enabled[[:space:]]*=[[:space:]]*true' "$$plugin_cfg"; then \
-	                    want_shards=$$(grep -E '^[[:space:]]*writer\.shards' "$$plugin_cfg" | tail -1 | cut -d= -f2 | tr -d '[:space:]'); \
-	                    case "$$want_shards" in ''|*[!0-9]*) want_shards=1 ;; esac; \
+	                if [ -n "$$plugin_cfg" ] && [ ! -f "$$plugin_cfg" ]; then \
+	                    echo "WARN: [$$backend] plugin cfg $$plugin_cfg not found; shard-row assertion disabled" >&2; \
+	                elif [ -n "$$plugin_cfg" ] \
+	                    && ! grep -Eiq '^[[:space:]]*wal\.enabled[[:space:]]*=[[:space:]]*true' "$$plugin_cfg"; then \
+	                    raw_shards=$$(grep -E '^[[:space:]]*writer\.shards[[:space:]]*=' "$$plugin_cfg" | tail -1 | cut -d= -f2 | cut -d'#' -f1 | tr -d '[:space:]'); \
+	                    case "$$raw_shards" in \
+	                        '') : ;; \
+	                        *[!0-9]*) echo "WARN: [$$backend] unparsable writer.shards value '$$raw_shards' in $$plugin_cfg; shard-row assertion disabled" >&2 ;; \
+	                        *) want_shards=$$raw_shards ;; \
+	                    esac; \
 	                fi; \
+	                [ "$$want_shards" -gt 1 ] && echo "=== [$$backend] expecting per-shard rows (writer.shards=$$want_shards from $$plugin_cfg) ==="; \
 	                case "$$stats_out" in \
 	                    *samples_written_total*) \
 	                        stats_ok=1; \
@@ -251,6 +263,7 @@ smoke: kar ## Run e2e smoke against BACKENDS (defaults exclude sentinel; SMOKE_T
 	    cleanup; \
 	    current_file=""; current_backend=""; \
 	done; \
+	cleanup_key; \
 	echo; echo "=== SUMMARY ==="; \
 	for b in $$passed; do echo "  PASS  $$b"; done; \
 	for b in $$failed; do echo "  FAIL  $$b"; done; \
