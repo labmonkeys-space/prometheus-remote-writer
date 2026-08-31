@@ -66,6 +66,13 @@ The project key has been retired for *new* signing operations. It is
 not destroyed; it sits in the maintainer's keyring as a verifier of
 record for pre-v0.4.4 releases.
 
+> **Note on v0.4.4 attestations:** the repository's move from
+> `opennms-forge` to `labmonkeys-space` did not carry the artifact
+> attestations over — `gh attestation verify` returns 404 for the
+> v0.4.4 assets. v0.4.5 and later are attested under
+> `labmonkeys-space`; releases before v0.4.4 remain verifiable via
+> their GPG `.asc` signatures as described above.
+
 > **Note on `releases/latest/download/KEYS`:** consumers who scripted
 > against `https://github.com/labmonkeys-space/prometheus-remote-writer/releases/latest/download/KEYS`
 > will see a 404 once v0.4.4 is published — `latest` resolves to the
