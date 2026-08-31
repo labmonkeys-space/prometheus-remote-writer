@@ -61,6 +61,11 @@ class PrometheusRemoteWriteIT {
 
     @BeforeEach
     void start() {
+        storage = new PrometheusRemoteWriterStorage(baseConfig());
+        storage.start();
+    }
+
+    private PrometheusRemoteWriterConfig baseConfig() {
         PrometheusRemoteWriterConfig c = new PrometheusRemoteWriterConfig();
         String base = "http://" + prometheus.getHost() + ":" + prometheus.getMappedPort(9090);
         c.setWriteUrl(base + "/api/v1/write");
@@ -71,7 +76,16 @@ class PrometheusRemoteWriteIT {
         c.setRetryMaxBackoffMs(500);
         c.setRetryMaxAttempts(10);
         c.setShutdownGracePeriodMs(2_000);
+        return c;
+    }
 
+    /** Swap the shared storage for one with labels.attr-mode=both — the
+     *  attr round-trip ITs pin the (now opt-in) v0.4 emission. The field is
+     *  reassigned so @AfterEach tears the replacement down. */
+    private void restartWithAttrModeBoth() {
+        storage.stop();
+        PrometheusRemoteWriterConfig c = baseConfig();
+        c.setAttrMode("both");
         storage = new PrometheusRemoteWriterStorage(c);
         storage.start();
     }
@@ -752,6 +766,7 @@ class PrometheusRemoteWriteIT {
 
     @Test
     void string_attribute_external_tag_round_trips_through_prometheus() throws Exception {
+        restartWithAttrModeBoth();
         // OpenNMS-core's TimeseriesPersistOperationBuilder attaches resource
         // string attributes (the values ${name} / ${datname} / ${spcname}
         // resolve against) to Metric.getExternalTags(). The plugin emits them
@@ -821,6 +836,7 @@ class PrometheusRemoteWriteIT {
 
     @Test
     void multiple_string_attribute_external_tags_round_trip_independently() throws Exception {
+        restartWithAttrModeBoth();
         Instant now = Instant.now();
         String metricName = "onms_it_extattr_multi_" + System.nanoTime();
         Sample sample = ImmutableSample.builder()
@@ -863,6 +879,7 @@ class PrometheusRemoteWriteIT {
 
     @Test
     void meta_attribute_round_trips_via_onms_attr_prefix_unchanged_from_v04() throws Exception {
+        restartWithAttrModeBoth();
         // Lock the v0.4.0 contract: a Sample with a plain-key META tag
         // round-trips via `onms_attr_<key>` and lands back on the META
         // partition. Pinned alongside the new external-partition test so
