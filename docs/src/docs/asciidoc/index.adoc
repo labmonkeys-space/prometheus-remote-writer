@@ -31,6 +31,10 @@ include::sections/_label-mapping.adoc[leveloffset=+1]
 
 include::sections/_backends.adoc[leveloffset=+1]
 
+include::sections/_grafana.adoc[leveloffset=+1]
+
+include::sections/_migration.adoc[leveloffset=+1]
+
 include::sections/_operations.adoc[leveloffset=+1]
 
 include::sections/_troubleshooting.adoc[leveloffset=+1]

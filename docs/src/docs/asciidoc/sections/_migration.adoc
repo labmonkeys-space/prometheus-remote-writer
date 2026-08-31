@@ -1,0 +1,54 @@
+[[migration]]
+= Migration
+
+== From the legacy `opennms-prometheus-remotewrite-plugin`
+
+Set one line in `{cfg-file}` and deploy the KAR:
+
+[source,properties]
+----
+labels.profile = legacy
+----
+
+The `legacy` profile emits the legacy plugin's wire schema — label
+names, value formats, and metric names — pinned by an empirically
+captured fixture of observed output (never by reading the legacy
+plugin's AGPL source). Existing series continue across the switchover,
+so dashboards, alerts, and `rate()` spans keep working.
+
+[NOTE]
+====
+History written by the legacy plugin stays readable through this
+plugin's read path under *either* profile: the read side needs only
+`__name__` and `resourceId` and treats all other labels as meta tags.
+Choose `legacy` only if you need new samples to *continue the same
+series*; choose `native` if a one-time series changeover is acceptable
+and you want the leaner schema.
+====
+
+== From v0.4.x of this plugin
+
+v0.5.0 changes the default emission (breaking):
+
+[cols="1,2", options="header"]
+|===
+| You want | Do
+
+| The new bounded default
+| Nothing. Note that `onms_attr_*` / `onms_extattr_*` labels stop being
+  written — series carrying them end and leaner replacements begin.
+
+| Graph placeholder substitution (`${name}`, `${datname}`, …)
+| `labels.attr-mode = external` plus `labels.attr-include` globs for
+  the keys your graphs use (e.g. `name, datname, spcname`).
+
+| The exact v0.4 attribute emission
+| `labels.attr-mode = both`. The v0.4 duplicate emission of metatag
+  aliases (`onms_attr_nodeLabel` alongside `node_label`) is otherwise
+  gone by design; use `labels.copy` if you queried a duplicate name.
+|===
+
+Profile and attr-mode changes hot-reload like the rest of the file.
+One WAL caveat: the WAL stores samples *after* mapping, so a profile
+flip with a pending backlog flushes that backlog in the old schema;
+new samples use the new one.

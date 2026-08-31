@@ -77,6 +77,29 @@ Three usual culprits:
 `labels.include = *` is rarely correct in production — it surfaces every
 non-default source tag. The default allowlist is deliberately narrow.
 
+== Label-*name* count exploded (backend memory / index growth)
+
+Distinct label *names* are costlier to a backend's index than label
+values. Check the count directly:
+
+[source,shell]
+----
+curl -s 'http://<backend>/api/v1/labels' | python3 -c \
+  'import json,sys; d=json.load(sys.stdin)["data"]; print(len(d), d[:20])'
+----
+
+Under the `native` profile with `labels.attr-mode = off` (the v0.5.0
+defaults) the count stays ≤ ~17 plus one `onms_cat_*` per surveillance
+category. Hundreds or thousands of names — typically
+`onms_extattr_ICMP_<ip>` or `onms_extattr_JMX_<mbean>` shapes — mean
+the attribute round-trip is on (`labels.attr-mode = both`, or v0.4.x):
+each per-resource attribute key becomes its own label name. Fix:
+switch to `labels.attr-mode = external` with a narrow
+`labels.attr-include` allowlist, or `off` if no graph placeholders
+need it. Background: issue
+https://github.com/labmonkeys-space/prometheus-remote-writer/issues/112[#112].
+The names already written age out with your backend's retention.
+
 == `job="opennms"` proportion is high
 
 Samples whose `resourceId` matches none of the parser grammars

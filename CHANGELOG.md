@@ -7,6 +7,37 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **BREAKING: bounded default label schema (`labels.profile = native`).**
+  The default emission is now a curated, fixed-size label set (≤ ~15
+  label names regardless of deployment size). The resource
+  string-attribute round-trip (`onms_attr_*` / `onms_extattr_*`) is no
+  longer emitted by default — on a real deployment those per-resource
+  attribute keys produced 5,646 distinct label names vs a comparable
+  plugin's 8, with measurable backend memory and index cost (#112).
+  Restore graph placeholder substitution selectively with
+  `labels.attr-mode = external` + `labels.attr-include`, or the full
+  v0.4 emission with `labels.attr-mode = both`. Metatag aliases of
+  built-in labels now emit once (snake_case built-in only). See the new
+  "Migration" section of the docs.
+
+### Added
+
+- **`labels.profile` configuration key** (`native` default, `legacy`
+  planned): profile-based baseline label schema. The `legacy` profile
+  (drop-in series continuity for `opennms-prometheus-remotewrite-plugin`
+  migrations, pinned by an empirically captured fixture) is guarded
+  until the fixture lands; setting it fails with a clear message.
+- **`labels.attr-mode` / `labels.attr-include` configuration keys** —
+  opt-in, allowlist-bounded attribute round-trip (closes #112).
+- **e2e label-name bound**: every smoke run asserts the backend's
+  distinct label-name count stays ≤ `SMOKE_LABEL_BOUND` (default 25),
+  so a label-name explosion can never regress silently.
+- **Docs**: Grafana quickstart (zero-config PromQL against the native
+  schema), Migration section (legacy plugin + v0.4→v0.5), and a
+  label-name-explosion troubleshooting entry.
+
 ## [0.4.5] — 2026-08-31
 
 **Maintenance release.** Runtime dependency refresh plus release-pipeline
