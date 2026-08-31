@@ -401,6 +401,18 @@ public class PrometheusRemoteWriterConfig {
                 + "has no attribute labels. Remove labels.attr-mode or switch labels.profile "
                 + "to native.");
         }
+        if (labelProfile == LabelProfile.LEGACY) {
+            // Temporary guard until the fixture-pinned legacy baseline lands
+            // (openspec change label-profiles, task group 5). Validation-level
+            // — after the conflict rule above, which is permanent — so
+            // PrometheusRemoteWriterStorage.start()'s existing catch turns it
+            // into a WARN-and-wait instead of a blueprint container failure.
+            // Remove together with the legacy implementation.
+            throw new IllegalStateException(
+                "labels.profile=legacy is not implemented yet — the legacy wire schema is "
+                + "pinned by an empirical fixture that has not been captured. Use "
+                + "labels.profile=native until the legacy profile ships.");
+        }
         if (attrMode == AttrMode.EXTERNAL && labelsAttrInclude == null) {
             // Not a rejection — an operator staging a rollout may flip the
             // mode first and add the allowlist next reload. But external

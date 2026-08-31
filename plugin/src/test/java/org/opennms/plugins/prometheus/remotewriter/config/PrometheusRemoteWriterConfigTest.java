@@ -1796,11 +1796,17 @@ class PrometheusRemoteWriterConfigTest {
     }
 
     @Test
-    void legacy_profile_with_attr_mode_off_passes_validation() {
+    void legacy_profile_is_rejected_until_the_fixture_lands() {
+        // Temporary guard (openspec change label-profiles, task group 5):
+        // validation-level so the storage's config-error catch turns it into
+        // WARN-and-wait. When the legacy baseline ships, this test flips to
+        // assert legacy+off passes validation.
         PrometheusRemoteWriterConfig c = minimal();
         c.setLabelProfile("legacy");
         c.setAttrMode("off");
-        assertThatCode(c::validate).doesNotThrowAnyException();
+        assertThatThrownBy(c::validate)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("not implemented yet");
     }
 
     @Test

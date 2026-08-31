@@ -212,15 +212,11 @@ public final class LabelMapper {
         this.attrIncludeGlobs  = compileGlobs(config.labelsAttrIncludeGlobs());
         this.metadataProcessor = new MetadataProcessor(config);
         this.metrics           = metrics;
-        if (config.getLabelProfile() == PrometheusRemoteWriterConfig.LabelProfile.LEGACY) {
-            // Temporary guard until the legacy baseline lands (openspec change
-            // label-profiles, task group 5 — gated on the empirical fixture
-            // capture). Remove together with the fixture-pinned implementation.
-            throw new IllegalStateException(
-                "labels.profile=legacy is not implemented yet — the legacy wire schema is "
-                + "pinned by an empirical fixture that has not been captured. Use "
-                + "labels.profile=native until the legacy profile ships.");
-        }
+        // labels.profile=legacy is rejected in PrometheusRemoteWriterConfig
+        // .validateLabelProfile() until the fixture-pinned baseline lands
+        // (openspec change label-profiles, task group 5) — validation-level so
+        // the storage's graceful config-error handling applies instead of a
+        // blueprint container failure.
     }
 
     /** Visible for tests — unmodifiable view of labels.copy sources that

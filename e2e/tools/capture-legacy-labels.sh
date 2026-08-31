@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
 #
+# Copyright 2026 The OpenNMS Group, Inc.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Created by Ronny Trommer <ronny@opennms.com>
+#
 # capture-legacy-labels.sh — record the wire schema a Prometheus-compatible
 # backend holds after ingestion from the legacy
 # opennms-prometheus-remotewrite-plugin, as the empirical fixture that pins
@@ -56,8 +61,11 @@ q() { curl -sfG "$BASE$1" --data-urlencode "start=$START" --data-urlencode "end=
   for m in "${MATCHERS[@]}"; do
     [ $first = 1 ] || echo ','
     first=0
+    # Fallback JSON-encodes the matcher (it contains double quotes) so a
+    # single failed series query degrades gracefully instead of corrupting
+    # the fixture and failing the json.tool check below.
     q /api/v1/series --data-urlencode "match[]=$m" --data-urlencode "limit=10" \
-      || echo '{"status":"error","matcher":"'"$m"'"}'
+      || python3 -c 'import json,sys; print(json.dumps({"status":"error","matcher":sys.argv[1]}))' "$m"
   done
   echo '  ]'
   echo '}'

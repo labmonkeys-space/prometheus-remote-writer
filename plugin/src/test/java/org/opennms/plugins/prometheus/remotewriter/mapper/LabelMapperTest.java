@@ -1999,18 +1999,6 @@ class LabelMapperTest {
         assertThat(out.labels().keySet()).allMatch(allowed::contains);
     }
 
-    @Test
-    void legacy_profile_is_guarded_until_the_fixture_lands() {
-        // Temporary pin: constructing a mapper with labels.profile=legacy
-        // fails loudly instead of emitting an unpinned approximation.
-        // Replaced by fixture-driven tests in change label-profiles task 5.2.
-        PrometheusRemoteWriterConfig c = defaultConfig();
-        c.setLabelProfile("legacy");
-        org.assertj.core.api.Assertions.assertThatThrownBy(() -> new LabelMapper(c))
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("labels.profile=legacy");
-    }
-
     private static PrometheusRemoteWriterConfig defaultConfig() {
         PrometheusRemoteWriterConfig c = new PrometheusRemoteWriterConfig();
         c.setWriteUrl("https://example.com/api/v1/push");

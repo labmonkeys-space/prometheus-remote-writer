@@ -135,7 +135,7 @@ correctly under your `match[]` shape.
 |===
 | Key                          | Default | Purpose
 
-| `labels.profile`             | `native` | Baseline label schema. `native` emits the curated, bounded default set (≤ ~15 label names regardless of deployment size). `legacy` emits the wire schema of the AGPL `opennms-prometheus-remotewrite-plugin` for drop-in migration. All other `labels.*` knobs layer on top.
+| `labels.profile`             | `native` | Baseline label schema. `native` emits the curated, bounded default set (≤ ~15 label names regardless of deployment size). `legacy` (not yet available — validation rejects it until the empirical fixture pinning the schema ships) emits the wire schema of the AGPL `opennms-prometheus-remotewrite-plugin` for drop-in migration. All other `labels.*` knobs layer on top.
 | `labels.attr-mode`           | `off` | Resource string-attribute round-trip. `off` emits no `onms_attr_*`/`onms_extattr_*` labels (per-resource attribute keys otherwise create one label name each — a label-name explosion at scale). `external` emits `onms_extattr_*` for allowlisted keys only. `both` restores the unfiltered v0.4 emission. Rejected in combination with `labels.profile = legacy`.
 | `labels.attr-include`        | _(empty)_ | Attribute-key globs for `labels.attr-mode = external`, matched against the raw key (e.g. `name, datname, spcname`). Only valid with `external` mode; with an empty list, `external` emits nothing.
 | `labels.include`             | _(empty)_ | Glob list of source-tag keys to surface as labels in addition to the default allowlist. Snake-cased on the wire. See <<label-mapping>>.

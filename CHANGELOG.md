@@ -32,7 +32,7 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`labels.attr-mode` / `labels.attr-include` configuration keys** —
   opt-in, allowlist-bounded attribute round-trip (closes #112).
 - **e2e label-name bound**: every smoke run asserts the backend's
-  distinct label-name count stays ≤ `SMOKE_LABEL_BOUND` (default 25),
+  distinct label-name count stays ≤ `SMOKE_LABEL_BOUND` (default 50),
   so a label-name explosion can never regress silently.
 - **Docs**: Grafana quickstart (zero-config PromQL against the native
   schema), Migration section (legacy plugin + v0.4→v0.5), and a

@@ -3,7 +3,17 @@
 
 == From the legacy `opennms-prometheus-remotewrite-plugin`
 
-Set one line in `{cfg-file}` and deploy the KAR:
+[WARNING]
+====
+The `legacy` profile is *not available yet*: its wire schema is pinned
+by an empirically captured fixture that has not been recorded, and
+configuration validation rejects `labels.profile = legacy` with a
+clear message until it ships. Until then, migrate with
+`labels.profile = native` (a one-time series changeover — old history
+stays readable, see the note below).
+====
+
+Once available, set one line in `{cfg-file}` and deploy the KAR:
 
 [source,properties]
 ----
