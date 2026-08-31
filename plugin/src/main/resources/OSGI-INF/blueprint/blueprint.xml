@@ -46,6 +46,8 @@
             <cm:property name="http.max-connections"      value="16"/>
             <!-- Shutdown -->
             <cm:property name="shutdown.grace-period-ms"  value="10000"/>
+
+            <cm:property name="writer.shards"             value="1"/>
             <!-- Read path -->
             <cm:property name="max-series-lookback-seconds" value="7776000"/>
             <cm:property name="read.discovery-strategy"     value="single-pass"/>
@@ -106,6 +108,7 @@
         <property name="httpWriteTimeoutMs"      value="${http.write-timeout-ms}"/>
         <property name="httpMaxConnections"      value="${http.max-connections}"/>
         <property name="shutdownGracePeriodMs"    value="${shutdown.grace-period-ms}"/>
+        <property name="writerShards"             value="${writer.shards}"/>
         <property name="maxSeriesLookbackSeconds" value="${max-series-lookback-seconds}"/>
         <property name="discoveryStrategy"       value="${read.discovery-strategy}"/>
         <property name="discoveryBatchSize"      value="${read.discovery-batch-size}"/>

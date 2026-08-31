@@ -33,8 +33,7 @@ import org.opennms.plugins.prometheus.remotewriter.config.PrometheusRemoteWriter
 import org.opennms.plugins.prometheus.remotewriter.http.RemoteWriteHttpClient;
 import org.opennms.plugins.prometheus.remotewriter.mapper.LabelMapper;
 import org.opennms.plugins.prometheus.remotewriter.metrics.PluginMetrics;
-import org.opennms.plugins.prometheus.remotewriter.queue.Flusher;
-import org.opennms.plugins.prometheus.remotewriter.queue.SampleQueue;
+import org.opennms.plugins.prometheus.remotewriter.queue.Shards;
 import org.opennms.plugins.prometheus.remotewriter.queue.WalFlusher;
 import org.opennms.plugins.prometheus.remotewriter.read.PrometheusReadClient;
 import org.opennms.plugins.prometheus.remotewriter.wal.Checkpoint;
@@ -107,10 +106,9 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
      */
     private record Active(
             LabelMapper           labelMapper,
-            SampleQueue           queue,          // queue mode only
+            Shards                shards,         // queue mode only
             RemoteWriteHttpClient writeClient,
             PrometheusReadClient  readClient,
-            Flusher               flusher,        // queue mode only
             WalWriter             walWriter,      // WAL mode only
             WalFlusher            walFlusher,     // WAL mode only
             Checkpoint            checkpoint,     // WAL mode only
@@ -177,27 +175,26 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
     private void startQueueMode() {
         PluginMetrics         m  = null;
         LabelMapper           lm = null;
-        SampleQueue           q  = null;
         RemoteWriteHttpClient wc = null;
         PrometheusReadClient  rc = null;
-        Flusher               f  = null;
+        Shards                sh = null;
         try {
             m  = new PluginMetrics();
             lm = new LabelMapper(config, m);
-            q  = new SampleQueue(config.getQueueCapacity());
             wc = new RemoteWriteHttpClient(config);
             rc = new PrometheusReadClient(config, m);
-            f  = new Flusher(q, wc, config.getBatchSize(), config.getFlushIntervalMs(), m,
+            sh = new Shards(config.getWriterShards(), config.getQueueCapacity(), wc,
+                    config.getBatchSize(), config.getFlushIntervalMs(), m,
                     org.opennms.plugins.prometheus.remotewriter.wire.RemoteWriteRequestBuilders
                             .forVersion(config.getWireProtocolVersion()));
 
-            Active built = new Active(lm, q, wc, rc, f, null, null, null, null, m);
+            Active built = new Active(lm, sh, wc, rc, null, null, null, null, m);
             registerGauges(built);
             logActivationOrDiff();
-            f.start();
+            sh.start();
             active = built;
         } catch (RuntimeException e) {
-            rollbackStart(f, null, wc, rc, null);
+            rollbackStart(sh, null, wc, rc, null);
             throw e;
         }
     }
@@ -244,7 +241,7 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
                     org.opennms.plugins.prometheus.remotewriter.wire.RemoteWriteRequestBuilders
                             .forVersion(config.getWireProtocolVersion()));
 
-            Active built = new Active(lm, null, wc, rc, null, ww, wf,
+            Active built = new Active(lm, null, wc, rc, ww, wf,
                     recovered.checkpoint(), walDir, m);
             registerGauges(built);
             logActivationOrDiff();
@@ -299,8 +296,8 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
 
     private void stopQueueMode(Active a) {
         try {
-            a.flusher().stop(config.getShutdownGracePeriodMs());
-            int residual = a.queue().depth();
+            a.shards().stop(config.getShutdownGracePeriodMs());
+            int residual = a.shards().totalDepth();
             if (residual > 0) {
                 LOG.warn("shutdown completed with {} sample(s) still queued; dropping", residual);
             }
@@ -360,7 +357,7 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
         for (Sample s : samples) {
             MappedSample mapped = a.labelMapper().map(s);
             if (mapped == null) continue;
-            a.queue().enqueue(mapped);
+            a.shards().enqueue(mapped);
         }
     }
 
@@ -601,8 +598,19 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
         if (a.walEnabled()) {
             registerWalGauges(a);
         } else {
-            m.registerLongGauge(PluginMetrics.QUEUE_DEPTH,              () -> (long) a.queue().depth());
-            m.registerLongGauge(PluginMetrics.SAMPLES_DROPPED_QUEUE_FULL, a.queue()::getSamplesDroppedQueueFull);
+            m.registerLongGauge(PluginMetrics.QUEUE_DEPTH,              () -> (long) a.shards().totalDepth());
+            m.registerLongGauge(PluginMetrics.SAMPLES_DROPPED_QUEUE_FULL, a.shards()::totalSamplesDroppedQueueFull);
+            // Per-shard gauges only when actually sharded — keeps the N=1
+            // metric surface byte-identical to the classic pipeline.
+            int shards = a.shards().shardCount();
+            if (shards > 1) {
+                m.registerLongGauge(PluginMetrics.SHARD_SKEW_PCT, a.shards()::skewPct);
+                for (int i = 0; i < shards; i++) {
+                    final int shard = i;
+                    m.registerLongGauge(PluginMetrics.shardQueueDepthName(shard),
+                            () -> (long) a.shards().depth(shard));
+                }
+            }
         }
     }
 
@@ -626,10 +634,10 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
         });
     }
 
-    private static void rollbackStart(Flusher f, WalFlusher wf, RemoteWriteHttpClient wc,
+    private static void rollbackStart(Shards sh, WalFlusher wf, RemoteWriteHttpClient wc,
                                       PrometheusReadClient rc, WalWriter ww) {
-        if (f != null) {
-            try { f.stop(0); } catch (RuntimeException ignored) {}
+        if (sh != null) {
+            try { sh.stop(0); } catch (RuntimeException ignored) {}
         }
         if (wf != null) {
             try { wf.stop(0); } catch (RuntimeException ignored) {}

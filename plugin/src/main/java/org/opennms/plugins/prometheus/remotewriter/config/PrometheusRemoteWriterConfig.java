@@ -162,6 +162,16 @@ public class PrometheusRemoteWriterConfig {
     // --- Shutdown ---
     private long shutdownGracePeriodMs = 10_000L;
 
+    // --- Write parallelism ---
+    /** Number of write shards. 1 (default) is the classic single-flusher
+     *  pipeline. N>1 splits the queue-mode pipeline into N shards, each
+     *  owning a disjoint set of series (hash of the canonical label set),
+     *  a queue segment of {@code queue.capacity / N}, and a flusher thread
+     *  with at most one request in flight — so the Remote Write
+     *  in-order-per-series rule holds structurally while shards flush in
+     *  parallel. Queue mode only; validation rejects it with wal.enabled. */
+    private int writerShards = 1;
+
     // --- Read path ---
     /** How far back findMetrics() looks when no explicit start is provided. */
     private long maxSeriesLookbackSeconds = 7_776_000L; // 90 days
@@ -381,6 +391,41 @@ public class PrometheusRemoteWriterConfig {
         validateDiscovery();
         validateIfSpeedMode();
         validateLabelProfile();
+        validateWriterShards();
+    }
+
+    /**
+     * Cross-key rules for {@code writer.shards}. Sharding multiplies
+     * concurrent outbound requests (one per shard), so it is capped by the
+     * connection pool; it splits {@code queue.capacity} evenly, so each
+     * shard must still be able to fill a batch; and the WAL is a single
+     * ordered log whose ordering a parallel drain would break, so sharding
+     * is queue-mode only (per-shard WALs are a future proposal).
+     */
+    private void validateWriterShards() {
+        if (writerShards < 1 || writerShards > 64) {
+            throw new IllegalStateException(
+                "writer.shards must be in [1, 64] (got " + writerShards + ")");
+        }
+        if (writerShards == 1) return; // classic pipeline — nothing else to check
+        if (walEnabled) {
+            throw new IllegalStateException(
+                "writer.shards=" + writerShards + " requires wal.enabled=false — the WAL is a "
+                + "single ordered log and cannot be drained by parallel shards. Set "
+                + "writer.shards=1 or disable the WAL.");
+        }
+        if (writerShards > httpMaxConnections) {
+            throw new IllegalStateException(
+                "writer.shards (" + writerShards + ") must not exceed http.max-connections ("
+                + httpMaxConnections + ") — each shard can hold one request in flight.");
+        }
+        if (queueCapacity / writerShards < batchSize) {
+            throw new IllegalStateException(
+                "queue.capacity / writer.shards (" + queueCapacity + " / " + writerShards + " = "
+                + (queueCapacity / writerShards) + ") must be >= batch.size (" + batchSize
+                + ") — otherwise a shard can never fill a batch. Raise queue.capacity or "
+                + "lower writer.shards / batch.size.");
+        }
     }
 
     /**
@@ -806,6 +851,7 @@ public class PrometheusRemoteWriterConfig {
         diffLong(out, "http.write-timeout-ms",    other.httpWriteTimeoutMs,    httpWriteTimeoutMs);
         diffInt(out, "http.max-connections",      other.httpMaxConnections,    httpMaxConnections);
         diffLong(out, "shutdown.grace-period-ms", other.shutdownGracePeriodMs, shutdownGracePeriodMs);
+        diffInt(out, "writer.shards",             other.writerShards,          writerShards);
         diffLong(out, "max-series-lookback-seconds", other.maxSeriesLookbackSeconds, maxSeriesLookbackSeconds);
         diffStr(out, "read.discovery-strategy",   other.discoveryStrategy.name(),   discoveryStrategy.name());
         diffInt(out, "read.discovery-batch-size", other.discoveryBatchSize,         discoveryBatchSize);
@@ -851,6 +897,7 @@ public class PrometheusRemoteWriterConfig {
     public void setHttpWriteTimeoutMs(long v)      { httpWriteTimeoutMs = v; }
     public void setHttpMaxConnections(int v)       { httpMaxConnections = v; }
     public void setShutdownGracePeriodMs(long v)      { shutdownGracePeriodMs = v; }
+    public void setWriterShards(int v)                { writerShards = v; }
     public void setMaxSeriesLookbackSeconds(long v)   { maxSeriesLookbackSeconds = v; }
 
     /**
@@ -1156,6 +1203,7 @@ public class PrometheusRemoteWriterConfig {
     public long    getHttpWriteTimeoutMs()    { return httpWriteTimeoutMs; }
     public int     getHttpMaxConnections()    { return httpMaxConnections; }
     public long    getShutdownGracePeriodMs()    { return shutdownGracePeriodMs; }
+    public int     getWriterShards()             { return writerShards; }
     public long    getMaxSeriesLookbackSeconds() { return maxSeriesLookbackSeconds; }
     public DiscoveryStrategy getDiscoveryStrategy() { return discoveryStrategy; }
     public int     getDiscoveryBatchSize()     { return discoveryBatchSize; }

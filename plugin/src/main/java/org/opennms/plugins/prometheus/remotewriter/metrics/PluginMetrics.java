@@ -34,6 +34,8 @@ public final class PluginMetrics {
     public static final String DELETE_NOOP                     = "delete_noop_total";
     public static final String METADATA_DENYLIST_BLOCKED       = "metadata_denylist_blocked_total";
     public static final String QUEUE_DEPTH                     = "queue_depth";
+    /** Registered only when writer.shards > 1 — see registerGauges. */
+    public static final String SHARD_SKEW_PCT                  = "shard_skew_pct";
     public static final String HTTP_BYTES_WRITTEN              = "http_bytes_written_total";
     public static final String HTTP_WRITES_SUCCESSFUL          = "http_writes_successful_total";
     public static final String HTTP_WRITES_FAILED              = "http_writes_failed_total";
@@ -120,6 +122,12 @@ public final class PluginMetrics {
     public void findMetricsPhase2Batches(long n)       { if (n > 0) findMetricsPhase2Batches.inc(n); }
 
     // ---- gauge registration (called by Storage on start) ------------------
+
+    /** Gauge name for one shard's queue depth ({@code shard_<i>_queue_depth}).
+     *  Registered only when writer.shards > 1. */
+    public static String shardQueueDepthName(int shard) {
+        return "shard_" + shard + "_queue_depth";
+    }
 
     public void registerLongGauge(String name, LongSupplier supplier) {
         // Replace an existing gauge with the same name (idempotent on hot-reload).

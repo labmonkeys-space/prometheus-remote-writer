@@ -176,6 +176,76 @@ class PrometheusRemoteWriteIT {
     }
 
     @Test
+    void sharded_pipeline_delivers_all_samples_in_per_series_order() throws Exception {
+        // writer.shards=4: samples of 20 series with 5 increasing timestamps
+        // each land completely and queryable. Prometheus itself rejects
+        // out-of-order samples per series, so full delivery doubles as the
+        // ordering assertion; the query_range read-back pins one series'
+        // points end to end.
+        storage.stop();
+        PrometheusRemoteWriterConfig c = baseConfig();
+        c.setWriterShards(4);
+        c.setQueueCapacity(10_000);
+        c.setBatchSize(10);
+        storage = new PrometheusRemoteWriterStorage(c);
+        storage.start();
+
+        Instant base = Instant.now().minusSeconds(30);
+        String prefix = "onms_it_sharded_" + System.nanoTime() + "_";
+        int series = 20;
+        int pointsPerSeries = 5;
+        java.util.List<Sample> all = new java.util.ArrayList<>();
+        for (int s = 0; s < series; s++) {
+            for (int t = 0; t < pointsPerSeries; t++) {
+                all.add(ImmutableSample.builder()
+                        .metric(ImmutableMetric.builder()
+                                .intrinsicTag("name", prefix + s)
+                                .intrinsicTag("resourceId", "node[" + s + "].shardIt[x]")
+                                .build())
+                        .time(base.plusSeconds(t * 2L))
+                        .value((double) t)
+                        .build());
+            }
+        }
+        storage.store(all);
+
+        PluginMetrics m = storage.getMetrics();
+        await().atMost(Duration.ofSeconds(30))
+               .until(() -> m.snapshot().get(PluginMetrics.SAMPLES_WRITTEN).longValue()
+                            >= (long) series * pointsPerSeries);
+
+        // Read one series back through the plugin and assert every point
+        // arrived, in order, with the expected values.
+        TagMatcher nameMatcher = ImmutableTagMatcher.builder()
+                .type(TagMatcher.Type.EQUALS)
+                .key("name")
+                .value(prefix + "7")
+                .build();
+        List<Metric> found = await().atMost(Duration.ofSeconds(20))
+                .until(() -> storage.findMetrics(List.of(nameMatcher)),
+                       list -> !list.isEmpty());
+        TimeSeriesData data = storage.getTimeSeriesData(
+                ImmutableTimeSeriesFetchRequest.builder()
+                        .metric(found.get(0))
+                        .start(base.minusSeconds(5))
+                        .end(base.plusSeconds(pointsPerSeries * 2L + 5))
+                        .step(Duration.ofSeconds(1))
+                        .aggregation(org.opennms.integration.api.v1.timeseries.Aggregation.NONE)
+                        .build());
+        List<DataPoint> points = data.getDataPoints();
+        // query_range carries each value forward across sub-interval steps
+        // (lookback), so points may repeat — assert on the distinct values in
+        // encounter order: every written value present, ascending.
+        java.util.List<Double> distinct = new java.util.ArrayList<>();
+        for (DataPoint p : points) {
+            if (distinct.isEmpty() || !distinct.get(distinct.size() - 1).equals(p.getValue())) {
+                distinct.add(p.getValue());
+            }
+        }
+        assertThat(distinct).containsExactly(0.0, 1.0, 2.0, 3.0, 4.0);
+    }
+
+    @Test
     void instance_id_is_emitted_and_round_trips_through_prometheus() throws Exception {
         // Rebuild the storage with instance.id set — simulates one of multiple
         // OpenNMS instances writing into the same backend. Uses a local
