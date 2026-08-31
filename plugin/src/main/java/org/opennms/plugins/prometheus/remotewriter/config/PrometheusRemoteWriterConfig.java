@@ -88,6 +88,33 @@ public class PrometheusRemoteWriterConfig {
      */
     public enum CategoriesMode { PER_CATEGORY, RAW, BOTH }
 
+    /**
+     * Baseline label schema. {@code NATIVE} (default) emits the curated,
+     * bounded default set (see the metric-mapping spec: identity labels
+     * derived from the resourceId plus metatag-backed human-readable
+     * labels; ≤ ~15 label names regardless of deployment size).
+     * {@code LEGACY} emits the wire schema of the AGPL
+     * {@code opennms-prometheus-remotewrite-plugin}, pinned by an
+     * empirically captured fixture, so migrating deployments continue
+     * their existing series with a one-line config change. All other
+     * {@code labels.*} knobs apply on top of the selected baseline.
+     */
+    public enum LabelProfile { NATIVE, LEGACY }
+
+    /**
+     * Resource string-attribute round-trip mode. {@code OFF} (default since
+     * v0.5.0) emits no {@code onms_attr_*} / {@code onms_extattr_*} labels —
+     * attribute keys that embed per-resource identity (e.g. latency
+     * {@code ICMP/<ip>}, JMX mbean paths) otherwise create one label NAME
+     * per key, which at scale explodes the backend's label-name index
+     * (observed: 5,646 names vs 8; see issue #112). {@code EXTERNAL} emits
+     * {@code onms_extattr_*} only for keys matching {@link #labelsAttrInclude}
+     * — restores OpenNMS graph placeholder substitution ({@code ${name}},
+     * {@code ${datname}}) for the attributes an operator actually needs.
+     * {@code BOTH} restores the unfiltered v0.4 emission of both prefixes.
+     */
+    public enum AttrMode { OFF, EXTERNAL, BOTH }
+
     // --- Endpoint ---
     private String writeUrl;
     private String readUrl;
@@ -176,6 +203,12 @@ public class PrometheusRemoteWriterConfig {
     private String metricPrefix;
     private IfSpeedMode ifSpeedMode = IfSpeedMode.NORMALIZED;
     private CategoriesMode categoriesMode = CategoriesMode.PER_CATEGORY;
+    private LabelProfile labelProfile = LabelProfile.NATIVE;
+    private AttrMode attrMode = AttrMode.OFF;
+    /** Allowlist of attribute-key globs for {@link AttrMode#EXTERNAL} —
+     *  matched against the RAW source-tag key (pre-sanitization), since
+     *  that's the spelling operators see in their datacollection configs. */
+    private String labelsAttrInclude;
 
     // --- Parsed-map caches ---
     // labelsRenameMap() / labelsCopyMap() are called multiple times per
@@ -347,6 +380,44 @@ public class PrometheusRemoteWriterConfig {
         validateWal();
         validateDiscovery();
         validateIfSpeedMode();
+        validateLabelProfile();
+    }
+
+    /**
+     * Cross-key rules for {@code labels.profile} / {@code labels.attr-mode} /
+     * {@code labels.attr-include}. Value parsing already happened in the
+     * setters (which throw on bad input); this enforces the combinations:
+     * the legacy profile is defined as the legacy plugin's exact wire schema,
+     * which never carried attribute labels, so enabling the round-trip under
+     * it is a contradiction we refuse rather than silently resolve. The
+     * allowlist only participates in {@code external} mode, so setting it
+     * under any other mode is a dormant config that would surprise on a
+     * later mode flip — reject with the fix spelled out.
+     */
+    private void validateLabelProfile() {
+        if (labelProfile == LabelProfile.LEGACY && attrMode != AttrMode.OFF) {
+            throw new IllegalStateException(
+                "labels.profile=legacy requires labels.attr-mode=off — the legacy wire schema "
+                + "has no attribute labels. Remove labels.attr-mode or switch labels.profile "
+                + "to native.");
+        }
+        if (attrMode == AttrMode.EXTERNAL && labelsAttrInclude == null) {
+            // Not a rejection — an operator staging a rollout may flip the
+            // mode first and add the allowlist next reload. But external
+            // mode with no allowlist emits nothing, which reads as "the
+            // knob doesn't work" without this breadcrumb.
+            org.slf4j.LoggerFactory.getLogger(PrometheusRemoteWriterConfig.class).warn(
+                "labels.attr-mode=external with no labels.attr-include emits no attribute "
+                + "labels — add labels.attr-include globs for the attribute keys your "
+                + "graph placeholders need (e.g. 'name, datname, spcname').");
+        }
+        if (labelsAttrInclude != null && attrMode != AttrMode.EXTERNAL) {
+            throw new IllegalStateException(
+                "labels.attr-include is set but labels.attr-mode is '"
+                + attrMode.name().toLowerCase(java.util.Locale.ROOT)
+                + "' — the allowlist only applies to labels.attr-mode=external. "
+                + "Set labels.attr-mode=external or remove labels.attr-include.");
+        }
     }
 
     /**
@@ -520,6 +591,7 @@ public class PrometheusRemoteWriterConfig {
 
     public List<String> labelsIncludeGlobs() { return parseCsv(labelsInclude); }
     public List<String> labelsExcludeGlobs() { return parseCsv(labelsExclude); }
+    public List<String> labelsAttrIncludeGlobs() { return parseCsv(labelsAttrInclude); }
     public List<String> metadataIncludeGlobs() { return parseCsv(metadataInclude); }
     public List<String> metadataExcludeGlobs() { return parseCsv(metadataExclude); }
 
@@ -731,6 +803,9 @@ public class PrometheusRemoteWriterConfig {
         diffStr(out, "labels.copy",               other.labelsCopy,            labelsCopy);
         diffStr(out, "labels.if-speed-mode",      other.ifSpeedMode.name(),    ifSpeedMode.name());
         diffStr(out, "labels.categories-mode",    other.categoriesMode.name(), categoriesMode.name());
+        diffStr(out, "labels.profile",            other.labelProfile.name(),   labelProfile.name());
+        diffStr(out, "labels.attr-mode",          other.attrMode.name(),       attrMode.name());
+        diffStr(out, "labels.attr-include",       other.labelsAttrInclude,     labelsAttrInclude);
         diffStr(out, "metric.prefix",             other.metricPrefix,          metricPrefix);
         diffBool(out, "metadata.enabled",         other.metadataEnabled,       metadataEnabled);
         diffStr(out, "metadata.include",          other.metadataInclude,       metadataInclude);
@@ -906,6 +981,53 @@ public class PrometheusRemoteWriterConfig {
         categoriesMode = v == null ? CategoriesMode.PER_CATEGORY : v;
     }
 
+    public void setLabelProfile(String v) {
+        // blankToNull (not isBlank) so a whitespace-only operator value falls
+        // back to the default instead of throwing — mirrors setWireProtocolVersion.
+        String value = blankToNull(v);
+        if (value == null) {
+            labelProfile = LabelProfile.NATIVE;
+            return;
+        }
+        // Locale.ROOT — same Turkish-locale-bug avoidance as setIfSpeedMode.
+        String normalized = value.toUpperCase(java.util.Locale.ROOT);
+        try {
+            labelProfile = LabelProfile.valueOf(normalized);
+        } catch (IllegalArgumentException e) {
+            throw new IllegalStateException(
+                "labels.profile must be 'native' or 'legacy', got: " + v);
+        }
+    }
+
+    // Aries Blueprint setter overload — same pattern as setIfSpeedMode(IfSpeedMode).
+    public void setLabelProfile(LabelProfile v) {
+        labelProfile = v == null ? LabelProfile.NATIVE : v;
+    }
+
+    public void setAttrMode(String v) {
+        // blankToNull for the same whitespace-only fallback as setLabelProfile.
+        String value = blankToNull(v);
+        if (value == null) {
+            attrMode = AttrMode.OFF;
+            return;
+        }
+        // Locale.ROOT — same Turkish-locale-bug avoidance as setIfSpeedMode.
+        String normalized = value.toUpperCase(java.util.Locale.ROOT);
+        try {
+            attrMode = AttrMode.valueOf(normalized);
+        } catch (IllegalArgumentException e) {
+            throw new IllegalStateException(
+                "labels.attr-mode must be 'off', 'external', or 'both', got: " + v);
+        }
+    }
+
+    // Aries Blueprint setter overload — same pattern as setIfSpeedMode(IfSpeedMode).
+    public void setAttrMode(AttrMode v) {
+        attrMode = v == null ? AttrMode.OFF : v;
+    }
+
+    public void setLabelsAttrInclude(String v) { labelsAttrInclude = blankToNull(v); }
+
     // --- WAL setters ---------------------------------------------------------
 
     public void setWalEnabled(boolean v)        { walEnabled = v; }
@@ -1032,6 +1154,9 @@ public class PrometheusRemoteWriterConfig {
     public String  getMetricPrefix()          { return metricPrefix; }
     public IfSpeedMode getIfSpeedMode()       { return ifSpeedMode; }
     public CategoriesMode getCategoriesMode() { return categoriesMode; }
+    public LabelProfile getLabelProfile()     { return labelProfile; }
+    public AttrMode getAttrMode()             { return attrMode; }
+    public String  getLabelsAttrInclude()     { return labelsAttrInclude; }
     public boolean isMetadataEnabled()        { return metadataEnabled; }
     public String  getMetadataInclude()       { return metadataInclude; }
     public String  getMetadataExclude()       { return metadataExclude; }

@@ -1728,6 +1728,123 @@ class PrometheusRemoteWriterConfigTest {
 
     // ---------- helpers -----------------------------------------------------
 
+    // ---------- labels.profile / labels.attr-mode ---------------------------
+
+    @Test
+    void label_profile_defaults_to_native() {
+        PrometheusRemoteWriterConfig c = minimal();
+        assertThatCode(c::validate).doesNotThrowAnyException();
+        assertThat(c.getLabelProfile()).isEqualTo(PrometheusRemoteWriterConfig.LabelProfile.NATIVE);
+        assertThat(c.getAttrMode()).isEqualTo(PrometheusRemoteWriterConfig.AttrMode.OFF);
+        assertThat(c.labelsAttrIncludeGlobs()).isEmpty();
+    }
+
+    @Test
+    void label_profile_parses_both_values_case_insensitively() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setLabelProfile("Native");
+        assertThat(c.getLabelProfile()).isEqualTo(PrometheusRemoteWriterConfig.LabelProfile.NATIVE);
+        c.setLabelProfile("LEGACY");
+        assertThat(c.getLabelProfile()).isEqualTo(PrometheusRemoteWriterConfig.LabelProfile.LEGACY);
+    }
+
+    @Test
+    void blank_label_profile_falls_back_to_native() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setLabelProfile("   ");
+        assertThat(c.getLabelProfile()).isEqualTo(PrometheusRemoteWriterConfig.LabelProfile.NATIVE);
+    }
+
+    @Test
+    void unknown_label_profile_is_rejected_with_key_name() {
+        PrometheusRemoteWriterConfig c = minimal();
+        assertThatThrownBy(() -> c.setLabelProfile("cortex"))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("labels.profile")
+            .hasMessageContaining("native")
+            .hasMessageContaining("legacy");
+    }
+
+    @Test
+    void attr_mode_parses_all_values() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setAttrMode("external");
+        assertThat(c.getAttrMode()).isEqualTo(PrometheusRemoteWriterConfig.AttrMode.EXTERNAL);
+        c.setAttrMode("BOTH");
+        assertThat(c.getAttrMode()).isEqualTo(PrometheusRemoteWriterConfig.AttrMode.BOTH);
+        c.setAttrMode("off");
+        assertThat(c.getAttrMode()).isEqualTo(PrometheusRemoteWriterConfig.AttrMode.OFF);
+    }
+
+    @Test
+    void unknown_attr_mode_is_rejected_with_key_name() {
+        PrometheusRemoteWriterConfig c = minimal();
+        assertThatThrownBy(() -> c.setAttrMode("all"))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("labels.attr-mode");
+    }
+
+    @Test
+    void legacy_profile_with_attr_mode_is_a_validation_error() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setLabelProfile("legacy");
+        c.setAttrMode("both");
+        assertThatThrownBy(c::validate)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("labels.profile")
+            .hasMessageContaining("labels.attr-mode");
+    }
+
+    @Test
+    void legacy_profile_with_attr_mode_off_passes_validation() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setLabelProfile("legacy");
+        c.setAttrMode("off");
+        assertThatCode(c::validate).doesNotThrowAnyException();
+    }
+
+    @Test
+    void attr_include_without_external_mode_is_a_validation_error() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setLabelsAttrInclude("ifName, datname");
+        assertThatThrownBy(c::validate)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("labels.attr-include")
+            .hasMessageContaining("labels.attr-mode");
+    }
+
+    @Test
+    void attr_include_with_both_mode_is_a_validation_error() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setAttrMode("both");
+        c.setLabelsAttrInclude("ifName");
+        assertThatThrownBy(c::validate)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("labels.attr-include");
+    }
+
+    @Test
+    void attr_include_with_external_mode_parses_globs() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setAttrMode("external");
+        c.setLabelsAttrInclude("ifName, dat*");
+        assertThatCode(c::validate).doesNotThrowAnyException();
+        assertThat(c.labelsAttrIncludeGlobs()).containsExactly("ifName", "dat*");
+    }
+
+    @Test
+    void profile_and_attr_mode_show_up_in_diff() {
+        PrometheusRemoteWriterConfig before = minimal();
+        PrometheusRemoteWriterConfig after = minimal();
+        after.setLabelProfile("legacy");
+        after.setAttrMode("external");
+        after.setLabelsAttrInclude("ifName");
+        List<String> diff = after.diff(before);
+        assertThat(diff).anyMatch(l -> l.startsWith("labels.profile:"));
+        assertThat(diff).anyMatch(l -> l.startsWith("labels.attr-mode:"));
+        assertThat(diff).anyMatch(l -> l.startsWith("labels.attr-include:"));
+    }
+
     private static PrometheusRemoteWriterConfig minimal() {
         PrometheusRemoteWriterConfig c = new PrometheusRemoteWriterConfig();
         c.setWriteUrl("https://example.com/api/v1/push");

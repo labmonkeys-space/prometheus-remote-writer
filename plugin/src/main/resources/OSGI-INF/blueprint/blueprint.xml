@@ -57,6 +57,9 @@
             <cm:property name="labels.copy"    value=""/>
             <cm:property name="labels.if-speed-mode" value="normalized"/>
             <cm:property name="labels.categories-mode" value="per-category"/>
+            <cm:property name="labels.profile"      value="native"/>
+            <cm:property name="labels.attr-mode"    value="off"/>
+            <cm:property name="labels.attr-include" value=""/>
             <cm:property name="metric.prefix"  value=""/>
             <!-- Metadata passthrough -->
             <cm:property name="metadata.enabled"       value="false"/>
@@ -112,6 +115,9 @@
         <property name="labelsCopy"              value="${labels.copy}"/>
         <property name="ifSpeedMode"             value="${labels.if-speed-mode}"/>
         <property name="categoriesMode"          value="${labels.categories-mode}"/>
+        <property name="labelProfile"            value="${labels.profile}"/>
+        <property name="attrMode"                value="${labels.attr-mode}"/>
+        <property name="labelsAttrInclude"       value="${labels.attr-include}"/>
         <property name="metricPrefix"            value="${metric.prefix}"/>
         <property name="metadataEnabled"         value="${metadata.enabled}"/>
         <property name="metadataInclude"         value="${metadata.include}"/>
