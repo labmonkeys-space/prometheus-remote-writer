@@ -51,6 +51,7 @@ public final class Flusher {
     private final long flushIntervalMs;
     private final PluginMetrics metrics;
     private final Function<Collection<MappedSample>, BuildResult> builder;
+    private final String threadName;
 
     private volatile boolean running;
     private Thread thread;
@@ -78,10 +79,21 @@ public final class Flusher {
     public Flusher(SampleQueue queue, RemoteWriteHttpClient httpClient,
                    int batchSize, long flushIntervalMs, PluginMetrics metrics,
                    Function<Collection<MappedSample>, BuildResult> builder) {
+        this(queue, httpClient, batchSize, flushIntervalMs, metrics, builder,
+                "prometheus-remote-writer-flusher");
+    }
+
+    /** Full constructor — {@code threadName} keeps per-shard flushers
+     *  distinguishable in thread dumps ({@code …-flusher-0}, {@code …-flusher-1}). */
+    public Flusher(SampleQueue queue, RemoteWriteHttpClient httpClient,
+                   int batchSize, long flushIntervalMs, PluginMetrics metrics,
+                   Function<Collection<MappedSample>, BuildResult> builder,
+                   String threadName) {
         this.queue          = Objects.requireNonNull(queue);
         this.httpClient     = Objects.requireNonNull(httpClient);
         this.metrics        = Objects.requireNonNull(metrics);
         this.builder        = Objects.requireNonNull(builder);
+        this.threadName     = Objects.requireNonNull(threadName);
         if (batchSize < 1)       throw new IllegalArgumentException("batchSize must be >= 1");
         if (flushIntervalMs < 1) throw new IllegalArgumentException("flushIntervalMs must be >= 1");
         this.batchSize       = batchSize;
@@ -91,18 +103,27 @@ public final class Flusher {
     public synchronized void start() {
         if (running) return;
         running = true;
-        thread = new Thread(this::run, "prometheus-remote-writer-flusher");
+        thread = new Thread(this::run, threadName);
         thread.setDaemon(true);
         thread.start();
     }
 
     /**
-     * Signal the flush loop to stop, wait up to {@code graceMs} for it to
-     * finish its last flush, then interrupt.
+     * Signal the flush loop to stop without waiting. Used by the sharded
+     * pipeline to signal every shard first, then await them under one
+     * shared grace budget — signalling and joining sequentially would
+     * multiply the worst-case shutdown time by the shard count.
      */
-    public synchronized void stop(long graceMs) {
-        if (!running) return;
+    public synchronized void signalStop() {
         running = false;
+    }
+
+    /**
+     * Wait up to {@code graceMs} for the flush loop to finish its residual
+     * drain, then interrupt. Safe to call after {@link #signalStop()};
+     * no-op when the thread never started or already completed a stop.
+     */
+    public synchronized void awaitStop(long graceMs) {
         Thread t = thread;
         if (t == null) return;
         try {
@@ -111,7 +132,7 @@ public final class Flusher {
             Thread.currentThread().interrupt();
         }
         if (t.isAlive()) {
-            LOG.warn("flusher did not stop within {}ms, interrupting", graceMs);
+            LOG.warn("flusher {} did not stop within {}ms, interrupting", threadName, graceMs);
             t.interrupt();
             try {
                 t.join(1_000);
@@ -120,6 +141,16 @@ public final class Flusher {
             }
         }
         thread = null;
+    }
+
+    /**
+     * Signal the flush loop to stop, wait up to {@code graceMs} for it to
+     * finish its last flush, then interrupt.
+     */
+    public synchronized void stop(long graceMs) {
+        if (!running && thread == null) return;
+        signalStop();
+        awaitStop(graceMs);
     }
 
     private void run() {

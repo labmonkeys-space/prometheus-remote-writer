@@ -24,6 +24,14 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`writer.shards` configuration key** (default `1` — unchanged
+  behavior): opt-in parallel write pipeline. N shards each own a
+  disjoint set of series (hash of the label set), a queue slice, and a
+  flusher with at most one request in flight, so per-series sample
+  order is preserved while shards flush in parallel — removing the
+  single-flusher throughput ceiling and letting one slow batch stall
+  only its own shard (#115). Queue mode only; per-shard depth gauges
+  and a `shard_skew_pct` gauge appear when sharded.
 - **`labels.profile` configuration key** (`native` default, `legacy`
   planned): profile-based baseline label schema. The `legacy` profile
   (drop-in series continuity for `opennms-prometheus-remotewrite-plugin`

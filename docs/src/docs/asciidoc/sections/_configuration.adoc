@@ -52,6 +52,7 @@ Used when `wal.enabled=false` (the default). When the WAL is enabled,
 | `retry.initial-backoff-ms`   | `250`   | First backoff after a 5xx.
 | `retry.max-backoff-ms`       | `10000` | Backoff ceiling.
 | `shutdown.grace-period-ms`   | `10000` | Bounds the graceful-shutdown wait. With WAL enabled, bounds the in-flight HTTP wait, not a drain window.
+| `writer.shards`              | `1`     | Write-pipeline parallelism. N>1 splits the queue-mode pipeline into N shards (disjoint series by label-set hash, one flusher and ≤1 in-flight request each) — per-series order preserved, shards flush in parallel. Rejected with `wal.enabled=true`; capped at `http.max-connections`; requires `queue.capacity / N ≥ batch.size`. The backend sees up to N concurrent streams.
 |===
 
 == HTTP client

@@ -1851,6 +1851,67 @@ class PrometheusRemoteWriterConfigTest {
         assertThat(diff).anyMatch(l -> l.startsWith("labels.attr-include:"));
     }
 
+    // ---------- writer.shards ------------------------------------------------
+
+    @Test
+    void writer_shards_defaults_to_one() {
+        PrometheusRemoteWriterConfig c = minimal();
+        assertThatCode(c::validate).doesNotThrowAnyException();
+        assertThat(c.getWriterShards()).isEqualTo(1);
+    }
+
+    @Test
+    void writer_shards_bounds_are_enforced() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setWriterShards(0);
+        assertThatThrownBy(c::validate)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("writer.shards")
+            .hasMessageContaining("[1, 64]");
+        c.setWriterShards(65);
+        assertThatThrownBy(c::validate).hasMessageContaining("[1, 64]");
+    }
+
+    @Test
+    void writer_shards_with_wal_is_a_validation_error() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setWriterShards(4);
+        c.setWalEnabled(true);
+        assertThatThrownBy(c::validate)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("writer.shards")
+            .hasMessageContaining("wal.enabled");
+    }
+
+    @Test
+    void writer_shards_capped_by_http_max_connections() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setWriterShards(32);
+        c.setHttpMaxConnections(16);
+        assertThatThrownBy(c::validate)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("writer.shards")
+            .hasMessageContaining("http.max-connections");
+    }
+
+    @Test
+    void writer_shards_must_leave_room_for_a_batch_per_shard() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setWriterShards(16);          // 10000 / 16 = 625 < 1000
+        assertThatThrownBy(c::validate)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("queue.capacity")
+            .hasMessageContaining("batch.size");
+    }
+
+    @Test
+    void valid_sharded_config_passes_and_diffs() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setWriterShards(4);           // 10000/4 = 2500 >= 1000; 4 <= 16
+        assertThatCode(c::validate).doesNotThrowAnyException();
+        assertThat(c.diff(minimal())).anyMatch(l -> l.startsWith("writer.shards:"));
+    }
+
     private static PrometheusRemoteWriterConfig minimal() {
         PrometheusRemoteWriterConfig c = new PrometheusRemoteWriterConfig();
         c.setWriteUrl("https://example.com/api/v1/push");
