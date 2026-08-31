@@ -51,10 +51,6 @@ public class StatsCommand implements Action {
         this.storage = storage;
     }
 
-    public void setStorage(PrometheusRemoteWriterStorage storage) {
-        this.storage = storage;
-    }
-
     @Override
     public Object execute() {
         render(System.out);

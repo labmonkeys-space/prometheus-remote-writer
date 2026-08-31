@@ -108,26 +108,34 @@ smoke: kar ## Run e2e smoke against BACKENDS (defaults exclude sentinel; SMOKE_T
 	}; \
 	keydir=""; \
 	trap 'cleanup; echo; echo "=== interrupted ==="; exit 130' INT TERM; \
+	pub=""; \
+	keydir=$$(mktemp -d) \
+	    && ssh-keygen -q -t rsa -b 2048 -N '' -f "$$keydir/id_rsa" \
+	    && pub=$$(cut -d' ' -f2 "$$keydir/id_rsa.pub") \
+	    || { echo "WARN: could not generate the Karaf SSH test key; the stats-command gate will fail" >&2; }; \
 	for backend in $(BACKENDS); do \
-	    discovery_query=""; labels_query=""; \
+	    discovery_query=""; labels_query=""; plugin_cfg=""; \
 	    case "$$backend" in \
 	        prometheus) \
 	            file=e2e/compose.prometheus.yml; \
 	            query="curl -sfG 'http://localhost:9090/api/v1/query' --data-urlencode 'query=count({__name__=~\".+\"})'"; \
 	            discovery_query="curl -sfG 'http://localhost:9090/api/v1/label/resourceId/values'"; \
 	            labels_query="curl -sfG 'http://localhost:9090/api/v1/labels'"; \
+	            plugin_cfg=e2e/opennms/prometheus.cfg; \
 	            log_container=core; log_path=/opt/opennms/logs/karaf.log ;; \
 	        mimir) \
 	            file=e2e/compose.mimir.yml; \
 	            query="curl -sfG 'http://localhost:9009/prometheus/api/v1/query' -H 'X-Scope-OrgID: e2e' --data-urlencode 'query=count({__name__=~\".+\"})'"; \
 	            discovery_query="curl -sfG 'http://localhost:9009/prometheus/api/v1/label/resourceId/values' -H 'X-Scope-OrgID: e2e'"; \
 	            labels_query="curl -sfG 'http://localhost:9009/prometheus/api/v1/labels' -H 'X-Scope-OrgID: e2e'"; \
+	            plugin_cfg=e2e/opennms/mimir.cfg; \
 	            log_container=core; log_path=/opt/opennms/logs/karaf.log ;; \
 	        victoriametrics) \
 	            file=e2e/compose.victoriametrics.yml; \
 	            query="curl -sfG 'http://localhost:8428/api/v1/query' --data-urlencode 'query=count({__name__=~\".+\"})'"; \
 	            discovery_query="curl -sfG 'http://localhost:8428/api/v1/label/resourceId/values'"; \
 	            labels_query="curl -sfG 'http://localhost:8428/api/v1/labels'"; \
+	            plugin_cfg=e2e/opennms/victoriametrics.cfg; \
 	            log_container=core; log_path=/opt/opennms/logs/karaf.log ;; \
 	        sentinel) \
 	            file=e2e/sentinel/compose.yml; \
@@ -178,33 +186,39 @@ smoke: kar ## Run e2e smoke against BACKENDS (defaults exclude sentinel; SMOKE_T
 	            if [ "$$rid_count" -gt 0 ]; then \
 	                echo "=== [$$backend] PASS (label-values): $$rid_count resourceIds enumerated ==="; \
 	                echo "=== [$$backend] probing opennms:prometheus-writer-stats via Karaf SSH ==="; \
-	                keydir=$$(mktemp -d) \
-	                    && ssh-keygen -q -t rsa -b 2048 -N '' -f "$$keydir/id_rsa" \
-	                    && pub=$$(cut -d' ' -f2 "$$keydir/id_rsa.pub") \
-	                    && [ -n "$$pub" ] \
+	                { [ -n "$$pub" ] \
 	                    && docker compose -f "$$file" exec -T core sh -c 'cat > /tmp/karaf-test-key && chmod 600 /tmp/karaf-test-key' < "$$keydir/id_rsa" \
 	                    && printf '\nadmin=%s,_g_:admingroup\n' "$$pub" \
-	                        | docker compose -f "$$file" exec -T core sh -c 'cat >> /opt/opennms/etc/keys.properties' \
+	                        | docker compose -f "$$file" exec -T core sh -c 'cat >> /opt/opennms/etc/keys.properties'; } \
 	                    || { echo "=== [$$backend] FAIL: could not stage the Karaf SSH test key (keygen/injection) ===" >&2; \
-	                         rm -rf "$$keydir"; keydir=""; failed="$$failed $$backend"; cleanup; current_file=""; current_backend=""; continue; }; \
+	                         failed="$$failed $$backend"; cleanup_backend=1; }; \
+	                if [ "$${cleanup_backend:-0}" = 1 ]; then cleanup_backend=0; cleanup; current_file=""; current_backend=""; continue; fi; \
 	                stats_out=$$(docker compose -f "$$file" exec -T core ssh -i /tmp/karaf-test-key -p 8101 \
 	                    -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR \
+	                    -o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=4 \
 	                    admin@localhost opennms:prometheus-writer-stats 2>"$$keydir/ssh.err" || true); \
 	                stats_err=$$(cat "$$keydir/ssh.err" 2>/dev/null); \
-	                rm -rf "$$keydir"; keydir=""; \
+	                want_shards=1; \
+	                if [ -n "$$plugin_cfg" ] && [ -f "$$plugin_cfg" ] \
+	                    && ! grep -Eq '^[[:space:]]*wal\.enabled[[:space:]]*=[[:space:]]*true' "$$plugin_cfg"; then \
+	                    want_shards=$$(grep -E '^[[:space:]]*writer\.shards' "$$plugin_cfg" | tail -1 | cut -d= -f2 | tr -d '[:space:]'); \
+	                    case "$$want_shards" in ''|*[!0-9]*) want_shards=1 ;; esac; \
+	                fi; \
 	                case "$$stats_out" in \
 	                    *samples_written_total*) \
 	                        stats_ok=1; \
-	                        if [ "$$backend" = "victoriametrics" ]; then \
+	                        if [ "$$want_shards" -gt 1 ]; then \
 	                            case "$$stats_out" in \
 	                                *shard_skew_pct*shard_0_queue_depth*|*shard_0_queue_depth*shard_skew_pct*) : ;; \
 	                                *) stats_ok=0; \
-	                                   echo "=== [$$backend] FAIL: per-shard rows missing from stats table (victoriametrics.cfg sets writer.shards=2, so shard_0_queue_depth and shard_skew_pct must render) ===" >&2 ;; \
+	                                   echo "=== [$$backend] FAIL: $$plugin_cfg sets writer.shards=$$want_shards but shard_0_queue_depth / shard_skew_pct rows are missing from the stats table ===" >&2 ;; \
 	                            esac; \
 	                        fi ;; \
 	                    *"not active"*|*"not been started"*) \
 	                        stats_ok=0; \
-	                        echo "=== [$$backend] FAIL: stats command registered but the plugin pipeline is inactive ===" >&2 ;; \
+	                        echo "=== [$$backend] FAIL: stats command registered but reports the plugin inactive ===" >&2; \
+	                        echo "    (samples just landed, so the likely cause is the command's @Reference not resolving —" >&2; \
+	                        echo "     check the concrete-class <service> registration in blueprint.xml, see #113)" >&2 ;; \
 	                    *) \
 	                        stats_ok=0; \
 	                        echo "=== [$$backend] FAIL: opennms:prometheus-writer-stats produced no metrics table ===" >&2; \
