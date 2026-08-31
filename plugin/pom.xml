@@ -185,6 +185,14 @@
                         <Bundle-Version>${project.version}</Bundle-Version>
                         <Bundle-License>https://www.apache.org/licenses/LICENSE-2.0</Bundle-License>
                         <Bundle-Blueprint>OSGI-INF/blueprint/*.xml</Bundle-Blueprint>
+                        <!--
+                            Karaf's CommandExtender inspects ONLY bundles that
+                            carry this header; without it the @Command/@Service
+                            annotations are never scanned and the shell command
+                            does not exist (#113). Narrow package form per
+                            OpenNMS core/health/shell precedent.
+                        -->
+                        <Karaf-Commands>org.opennms.plugins.prometheus.remotewriter.shell*</Karaf-Commands>
                         <Export-Package />
                         <Import-Package>
                             <!--

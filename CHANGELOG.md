@@ -7,6 +7,14 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`opennms:prometheus-writer-stats` never registered** (#113).
+  Karaf 4's command extender only inspects bundles carrying the `Karaf-Commands` manifest header and only registers `@Service`-annotated classes; the plugin's blueprint-published `Action` service satisfied neither gate, so the documented command reported "Command not found" on every deployment.
+  The bundle now ships the header, and `StatsCommand` carries `@Service`/`@Reference` (concrete-type injection via a second, non-exported service registration).
+  The e2e smoke gates execute the command over Karaf SSH, so a registration regression fails CI loudly instead of rotting silently.
+  As a consequence, the per-shard gauges introduced by the sharded write pipeline now actually reach operators through the command's table.
+
 ### Changed
 
 - **BREAKING: bounded default label schema (`labels.profile = native`).**

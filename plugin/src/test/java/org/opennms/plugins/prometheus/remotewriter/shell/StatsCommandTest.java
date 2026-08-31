@@ -93,6 +93,37 @@ class StatsCommandTest {
         assertThat(out).contains("wal_segments_active");
     }
 
+    // ---------- registration contract (#113) --------------------------------
+    // Karaf's CommandExtender registers the command only if the class carries
+    // BOTH @Command and @Service, and injects @Reference fields. The manifest
+    // header half of the contract lives in plugin/pom.xml (Karaf-Commands)
+    // and is exercised by the e2e smoke's stats-command step; this test pins
+    // the class-level half so a refactor can't silently drop an annotation.
+
+    @Test
+    void command_carries_the_karaf_registration_annotations() throws Exception {
+        org.apache.karaf.shell.api.action.Command cmd =
+                StatsCommand.class.getAnnotation(org.apache.karaf.shell.api.action.Command.class);
+        assertThat(cmd).as("@Command present").isNotNull();
+        assertThat(cmd.scope()).isEqualTo("opennms");
+        assertThat(cmd.name()).isEqualTo("prometheus-writer-stats");
+
+        assertThat(StatsCommand.class.getAnnotation(
+                org.apache.karaf.shell.api.action.lifecycle.Service.class))
+                .as("@Service present — without it the extender skips the class")
+                .isNotNull();
+
+        java.lang.reflect.Field storage = StatsCommand.class.getDeclaredField("storage");
+        assertThat(storage.getType()).isEqualTo(PrometheusRemoteWriterStorage.class);
+        org.apache.karaf.shell.api.action.lifecycle.Reference ref =
+                storage.getAnnotation(org.apache.karaf.shell.api.action.lifecycle.Reference.class);
+        assertThat(ref).as("@Reference present on storage field").isNotNull();
+        assertThat(ref.optional())
+                .as("optional=true — a mandatory reference delay-activates the "
+                    + "command into 'Command not found' while the plugin is unconfigured")
+                .isTrue();
+    }
+
     private static String capture(StatsCommand cmd) {
         ByteArrayOutputStream baos = new ByteArrayOutputStream();
         cmd.render(new PrintStream(baos, true, StandardCharsets.UTF_8));

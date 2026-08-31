@@ -295,4 +295,65 @@ class BlueprintWiringTest {
     private static String capitalize(String s) {
         return Character.toUpperCase(s.charAt(0)) + s.substring(1);
     }
+
+    /**
+     * The storage bean MUST stay registered under BOTH names, as two
+     * separate {@code <service>} elements (#113):
+     *
+     * <ul>
+     *   <li>the OIA interface with {@code registration.export=true} —
+     *       what OpenNMS core's TSS discovery consumes; it must remain
+     *       single-objectClass because the export bridge skips a service
+     *       carrying any objectClass core cannot load;</li>
+     *   <li>the concrete class WITHOUT the export property — what the
+     *       shell command's {@code @Reference} resolves. Deleting this
+     *       "redundant-looking" registration breaks only the stats
+     *       command, and only at runtime.</li>
+     * </ul>
+     */
+    @Test
+    void storage_bean_keeps_both_service_registrations() throws Exception {
+        Document doc = loadBlueprint();
+        org.w3c.dom.NodeList services = doc.getElementsByTagNameNS("*", "service");
+        // List, not Set: cardinality matters — a duplicate registration of
+        // either interface is exactly the stale-KAR hazard the blueprint
+        // comment documents, and must fail here, not in an operator's shell.
+        java.util.List<String> interfaces = new java.util.ArrayList<>();
+        java.util.Map<String, Boolean> exported = new java.util.HashMap<>();
+        for (int i = 0; i < services.getLength(); i++) {
+            org.w3c.dom.Element svc = (org.w3c.dom.Element) services.item(i);
+            if (!"prometheusRemoteWriterStorage".equals(svc.getAttribute("ref"))) continue;
+            String iface = svc.getAttribute("interface");
+            interfaces.add(iface);
+            boolean hasExport = false;
+            org.w3c.dom.NodeList entries = svc.getElementsByTagNameNS("*", "entry");
+            for (int j = 0; j < entries.getLength(); j++) {
+                org.w3c.dom.Element entry = (org.w3c.dom.Element) entries.item(j);
+                if ("registration.export".equals(entry.getAttribute("key"))
+                        && "true".equals(entry.getAttribute("value"))) {
+                    hasExport = true;
+                }
+            }
+            exported.put(iface, hasExport);
+        }
+        assertThat(interfaces)
+                .as("blueprint.xml must register the storage bean as exactly TWO separate "
+                    + "single-interface <service> elements — OIA interface (exported) + "
+                    + "concrete class (Karaf-only, feeds the stats command's @Reference). "
+                    + "Do NOT merge them into one multi-objectClass registration and do NOT "
+                    + "use auto-export: the OpenNMS export bridge skips a service carrying "
+                    + "any objectClass core cannot load (#113).")
+                .containsExactlyInAnyOrder(
+                        "org.opennms.integration.api.v1.timeseries.TimeSeriesStorage",
+                        "org.opennms.plugins.prometheus.remotewriter.PrometheusRemoteWriterStorage");
+        // The asymmetry IS the contract: exported OIA interface, non-exported
+        // concrete class. Flipping either side breaks core discovery or
+        // reintroduces the multi-objectClass export bug.
+        assertThat(exported.get("org.opennms.integration.api.v1.timeseries.TimeSeriesStorage"))
+                .as("the OIA registration must carry registration.export=true")
+                .isTrue();
+        assertThat(exported.get("org.opennms.plugins.prometheus.remotewriter.PrometheusRemoteWriterStorage"))
+                .as("the concrete-class registration must NOT be exported")
+                .isFalse();
+    }
 }

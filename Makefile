@@ -105,27 +105,37 @@ smoke: kar ## Run e2e smoke against BACKENDS (defaults exclude sentinel; SMOKE_T
 	        docker compose -f "$$current_file" down -v --remove-orphans >/dev/null 2>&1 || true; \
 	    fi; \
 	}; \
-	trap 'cleanup; echo; echo "=== interrupted ==="; exit 130' INT TERM; \
+	cleanup_key() { [ -n "$$keydir" ] && rm -rf "$$keydir"; keydir=""; }; \
+	keydir=""; \
+	trap 'cleanup; cleanup_key; echo; echo "=== interrupted ==="; exit 130' INT TERM; \
+	pub=""; \
+	keydir=$$(mktemp -d) \
+	    && ssh-keygen -q -t rsa -b 2048 -N '' -f "$$keydir/id_rsa" \
+	    && pub=$$(cut -d' ' -f2 "$$keydir/id_rsa.pub") \
+	    || { echo "WARN: could not generate the Karaf SSH test key; the stats-command gate will fail" >&2; }; \
 	for backend in $(BACKENDS); do \
-	    discovery_query=""; labels_query=""; \
+	    discovery_query=""; labels_query=""; plugin_cfg=""; \
 	    case "$$backend" in \
 	        prometheus) \
 	            file=e2e/compose.prometheus.yml; \
 	            query="curl -sfG 'http://localhost:9090/api/v1/query' --data-urlencode 'query=count({__name__=~\".+\"})'"; \
 	            discovery_query="curl -sfG 'http://localhost:9090/api/v1/label/resourceId/values'"; \
 	            labels_query="curl -sfG 'http://localhost:9090/api/v1/labels'"; \
+	            plugin_cfg=e2e/opennms/prometheus.cfg; \
 	            log_container=core; log_path=/opt/opennms/logs/karaf.log ;; \
 	        mimir) \
 	            file=e2e/compose.mimir.yml; \
 	            query="curl -sfG 'http://localhost:9009/prometheus/api/v1/query' -H 'X-Scope-OrgID: e2e' --data-urlencode 'query=count({__name__=~\".+\"})'"; \
 	            discovery_query="curl -sfG 'http://localhost:9009/prometheus/api/v1/label/resourceId/values' -H 'X-Scope-OrgID: e2e'"; \
 	            labels_query="curl -sfG 'http://localhost:9009/prometheus/api/v1/labels' -H 'X-Scope-OrgID: e2e'"; \
+	            plugin_cfg=e2e/opennms/mimir.cfg; \
 	            log_container=core; log_path=/opt/opennms/logs/karaf.log ;; \
 	        victoriametrics) \
 	            file=e2e/compose.victoriametrics.yml; \
 	            query="curl -sfG 'http://localhost:8428/api/v1/query' --data-urlencode 'query=count({__name__=~\".+\"})'"; \
 	            discovery_query="curl -sfG 'http://localhost:8428/api/v1/label/resourceId/values'"; \
 	            labels_query="curl -sfG 'http://localhost:8428/api/v1/labels'"; \
+	            plugin_cfg=e2e/opennms/victoriametrics.cfg; \
 	            log_container=core; log_path=/opt/opennms/logs/karaf.log ;; \
 	        sentinel) \
 	            file=e2e/sentinel/compose.yml; \
@@ -175,7 +185,65 @@ smoke: kar ## Run e2e smoke against BACKENDS (defaults exclude sentinel; SMOKE_T
 	            case "$$rid_count" in ''|*[!0-9]*) rid_count=0 ;; esac; \
 	            if [ "$$rid_count" -gt 0 ]; then \
 	                echo "=== [$$backend] PASS (label-values): $$rid_count resourceIds enumerated ==="; \
-	                passed="$$passed $$backend"; \
+	                echo "=== [$$backend] probing opennms:prometheus-writer-stats via Karaf SSH ==="; \
+	                { [ -n "$$pub" ] \
+	                    && docker compose -f "$$file" exec -T "$$log_container" sh -c 'cat > /tmp/karaf-test-key && chmod 600 /tmp/karaf-test-key' < "$$keydir/id_rsa" \
+	                    && printf '\nadmin=%s,_g_:admingroup\n' "$$pub" \
+	                        | docker compose -f "$$file" exec -T core sh -c 'cat >> /opt/opennms/etc/keys.properties'; } \
+	                    || { echo "=== [$$backend] FAIL: could not stage the Karaf SSH test key (keygen/injection) ===" >&2; \
+	                         failed="$$failed $$backend"; cleanup_backend=1; }; \
+	                if [ "$${cleanup_backend:-0}" = 1 ]; then cleanup_backend=0; cleanup; current_file=""; current_backend=""; continue; fi; \
+	                stats_out=""; \
+	                for attempt in 1 2 3; do \
+	                    stats_out=$$(docker compose -f "$$file" exec -T "$$log_container" ssh -i /tmp/karaf-test-key -p 8101 \
+	                        -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR \
+	                        -o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=4 \
+	                        admin@localhost opennms:prometheus-writer-stats 2>"$$keydir/ssh.err" || true); \
+	                    [ -n "$$stats_out" ] && break; \
+	                    sleep 5; \
+	                done; \
+	                stats_err=$$(cat "$$keydir/ssh.err" 2>/dev/null); \
+	                want_shards=1; \
+	                if [ -n "$$plugin_cfg" ] && [ ! -f "$$plugin_cfg" ]; then \
+	                    echo "WARN: [$$backend] plugin cfg $$plugin_cfg not found; shard-row assertion disabled" >&2; \
+	                elif [ -n "$$plugin_cfg" ] \
+	                    && ! grep -Eiq '^[[:space:]]*wal\.enabled[[:space:]]*=[[:space:]]*true' "$$plugin_cfg"; then \
+	                    raw_shards=$$(grep -E '^[[:space:]]*writer\.shards[[:space:]]*=' "$$plugin_cfg" | tail -1 | cut -d= -f2 | cut -d'#' -f1 | tr -d '[:space:]'); \
+	                    case "$$raw_shards" in \
+	                        '') : ;; \
+	                        *[!0-9]*) echo "WARN: [$$backend] unparsable writer.shards value '$$raw_shards' in $$plugin_cfg; shard-row assertion disabled" >&2 ;; \
+	                        *) want_shards=$$raw_shards ;; \
+	                    esac; \
+	                fi; \
+	                [ "$$want_shards" -gt 1 ] && echo "=== [$$backend] expecting per-shard rows (writer.shards=$$want_shards from $$plugin_cfg) ==="; \
+	                case "$$stats_out" in \
+	                    *samples_written_total*) \
+	                        stats_ok=1; \
+	                        if [ "$$want_shards" -gt 1 ]; then \
+	                            case "$$stats_out" in \
+	                                *shard_skew_pct*shard_0_queue_depth*|*shard_0_queue_depth*shard_skew_pct*) : ;; \
+	                                *) stats_ok=0; \
+	                                   echo "=== [$$backend] FAIL: $$plugin_cfg sets writer.shards=$$want_shards but shard_0_queue_depth / shard_skew_pct rows are missing from the stats table ===" >&2 ;; \
+	                            esac; \
+	                        fi ;; \
+	                    *"not active"*|*"not been started"*) \
+	                        stats_ok=0; \
+	                        echo "=== [$$backend] FAIL: stats command registered but reports the plugin inactive ===" >&2; \
+	                        echo "    (samples just landed, so the likely cause is the command's @Reference not resolving —" >&2; \
+	                        echo "     check the concrete-class <service> registration in blueprint.xml, see #113)" >&2 ;; \
+	                    *) \
+	                        stats_ok=0; \
+	                        echo "=== [$$backend] FAIL: opennms:prometheus-writer-stats produced no metrics table ===" >&2; \
+	                        echo "    (possible causes: command registration regressed (#113), Karaf SSH auth/client failure, sshd not ready)" >&2; \
+	                        [ -n "$$stats_err" ] && printf 'ssh stderr: %s\n' "$$stats_err" | head -3 >&2; \
+	                        printf '%s\n' "$$stats_out" | head -5 >&2 ;; \
+	                esac; \
+	                if [ "$$stats_ok" = 1 ]; then \
+	                    echo "=== [$$backend] PASS (stats-command): metrics table rendered ==="; \
+	                    passed="$$passed $$backend"; \
+	                else \
+	                    failed="$$failed $$backend"; \
+	                fi; \
 	            else \
 	                echo "=== [$$backend] FAIL: /api/v1/label/resourceId/values returned 0 values ===" >&2; \
 	                echo "    (samples landed but the two-phase phase-1 endpoint is unusable)" >&2; \
@@ -195,6 +263,7 @@ smoke: kar ## Run e2e smoke against BACKENDS (defaults exclude sentinel; SMOKE_T
 	    cleanup; \
 	    current_file=""; current_backend=""; \
 	done; \
+	cleanup_key; \
 	echo; echo "=== SUMMARY ==="; \
 	for b in $$passed; do echo "  PASS  $$b"; done; \
 	for b in $$failed; do echo "  FAIL  $$b"; done; \
