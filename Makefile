@@ -26,6 +26,7 @@
 #                      prometheus mimir victoriametrics; sentinel is opt-in)
 #   SMOKE_TIMEOUT      Per-backend deadline in seconds (default: 600)
 #   SMOKE_POLL         Poll interval in seconds (default: 15)
+#   SMOKE_LABEL_BOUND  Max distinct label names after ingestion (default: 25)
 # ==============================================================================
 
 SHELL := /bin/bash
@@ -49,6 +50,10 @@ export MAVEN_OPTS
 # explicitly via `make smoke-sentinel` or `BACKENDS=sentinel make smoke`.
 SMOKE_TIMEOUT          ?= 600
 SMOKE_POLL             ?= 15
+# Upper bound on distinct label NAMES the backend may hold after ingestion.
+# The native profile's schema is ~17 names; headroom for backend-internal
+# labels. A breach means the label-name explosion regressed (issue #112).
+SMOKE_LABEL_BOUND      ?= 25
 SMOKE_DEFAULT_BACKENDS ?= prometheus mimir victoriametrics
 BACKENDS               ?= $(SMOKE_DEFAULT_BACKENDS)
 
@@ -69,6 +74,7 @@ help: ## Show this help
 	@echo "  BACKENDS           Smoke backends to run                              (current: $(BACKENDS))"
 	@echo "  SMOKE_TIMEOUT      Per-backend deadline (s)                           (current: $(SMOKE_TIMEOUT))"
 	@echo "  SMOKE_POLL         Poll interval (s)                                  (current: $(SMOKE_POLL))"
+	@echo "  SMOKE_LABEL_BOUND  Max distinct label names after ingestion           (current: $(SMOKE_LABEL_BOUND))"
 
 build: ## Compile, run unit tests, install all modules locally
 	$(MVN) $(MAVEN_FLAGS) install
@@ -94,22 +100,25 @@ smoke: kar ## Run e2e smoke against BACKENDS (defaults exclude sentinel; SMOKE_T
 	}; \
 	trap 'cleanup; echo; echo "=== interrupted ==="; exit 130' INT TERM; \
 	for backend in $(BACKENDS); do \
-	    discovery_query=""; \
+	    discovery_query=""; labels_query=""; \
 	    case "$$backend" in \
 	        prometheus) \
 	            file=e2e/compose.prometheus.yml; \
 	            query="curl -sfG 'http://localhost:9090/api/v1/query' --data-urlencode 'query=count({__name__=~\".+\"})'"; \
 	            discovery_query="curl -sfG 'http://localhost:9090/api/v1/label/resourceId/values'"; \
+	            labels_query="curl -sfG 'http://localhost:9090/api/v1/labels'"; \
 	            log_container=core; log_path=/opt/opennms/logs/karaf.log ;; \
 	        mimir) \
 	            file=e2e/compose.mimir.yml; \
 	            query="curl -sfG 'http://localhost:9009/prometheus/api/v1/query' -H 'X-Scope-OrgID: e2e' --data-urlencode 'query=count({__name__=~\".+\"})'"; \
 	            discovery_query="curl -sfG 'http://localhost:9009/prometheus/api/v1/label/resourceId/values' -H 'X-Scope-OrgID: e2e'"; \
+	            labels_query="curl -sfG 'http://localhost:9009/prometheus/api/v1/labels' -H 'X-Scope-OrgID: e2e'"; \
 	            log_container=core; log_path=/opt/opennms/logs/karaf.log ;; \
 	        victoriametrics) \
 	            file=e2e/compose.victoriametrics.yml; \
 	            query="curl -sfG 'http://localhost:8428/api/v1/query' --data-urlencode 'query=count({__name__=~\".+\"})'"; \
 	            discovery_query="curl -sfG 'http://localhost:8428/api/v1/label/resourceId/values'"; \
+	            labels_query="curl -sfG 'http://localhost:8428/api/v1/labels'"; \
 	            log_container=core; log_path=/opt/opennms/logs/karaf.log ;; \
 	        sentinel) \
 	            file=e2e/sentinel/compose.yml; \
@@ -137,7 +146,20 @@ smoke: kar ## Run e2e smoke against BACKENDS (defaults exclude sentinel; SMOKE_T
 	        fi; \
 	        sleep $(SMOKE_POLL); \
 	    done; \
-	    if [ "$$ok" = 1 ]; then \
+	    labels_ok=1; \
+	    if [ "$$ok" = 1 ] && [ -n "$$labels_query" ]; then \
+	        label_count=$$(eval "$$labels_query" 2>/dev/null \
+	            | python3 -c 'import json,sys; print(len(json.load(sys.stdin).get("data",[])))' \
+	            2>/dev/null || echo 0); \
+	        case "$$label_count" in ''|*[!0-9]*) label_count=0 ;; esac; \
+	        if [ "$$label_count" -lt 1 ] || [ "$$label_count" -gt $(SMOKE_LABEL_BOUND) ]; then \
+	            echo "=== [$$backend] FAIL: $$label_count distinct label names (bound $(SMOKE_LABEL_BOUND)) — label-name explosion regression, see issue #112 ===" >&2; \
+	            labels_ok=0; \
+	        else \
+	            echo "=== [$$backend] PASS (label-bound): $$label_count distinct label names <= $(SMOKE_LABEL_BOUND) ==="; \
+	        fi; \
+	    fi; \
+	    if [ "$$ok" = 1 ] && [ "$$labels_ok" = 1 ]; then \
 	        if [ -n "$$discovery_query" ]; then \
 	            echo "=== [$$backend] probing /api/v1/label/resourceId/values ==="; \
 	            rid_count=$$(eval "$$discovery_query" 2>/dev/null \
@@ -155,6 +177,8 @@ smoke: kar ## Run e2e smoke against BACKENDS (defaults exclude sentinel; SMOKE_T
 	        else \
 	            passed="$$passed $$backend"; \
 	        fi; \
+	    elif [ "$$ok" = 1 ]; then \
+	        failed="$$failed $$backend"; \
 	    else \
 	        echo "=== [$$backend] FAIL: no samples within $(SMOKE_TIMEOUT)s ===" >&2; \
 	        echo "--- last 40 lines of $$log_container karaf.log ---" >&2; \
