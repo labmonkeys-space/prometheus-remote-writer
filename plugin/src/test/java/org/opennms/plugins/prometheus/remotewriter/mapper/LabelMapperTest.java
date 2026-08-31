@@ -29,6 +29,16 @@ class LabelMapperTest {
 
     private static final LabelMapper DEFAULT_MAPPER = new LabelMapper(defaultConfig());
 
+    /** Mapper with labels.attr-mode=both — the v0.4 round-trip emission,
+     *  which the attr/extattr tests pin. */
+    private static final LabelMapper BOTH_MAPPER = new LabelMapper(bothConfig());
+
+    private static PrometheusRemoteWriterConfig bothConfig() {
+        PrometheusRemoteWriterConfig c = defaultConfig();
+        c.setAttrMode("both");
+        return c;
+    }
+
     // ---------- defaults ----------------------------------------------------
 
     @Test
@@ -1452,6 +1462,7 @@ class LabelMapperTest {
         // emitAttrLabels walks the meta-tag list directly off the Metric, so
         // the meta value is emitted under `onms_attr_name` and survives.
         PrometheusRemoteWriterConfig c = defaultConfig();
+        c.setAttrMode("both");   // round-trip semantics under test live behind the v0.5 knob
         Sample s = sample(ImmutableMetric.builder()
                 .intrinsicTag("name", "events_processed")
                 .intrinsicTag("resourceId", "node[1].eventdProcessingStat[Logger]")
@@ -1471,6 +1482,7 @@ class LabelMapperTest {
         // `labels.include = name` to "expose" the meta value still get a
         // no-op on the bare `name` label — the value is already round-tripping.
         PrometheusRemoteWriterConfig c = defaultConfig();
+        c.setAttrMode("both");   // round-trip semantics under test live behind the v0.5 knob
         c.setLabelsInclude("name");
         Sample s = sample(ImmutableMetric.builder()
                 .intrinsicTag("name", "events_processed")
@@ -1487,7 +1499,7 @@ class LabelMapperTest {
                 .intrinsicTag("name", "pg_stat_database_numbackends")
                 .intrinsicTag("resourceId", "node[1].pgDatabase[customers]")
                 .metaTag("datname", "customers_db"));
-        MappedSample out = DEFAULT_MAPPER.map(s);
+        MappedSample out = BOTH_MAPPER.map(s);
         assertThat(out.labels()).containsEntry("onms_attr_datname", "customers_db");
     }
 
@@ -1497,7 +1509,7 @@ class LabelMapperTest {
                 .intrinsicTag("name", "pg_stat_user_tables_seq_scan")
                 .intrinsicTag("resourceId", "node[1].pgTablespace[indexes]")
                 .metaTag("spcname", "indexes"));
-        MappedSample out = DEFAULT_MAPPER.map(s);
+        MappedSample out = BOTH_MAPPER.map(s);
         assertThat(out.labels()).containsEntry("onms_attr_spcname", "indexes");
     }
 
@@ -1560,7 +1572,7 @@ class LabelMapperTest {
                 .intrinsicTag("resourceId", "node[1].pgIndex[customers_pkey]")
                 .metaTag("primary_key", "customers_pkey")
                 .metaTag("foreign_key", "orders_customer_id"));
-        MappedSample out = DEFAULT_MAPPER.map(s);
+        MappedSample out = BOTH_MAPPER.map(s);
         assertThat(out.labels())
                 .containsEntry("onms_attr_primary_key", "customers_pkey")
                 .containsEntry("onms_attr_foreign_key", "orders_customer_id");
@@ -1581,7 +1593,7 @@ class LabelMapperTest {
                 .intrinsicTag("resourceId",
                         "snmp/fs/selfmonitor/1/Eventlogs/eventlogs.process.expand/x")
                 .externalTag("name", "eventlogs.process"));
-        MappedSample out = DEFAULT_MAPPER.map(s);
+        MappedSample out = BOTH_MAPPER.map(s);
         assertThat(out.labels()).containsEntry("__name__", "EventProcess50");
         assertThat(out.labels()).containsEntry("onms_extattr_name", "eventlogs.process");
         // Partition fidelity — meta-side prefix must not carry external-side data.
@@ -1597,7 +1609,7 @@ class LabelMapperTest {
                 .intrinsicTag("resourceId", "node[1].pgDatabase[customers]")
                 .externalTag("datname", "customers_db")
                 .externalTag("spcname", "indexes"));
-        MappedSample out = DEFAULT_MAPPER.map(s);
+        MappedSample out = BOTH_MAPPER.map(s);
         assertThat(out.labels())
                 .containsEntry("onms_extattr_datname", "customers_db")
                 .containsEntry("onms_extattr_spcname", "indexes");
@@ -1613,7 +1625,7 @@ class LabelMapperTest {
                 .intrinsicTag("resourceId", "node[1].interfaceSnmp[eth0]")
                 .metaTag("custom", "from_meta")
                 .externalTag("custom", "from_external"));
-        MappedSample out = DEFAULT_MAPPER.map(s);
+        MappedSample out = BOTH_MAPPER.map(s);
         assertThat(out.labels())
                 .containsEntry("onms_attr_custom",    "from_meta")
                 .containsEntry("onms_extattr_custom", "from_external");
@@ -1702,7 +1714,7 @@ class LabelMapperTest {
                 .intrinsicTag("name", "EventProcess50")
                 .intrinsicTag("resourceId", "node[1].eventdProcessingStat[Logger]")
                 .externalTag("name", oversize));
-        MappedSample out = DEFAULT_MAPPER.map(s);
+        MappedSample out = BOTH_MAPPER.map(s);
         assertThat(out.labels()).containsEntry("onms_extattr_name", expected);
     }
 
@@ -1712,7 +1724,7 @@ class LabelMapperTest {
                 .intrinsicTag("name", "ifHCInOctets")
                 .intrinsicTag("resourceId", "node[1].interfaceSnmp[eth0]")
                 .externalTag("rack-unit", "14"));
-        MappedSample out = DEFAULT_MAPPER.map(s);
+        MappedSample out = BOTH_MAPPER.map(s);
         assertThat(out.labels()).containsEntry("onms_extattr_rack_unit", "14");
     }
 
@@ -1737,6 +1749,7 @@ class LabelMapperTest {
         // is no source-side key literally named `onms_extattr_name`, so the
         // include is a no-op and the round-trip emission is unchanged.
         PrometheusRemoteWriterConfig c = defaultConfig();
+        c.setAttrMode("both");   // round-trip semantics under test live behind the v0.5 knob
         c.setLabelsInclude("onms_extattr_name");
         Sample s = sample(ImmutableMetric.builder()
                 .intrinsicTag("name", "EventProcess50")
@@ -1759,7 +1772,7 @@ class LabelMapperTest {
                 .intrinsicTag("name", "events_processed")
                 .intrinsicTag("resourceId", "node[1].eventdProcessingStat[Logger]")
                 .metaTag("name", oversize));
-        MappedSample out = DEFAULT_MAPPER.map(s);
+        MappedSample out = BOTH_MAPPER.map(s);
         assertThat(out.labels()).containsEntry("onms_attr_name", expected);
     }
 
@@ -1773,7 +1786,7 @@ class LabelMapperTest {
                 .intrinsicTag("name", "ifHCInOctets")
                 .intrinsicTag("resourceId", "node[1].interfaceSnmp[eth0]")
                 .metaTag("rack-unit", "14"));
-        MappedSample out = DEFAULT_MAPPER.map(s);
+        MappedSample out = BOTH_MAPPER.map(s);
         assertThat(out.labels()).containsEntry("onms_attr_rack_unit", "14");
     }
 
@@ -1789,6 +1802,7 @@ class LabelMapperTest {
         // unchanged. (Map<String,String> semantics also rule out a duplicate
         // label name, but that's incidental to what this test pins.)
         PrometheusRemoteWriterConfig c = defaultConfig();
+        c.setAttrMode("both");   // round-trip semantics under test live behind the v0.5 knob
         c.setLabelsInclude("onms_attr_name");
         Sample s = sample(ImmutableMetric.builder()
                 .intrinsicTag("name", "events_processed")
@@ -1870,6 +1884,119 @@ class LabelMapperTest {
                 .time(Instant.ofEpochMilli(1_000_000L))
                 .value(42.0)
                 .build();
+    }
+
+    // ---------- labels.profile / labels.attr-mode (v0.5 defaults) -----------
+
+    @Test
+    void default_config_emits_no_attr_or_extattr_labels() {
+        // The v0.5.0 breaking default: attr-mode=off. A sample carrying meta
+        // AND external string attributes emits neither prefix — the bounded
+        // native schema only (issue #112).
+        Sample s = sample(ImmutableMetric.builder()
+                .intrinsicTag("name", "events_processed")
+                .intrinsicTag("resourceId", "node[1].eventdProcessingStat[Logger]")
+                .metaTag("name", "Eventd_Logger_Receiver")
+                .metaTag("custom", "from_meta")
+                .externalTag("name", "eventlogs.process")
+                .externalTag("datname", "customers_db"));
+        MappedSample out = new LabelMapper(defaultConfig()).map(s);
+        assertThat(out.labels().keySet())
+                .noneMatch(k -> k.startsWith("onms_attr_"))
+                .noneMatch(k -> k.startsWith("onms_extattr_"));
+    }
+
+    @Test
+    void default_config_metatag_aliases_emit_once_under_the_builtin_name() {
+        // Spec "Metatag aliases of built-in labels emit once": nodeLabel /
+        // ifName arrive as meta tags; only the snake_case built-ins appear.
+        Sample s = sample(ImmutableMetric.builder()
+                .intrinsicTag("name", "ifHCInOctets")
+                .intrinsicTag("resourceId", "snmp/fs/Servers/router1/eth0/mib2-interfaces")
+                .metaTag("nodeLabel", "router1")
+                .metaTag("ifName", "eth0"));
+        MappedSample out = new LabelMapper(defaultConfig()).map(s);
+        assertThat(out.labels()).containsEntry("node_label", "router1");
+        assertThat(out.labels()).containsEntry("if_name", "eth0");
+        assertThat(out.labels()).doesNotContainKeys(
+                "nodeLabel", "ifName", "onms_attr_nodeLabel", "onms_attr_ifName");
+    }
+
+    @Test
+    void external_mode_emits_only_allowlisted_external_keys() {
+        PrometheusRemoteWriterConfig c = defaultConfig();
+        c.setAttrMode("external");
+        c.setLabelsAttrInclude("name, datname");
+        Sample s = sample(ImmutableMetric.builder()
+                .intrinsicTag("name", "pg_stat")
+                .intrinsicTag("resourceId", "node[1].pgDb[customers]")
+                .metaTag("custom", "from_meta")
+                .externalTag("name", "eventlogs.process")
+                .externalTag("datname", "customers_db")
+                .externalTag("ICMP/10.42.0.1", "latency-attr"));
+        MappedSample out = new LabelMapper(c).map(s);
+        assertThat(out.labels())
+                .containsEntry("onms_extattr_name", "eventlogs.process")
+                .containsEntry("onms_extattr_datname", "customers_db");
+        // Per-identity key not allowlisted — the #112 explosion pattern.
+        assertThat(out.labels().keySet()).noneMatch(k -> k.startsWith("onms_extattr_ICMP"));
+        // Meta partition never emits in external mode.
+        assertThat(out.labels().keySet()).noneMatch(k -> k.startsWith("onms_attr_"));
+    }
+
+    @Test
+    void external_mode_allowlist_matches_raw_key_with_globs() {
+        PrometheusRemoteWriterConfig c = defaultConfig();
+        c.setAttrMode("external");
+        c.setLabelsAttrInclude("dat*");
+        Sample s = sample(ImmutableMetric.builder()
+                .intrinsicTag("name", "pg_stat")
+                .intrinsicTag("resourceId", "node[1].pgDb[customers]")
+                .externalTag("datname", "customers_db")
+                .externalTag("spcname", "indexes"));
+        MappedSample out = new LabelMapper(c).map(s);
+        assertThat(out.labels()).containsEntry("onms_extattr_datname", "customers_db");
+        assertThat(out.labels()).doesNotContainKey("onms_extattr_spcname");
+    }
+
+    @Test
+    void external_mode_with_empty_allowlist_emits_nothing() {
+        PrometheusRemoteWriterConfig c = defaultConfig();
+        c.setAttrMode("external");
+        Sample s = sample(ImmutableMetric.builder()
+                .intrinsicTag("name", "pg_stat")
+                .intrinsicTag("resourceId", "node[1].pgDb[customers]")
+                .externalTag("datname", "customers_db"));
+        MappedSample out = new LabelMapper(c).map(s);
+        assertThat(out.labels().keySet()).noneMatch(k -> k.startsWith("onms_extattr_"));
+    }
+
+    @Test
+    void native_profile_label_names_stay_within_the_bounded_schema() {
+        // Spec "Bounded label-name set": whatever the sample carries, the
+        // native default emits only names from the fixed schema — the
+        // property that keeps the backend's label-name index flat (#112).
+        java.util.Set<String> allowed = java.util.Set.of(
+                "__name__", "resourceId", "mtype", "node", "resource_type",
+                "resource_instance", "job", "instance", "onms_instance_id",
+                "node_label", "location", "foreign_source", "foreign_id",
+                "if_name", "if_descr", "if_speed", "geohash");
+        Sample s = sample(ImmutableMetric.builder()
+                .intrinsicTag("name", "ifHCInOctets")
+                .intrinsicTag("resourceId", "snmp/fs/Servers/router1/eth0/mib2-interfaces")
+                .metaTag("nodeLabel", "router1")
+                .metaTag("foreignSource", "Servers")
+                .metaTag("foreignId", "router1")
+                .metaTag("location", "Default")
+                .metaTag("ifName", "eth0")
+                .metaTag("ifDescr", "GigabitEthernet0/0")
+                .metaTag("ifSpeed", "1000000000")
+                .metaTag("ifHighSpeed", "1000")
+                .metaTag("mtype", "counter")
+                .metaTag("arbitraryAttribute", "should_not_leak")
+                .externalTag("ICMP/10.42.0.1", "should_not_leak"));
+        MappedSample out = new LabelMapper(defaultConfig()).map(s);
+        assertThat(out.labels().keySet()).allMatch(allowed::contains);
     }
 
     private static PrometheusRemoteWriterConfig defaultConfig() {

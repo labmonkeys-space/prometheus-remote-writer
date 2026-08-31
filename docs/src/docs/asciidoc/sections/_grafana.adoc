@@ -1,0 +1,34 @@
+[[grafana]]
+= Grafana quickstart
+
+The `native` label profile (the default since v0.5.0) is designed so
+that Grafana's standard Prometheus data source works against the
+backend with *no plugin configuration beyond the two URLs*.
+
+. In Grafana, add a *Prometheus* data source pointing at your backend's
+  query endpoint — the same base URL as the plugin's `read.url`
+  (e.g. `http://victoriametrics:8428`, `http://mimir:9009/prometheus`,
+  `http://prometheus:9090`).
+. There is no step two. Every series carries the bounded native label
+  set; no relabeling, no recording rules required.
+
+Three starter queries:
+
+[source,promql]
+----
+# Interface throughput for one node, legended by interface
+rate(ifHCInOctets{node_label="router1"}[5m]) * 8
+
+# Which nodes ship the most series? (capacity view)
+count by (node_label) ({__name__=~".+"})
+
+# Everything this plugin instance writes, by collector type
+count by (job) ({instance="onms-prod"})
+----
+
+`node_label`, `location`, `if_name`, and `if_descr` appear when the
+matching core metatags are configured (see <<configuration>>); the
+identity labels `node`, `resource_type`, `resource_instance`, `job`,
+and `instance` are always present. The full schema and the
+`labels.profile` / `labels.attr-mode` knobs are described in
+<<label-mapping>>.

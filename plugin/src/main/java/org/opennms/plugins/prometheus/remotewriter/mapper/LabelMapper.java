@@ -164,6 +164,14 @@ public final class LabelMapper {
     private final String jobName;
     private final PrometheusRemoteWriterConfig.IfSpeedMode ifSpeedMode;
     private final PrometheusRemoteWriterConfig.CategoriesMode categoriesMode;
+    private final PrometheusRemoteWriterConfig.AttrMode attrMode;
+    /** Allowlist for {@code labels.attr-mode = external} — matched against
+     *  the RAW source-tag key (pre-sanitization), the spelling operators see
+     *  in their datacollection configs. An empty allowlist under external
+     *  mode emits nothing (gated at the call site in {@link #map(Sample)}),
+     *  so flipping to external without an allowlist never reopens the
+     *  unbounded v0.4 emission. */
+    private final List<Pattern> attrIncludeGlobs;
     private final MetadataProcessor metadataProcessor;
     /** Plugin metrics sink. May be null — tests that don't care about the
      *  counter use the 1-arg constructor which leaves this null; the
@@ -200,8 +208,15 @@ public final class LabelMapper {
         this.jobName           = config.getJobName();
         this.ifSpeedMode       = config.getIfSpeedMode();
         this.categoriesMode    = config.getCategoriesMode();
+        this.attrMode          = config.getAttrMode();
+        this.attrIncludeGlobs  = compileGlobs(config.labelsAttrIncludeGlobs());
         this.metadataProcessor = new MetadataProcessor(config);
         this.metrics           = metrics;
+        // labels.profile=legacy is rejected in PrometheusRemoteWriterConfig
+        // .validateLabelProfile() until the fixture-pinned baseline lands
+        // (openspec change label-profiles, task group 5) — validation-level so
+        // the storage's graceful config-error handling applies instead of a
+        // blueprint container failure.
     }
 
     /** Visible for tests — unmodifiable view of labels.copy sources that
@@ -288,8 +303,29 @@ public final class LabelMapper {
         Set<String> extConsumedKeys = new HashSet<>(defaults.consumedSourceKeys());
         extConsumedKeys.remove(IntrinsicTagNames.name);
         extConsumedKeys.remove(IntrinsicTagNames.resourceId);
-        emitAttrLabels(labels, metric.getMetaTags(),     ATTR_PREFIX,    java.util.Set.of());
-        emitAttrLabels(labels, metric.getExternalTags(), EXTATTR_PREFIX, extConsumedKeys);
+        // Gated on labels.attr-mode (default OFF since v0.5.0): every
+        // attribute key becomes a distinct label NAME, and keys that embed
+        // per-resource identity (latency ICMP/<ip>, JMX mbean paths) explode
+        // the backend's label-name index at scale — issue #112. BOTH restores
+        // the unfiltered v0.4 emission; EXTERNAL emits only the external
+        // partition (what ${name}-style graph placeholder substitution
+        // dereferences), filtered by the labels.attr-include allowlist.
+        switch (attrMode) {
+            case BOTH -> {
+                emitAttrLabels(labels, metric.getMetaTags(),     ATTR_PREFIX,    java.util.Set.of(), List.of());
+                emitAttrLabels(labels, metric.getExternalTags(), EXTATTR_PREFIX, extConsumedKeys,    List.of());
+            }
+            case EXTERNAL -> {
+                // Spec: external emits ONLY allowlisted keys. An empty
+                // allowlist therefore emits nothing — gate here because
+                // emitAttrLabels treats an empty glob list as "no filter"
+                // (the BOTH path's contract).
+                if (!attrIncludeGlobs.isEmpty()) {
+                    emitAttrLabels(labels, metric.getExternalTags(), EXTATTR_PREFIX, extConsumedKeys, attrIncludeGlobs);
+                }
+            }
+            case OFF -> { /* no attribute round-trip */ }
+        }
         labels = applyExclude(labels, excludeGlobs);
         labels = applyInclude(labels, sourceTags, includeGlobs, defaults.consumedSourceKeys());
         labels = applyCopy(labels, copyMap, warnedUnknownCopySources, warnedCopyTargetClobbers);
@@ -599,10 +635,21 @@ public final class LabelMapper {
      * <p>Uses {@code putIfAbsent} so a same-named default-emitted label
      * (none today, but defensive) wins.
      */
+    /** 4-arg overload — unfiltered emission, the pre-attr-mode call shape
+     *  kept for existing tests. Equivalent to an empty allowlist under BOTH
+     *  semantics (empty = no filtering). */
     static void emitAttrLabels(Map<String, String> labels,
                                java.util.Collection<Tag> tags,
                                String prefix,
                                Set<String> consumedKeys) {
+        emitAttrLabels(labels, tags, prefix, consumedKeys, List.of());
+    }
+
+    static void emitAttrLabels(Map<String, String> labels,
+                               java.util.Collection<Tag> tags,
+                               String prefix,
+                               Set<String> consumedKeys,
+                               List<Pattern> includeGlobs) {
         if (tags == null || tags.isEmpty()) return;
         for (Tag t : tags) {
             String key = t.getKey();
@@ -611,6 +658,11 @@ public final class LabelMapper {
             if (MetaTagNames.mtype.equals(key)) continue;
             if (consumedKeys.contains(key)) continue;
             if (MetadataProcessor.isPlainKeyDenied(key)) continue;
+            // Allowlist filter (labels.attr-include, EXTERNAL mode): matched
+            // against the raw key, before sanitization, because that's the
+            // spelling operators know. An empty list means "no filter" — the
+            // EXTERNAL caller gates the empty-allowlist case before calling.
+            if (!includeGlobs.isEmpty() && !matchesAny(key, includeGlobs)) continue;
             String labelName = prefix + Sanitizer.labelName(key);
             labels.putIfAbsent(labelName, Sanitizer.labelValue(t.getValue()));
         }

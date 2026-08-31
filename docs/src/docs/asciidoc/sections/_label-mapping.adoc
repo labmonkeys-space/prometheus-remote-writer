@@ -85,6 +85,22 @@ rising counter as expected for your deployment.
 [#attr-roundtrip]
 === Resource string attributes (`onms_attr_*` and `onms_extattr_*`)
 
+[IMPORTANT]
+.Opt-in since v0.5.0 (`labels.attr-mode`, default `off`)
+====
+The round-trip described below no longer runs by default. Every
+attribute key becomes a distinct label *name*, and keys that embed a
+per-resource identity — latency attributes like `ICMP/<ip>`, JMX mbean
+paths — create one label name per resource. On a real deployment this
+produced 5,646 distinct label names against a comparable plugin's 8,
+with measurable backend memory and index cost (issue
+https://github.com/labmonkeys-space/prometheus-remote-writer/issues/112[#112]).
+Set `labels.attr-mode = external` with a `labels.attr-include`
+allowlist to restore placeholder substitution for the attribute keys
+your graphs actually use (typically `name, datname, spcname`), or
+`labels.attr-mode = both` to restore the unfiltered v0.4 emission.
+====
+
 OpenNMS resource-graph templates substitute shell-style placeholders
 like `${name}`, `${datname}`, and `${spcname}` against *string
 attributes* attached to a resource. On the integration-API write path,

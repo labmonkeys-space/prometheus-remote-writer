@@ -603,4 +603,96 @@ class PromResponseParserTest {
         assertThat(PromResponseParser.parsePromValue("-Inf")).isEqualTo(Double.NEGATIVE_INFINITY);
         assertThat(PromResponseParser.parsePromValue("3.14")).isEqualTo(3.14);
     }
+
+    // ---------- label-profiles read contract (openspec change label-profiles) --
+
+    @Test
+    void native_profile_attr_mode_off_series_parses_without_attr_partitions() throws Exception {
+        // The v0.5 default write shape: bounded native schema, no attr
+        // prefixes on the wire. Read requires only __name__ + resourceId;
+        // everything else lands as meta tags, no partition surprises.
+        String json = """
+            {
+              "status": "success",
+              "data": [
+                {
+                  "__name__": "ifHCInOctets",
+                  "resourceId": "snmp/fs/Servers/router1/eth0/mib2-interfaces",
+                  "node": "Servers:router1",
+                  "node_label": "router1",
+                  "if_name": "eth0",
+                  "job": "snmp",
+                  "instance": "Servers:router1",
+                  "mtype": "counter"
+                }
+              ]
+            }""";
+        List<Metric> out = PromResponseParser.parseSeriesResponse(json);
+        assertThat(out).hasSize(1);
+        Metric m = out.get(0);
+        assertThat(m.getFirstTagByKey(IntrinsicTagNames.resourceId).getValue())
+                .isEqualTo("snmp/fs/Servers/router1/eth0/mib2-interfaces");
+        assertThat(m.getExternalTags()).isEmpty();
+    }
+
+    @Test
+    void external_attr_mode_series_restores_allowlisted_attrs_to_the_external_partition() throws Exception {
+        // attr-mode=external write shape: allowlisted onms_extattr_* labels
+        // must land back on the EXTERNAL partition (what ${name}-style
+        // placeholder substitution dereferences).
+        String json = """
+            {
+              "status": "success",
+              "data": [
+                {
+                  "__name__": "pg_stat_user_tables_seq_scan",
+                  "resourceId": "node[1].pgDb[customers]",
+                  "onms_extattr_datname": "customers_db"
+                }
+              ]
+            }""";
+        List<Metric> out = PromResponseParser.parseSeriesResponse(json);
+        assertThat(out).hasSize(1);
+        Metric m = out.get(0);
+        assertThat(m.getExternalTags())
+                .extracting("key", "value")
+                .containsExactly(org.assertj.core.groups.Tuple.tuple("datname", "customers_db"));
+    }
+
+    @Test
+    void legacy_plugin_written_series_parses_into_a_readable_metric() throws Exception {
+        // Migration guarantee (spec "Read path functions under every
+        // profile"): history written by the AGPL
+        // opennms-prometheus-remotewrite-plugin — its 8-label wire schema
+        // observed on a live deployment — parses with resourceId intact and
+        // the remaining labels deposited as meta tags. Label names from the
+        // captured schema; values here are representative shapes only (the
+        // value-format fixture lands with change task 4.2).
+        String json = """
+            {
+              "status": "success",
+              "data": [
+                {
+                  "__name__": "ifHCInOctets",
+                  "resourceId": "snmp/512/HundredGigE0_1_0_36/mib2-X-interfaces-pkts",
+                  "node": "512",
+                  "ifName": "HundredGigE0/1/0/36",
+                  "ifDescr": "HundredGigE0/1/0/36",
+                  "location": "Default",
+                  "mtype": "counter",
+                  "geohash": "u336xps"
+                }
+              ]
+            }""";
+        List<Metric> out = PromResponseParser.parseSeriesResponse(json);
+        assertThat(out).hasSize(1);
+        Metric m = out.get(0);
+        assertThat(m.getFirstTagByKey(IntrinsicTagNames.name).getValue()).isEqualTo("ifHCInOctets");
+        assertThat(m.getFirstTagByKey(IntrinsicTagNames.resourceId).getValue())
+                .isEqualTo("snmp/512/HundredGigE0_1_0_36/mib2-X-interfaces-pkts");
+        assertThat(m.getMetaTags())
+                .extracting("key")
+                .containsExactlyInAnyOrder("node", "ifName", "ifDescr", "location", "mtype", "geohash");
+        assertThat(m.getExternalTags()).isEmpty();
+    }
 }
