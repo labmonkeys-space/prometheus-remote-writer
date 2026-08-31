@@ -26,7 +26,7 @@
 #                      prometheus mimir victoriametrics; sentinel is opt-in)
 #   SMOKE_TIMEOUT      Per-backend deadline in seconds (default: 600)
 #   SMOKE_POLL         Poll interval in seconds (default: 15)
-#   SMOKE_LABEL_BOUND  Max distinct label names after ingestion (default: 25)
+#   SMOKE_LABEL_BOUND  Max distinct label names after ingestion (default: 50)
 # ==============================================================================
 
 SHELL := /bin/bash
@@ -51,9 +51,11 @@ export MAVEN_OPTS
 SMOKE_TIMEOUT          ?= 600
 SMOKE_POLL             ?= 15
 # Upper bound on distinct label NAMES the backend may hold after ingestion.
-# The native profile's schema is ~17 names; headroom for backend-internal
-# labels. A breach means the label-name explosion regressed (issue #112).
-SMOKE_LABEL_BOUND      ?= 25
+# The native profile's schema is ~17 names; the e2e configs add a targeted
+# labels.include set on top, and backends may add internals. 50 leaves
+# operator-shaped headroom while still catching label-name explosions
+# (issue #112 was 5,646 names; include=* in e2e produced 423).
+SMOKE_LABEL_BOUND      ?= 50
 SMOKE_DEFAULT_BACKENDS ?= prometheus mimir victoriametrics
 BACKENDS               ?= $(SMOKE_DEFAULT_BACKENDS)
 
@@ -86,6 +88,11 @@ verify: ## Run unit + integration tests (needs Docker for testcontainers)
 	$(MVN) $(MAVEN_FLAGS) verify
 
 kar: ## Build the KAR artifact
+	@# Remove stale KARs first: e2e mounts assembly/kar/target as Karaf's
+	@# deploy/ dir, and a leftover KAR from an earlier version deploys
+	@# ALONGSIDE the fresh one (observed: a stale pre-branch SNAPSHOT
+	@# feeding old-code samples into a smoke run).
+	@rm -f assembly/kar/target/*.kar
 	$(MVN) $(MAVEN_FLAGS) -DskipTests package
 
 smoke: kar ## Run e2e smoke against BACKENDS (defaults exclude sentinel; SMOKE_TIMEOUT/SMOKE_POLL configurable)
