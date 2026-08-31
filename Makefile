@@ -104,7 +104,9 @@ smoke: kar ## Run e2e smoke against BACKENDS (defaults exclude sentinel; SMOKE_T
 	        echo "=== [$$current_backend] tearing down ==="; \
 	        docker compose -f "$$current_file" down -v --remove-orphans >/dev/null 2>&1 || true; \
 	    fi; \
+	    [ -n "$$keydir" ] && rm -rf "$$keydir"; \
 	}; \
+	keydir=""; \
 	trap 'cleanup; echo; echo "=== interrupted ==="; exit 130' INT TERM; \
 	for backend in $(BACKENDS); do \
 	    discovery_query=""; labels_query=""; \
@@ -175,7 +177,47 @@ smoke: kar ## Run e2e smoke against BACKENDS (defaults exclude sentinel; SMOKE_T
 	            case "$$rid_count" in ''|*[!0-9]*) rid_count=0 ;; esac; \
 	            if [ "$$rid_count" -gt 0 ]; then \
 	                echo "=== [$$backend] PASS (label-values): $$rid_count resourceIds enumerated ==="; \
-	                passed="$$passed $$backend"; \
+	                echo "=== [$$backend] probing opennms:prometheus-writer-stats via Karaf SSH ==="; \
+	                keydir=$$(mktemp -d) \
+	                    && ssh-keygen -q -t rsa -b 2048 -N '' -f "$$keydir/id_rsa" \
+	                    && pub=$$(cut -d' ' -f2 "$$keydir/id_rsa.pub") \
+	                    && [ -n "$$pub" ] \
+	                    && docker compose -f "$$file" exec -T core sh -c 'cat > /tmp/karaf-test-key && chmod 600 /tmp/karaf-test-key' < "$$keydir/id_rsa" \
+	                    && printf '\nadmin=%s,_g_:admingroup\n' "$$pub" \
+	                        | docker compose -f "$$file" exec -T core sh -c 'cat >> /opt/opennms/etc/keys.properties' \
+	                    || { echo "=== [$$backend] FAIL: could not stage the Karaf SSH test key (keygen/injection) ===" >&2; \
+	                         rm -rf "$$keydir"; keydir=""; failed="$$failed $$backend"; cleanup; current_file=""; current_backend=""; continue; }; \
+	                stats_out=$$(docker compose -f "$$file" exec -T core ssh -i /tmp/karaf-test-key -p 8101 \
+	                    -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR \
+	                    admin@localhost opennms:prometheus-writer-stats 2>"$$keydir/ssh.err" || true); \
+	                stats_err=$$(cat "$$keydir/ssh.err" 2>/dev/null); \
+	                rm -rf "$$keydir"; keydir=""; \
+	                case "$$stats_out" in \
+	                    *samples_written_total*) \
+	                        stats_ok=1; \
+	                        if [ "$$backend" = "victoriametrics" ]; then \
+	                            case "$$stats_out" in \
+	                                *shard_skew_pct*shard_0_queue_depth*|*shard_0_queue_depth*shard_skew_pct*) : ;; \
+	                                *) stats_ok=0; \
+	                                   echo "=== [$$backend] FAIL: per-shard rows missing from stats table (victoriametrics.cfg sets writer.shards=2, so shard_0_queue_depth and shard_skew_pct must render) ===" >&2 ;; \
+	                            esac; \
+	                        fi ;; \
+	                    *"not active"*|*"not been started"*) \
+	                        stats_ok=0; \
+	                        echo "=== [$$backend] FAIL: stats command registered but the plugin pipeline is inactive ===" >&2 ;; \
+	                    *) \
+	                        stats_ok=0; \
+	                        echo "=== [$$backend] FAIL: opennms:prometheus-writer-stats produced no metrics table ===" >&2; \
+	                        echo "    (possible causes: command registration regressed (#113), Karaf SSH auth/client failure, sshd not ready)" >&2; \
+	                        [ -n "$$stats_err" ] && printf 'ssh stderr: %s\n' "$$stats_err" | head -3 >&2; \
+	                        printf '%s\n' "$$stats_out" | head -5 >&2 ;; \
+	                esac; \
+	                if [ "$$stats_ok" = 1 ]; then \
+	                    echo "=== [$$backend] PASS (stats-command): metrics table rendered ==="; \
+	                    passed="$$passed $$backend"; \
+	                else \
+	                    failed="$$failed $$backend"; \
+	                fi; \
 	            else \
 	                echo "=== [$$backend] FAIL: /api/v1/label/resourceId/values returned 0 values ===" >&2; \
 	                echo "    (samples landed but the two-phase phase-1 endpoint is unusable)" >&2; \

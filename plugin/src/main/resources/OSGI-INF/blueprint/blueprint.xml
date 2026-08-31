@@ -148,6 +148,27 @@
         <argument ref="config"/>
     </bean>
 
+    <!--
+        TWO registrations of the same bean, deliberately separate:
+
+        1. The OIA interface with registration.export=true — what OpenNMS
+           core's TSS discovery consumes. MUST stay a single-objectClass
+           registration: the export bridge resolves every objectClass on
+           an exported service, and a class it cannot load (our concrete
+           class is not visible to core) makes core skip the service
+           entirely — observed as "plugin active, zero samples written".
+
+        2. The concrete class WITHOUT registration.export — an ordinary
+           container-wide OSGi service, just never forwarded to the
+           OpenNMS service registry by the export bridge; the shell
+           command's
+           @Reference(PrometheusRemoteWriterStorage) resolves uniquely
+           even when other TSS plugins are installed (no other plugin
+           can register under this class) and has access to getMetrics().
+           A stale duplicate KAR would create a second registration of
+           this class — prevented at the source by `make kar` deleting
+           stale KARs from the mounted deploy dir.
+    -->
     <service ref="prometheusRemoteWriterStorage"
              interface="org.opennms.integration.api.v1.timeseries.TimeSeriesStorage">
         <service-properties>
@@ -155,15 +176,15 @@
         </service-properties>
     </service>
 
+    <service ref="prometheusRemoteWriterStorage"
+             interface="org.opennms.plugins.prometheus.remotewriter.PrometheusRemoteWriterStorage"/>
+
     <!--
-        Karaf shell command: opennms:prometheus-writer-stats
-        Karaf's shell runtime picks up Action services whose @Command scope/name
-        match what the user types.
+        The opennms:prometheus-writer-stats shell command is NOT registered
+        here: Karaf 4's CommandExtender ignores blueprint-published Action
+        services. Registration happens via the Karaf-Commands manifest
+        header (plugin/pom.xml) plus @Service/@Reference on StatsCommand
+        itself (#113).
     -->
-    <bean id="statsCommand"
-          class="org.opennms.plugins.prometheus.remotewriter.shell.StatsCommand">
-        <property name="storage" ref="prometheusRemoteWriterStorage"/>
-    </bean>
-    <service ref="statsCommand" interface="org.apache.karaf.shell.api.action.Action"/>
 
 </blueprint>

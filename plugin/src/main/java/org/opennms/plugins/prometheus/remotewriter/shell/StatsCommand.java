@@ -11,6 +11,8 @@ import java.util.Map;
 
 import org.apache.karaf.shell.api.action.Action;
 import org.apache.karaf.shell.api.action.Command;
+import org.apache.karaf.shell.api.action.lifecycle.Reference;
+import org.apache.karaf.shell.api.action.lifecycle.Service;
 import org.opennms.plugins.prometheus.remotewriter.PrometheusRemoteWriterStorage;
 import org.opennms.plugins.prometheus.remotewriter.metrics.PluginMetrics;
 
@@ -19,24 +21,32 @@ import org.opennms.plugins.prometheus.remotewriter.metrics.PluginMetrics;
  * counters and gauges. Output is a stable name/value table; no ANSI colours,
  * sortable, grep-friendly.
  *
- * <p>The Karaf shell scanner reads the {@link Command} metadata and routes
- * {@code opennms:prometheus-writer-stats} invocations here. The
- * {@link org.apache.karaf.shell.api.action.lifecycle.Service} annotation is
- * deliberately <i>not</i> applied: this class is registered solely via the
- * Blueprint descriptor so that the {@code storage} dependency is properly
- * injected. Adding {@code @Service} here would cause Karaf's annotation
- * scanner to register a second, uninjected instance and the shell would
- * non-deterministically pick between the two.
+ * <p>Registration is the standard Karaf 4 extender pipeline: the bundle's
+ * {@code Karaf-Commands} manifest header (see plugin/pom.xml) makes the
+ * CommandExtender scan this package, and {@link Service} makes it register
+ * this class — both are required; either alone registers nothing (#113).
+ *
+ * <p>{@link Reference} injects the storage by its CONCRETE type — the bean
+ * is registered under both the OIA {@code TimeSeriesStorage} interface and
+ * this class (see blueprint.xml), which resolves uniquely even when other
+ * TSS plugins are installed and gives access to {@code getMetrics()}.
+ * {@code optional = true} is load-bearing: a mandatory reference would
+ * delay-activate the command into "Command not found" whenever the service
+ * is momentarily unregistered (config reload), reproducing the very
+ * ambiguity this registration fix removes; instead the command always
+ * exists and reports the inactive state explicitly.
  */
 @Command(scope = "opennms", name = "prometheus-writer-stats",
          description = "Print prometheus-remote-writer plugin metrics")
+@Service
 public class StatsCommand implements Action {
 
+    @Reference(optional = true)
     private PrometheusRemoteWriterStorage storage;
 
     public StatsCommand() {}
 
-    /** Constructor used by tests and Blueprint. */
+    /** Constructor used by tests. */
     public StatsCommand(PrometheusRemoteWriterStorage storage) {
         this.storage = storage;
     }
