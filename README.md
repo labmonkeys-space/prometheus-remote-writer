@@ -35,7 +35,7 @@ echo 'org.opennms.timeseries.strategy = integration' \
     >> /opt/opennms/etc/opennms.properties.d/timeseries.properties
 
 # 3. Point the plugin at a Remote Write endpoint.
-cat > /opt/opennms/etc/org.opennms.plugins.tss.prometheus-remote-writer.cfg <<EOF
+cat > /opt/opennms/etc/org.opennms.plugins.tss.prometheusremotewriter.cfg <<EOF
 write.url = https://mimir.example.com/api/v1/push
 read.url  = https://mimir.example.com/prometheus
 EOF

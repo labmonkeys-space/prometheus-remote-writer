@@ -10,8 +10,8 @@
 :karaf-version:          4.4.x
 :java-target-version:    17
 
-:cfg-pid:                org.opennms.plugins.tss.prometheus-remote-writer
-:cfg-file:               etc/org.opennms.plugins.tss.prometheus-remote-writer.cfg
+:cfg-pid:                org.opennms.plugins.tss.prometheusremotewriter
+:cfg-file:               etc/org.opennms.plugins.tss.prometheusremotewriter.cfg
 :tss-strategy-key:       org.opennms.timeseries.strategy
 :tss-strategy-value:     integration
 

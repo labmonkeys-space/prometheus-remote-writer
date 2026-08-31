@@ -43,7 +43,7 @@ body:
     id: config
     attributes:
       label: Plugin configuration
-      description: Contents of org.opennms.plugins.tss.prometheus-remote-writer.cfg, with secrets redacted.
+      description: Contents of org.opennms.plugins.tss.prometheusremotewriter.cfg, with secrets redacted.
       render: properties
   - type: textarea
     id: logs

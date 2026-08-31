@@ -78,7 +78,7 @@ These are starting points — tune to your deployment's noise floor.
 == Log levels
 
 Set in `etc/org.ops4j.pax.logging.cfg` or via the Karaf shell
-(`log:set DEBUG org.opennms.plugins.tss.prometheusremotewriter`).
+(`log:set DEBUG org.opennms.plugins.prometheus.remotewriter`).
 
 [cols="1,4",options="header"]
 |===
