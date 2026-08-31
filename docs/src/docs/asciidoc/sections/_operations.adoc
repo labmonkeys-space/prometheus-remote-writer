@@ -75,6 +75,27 @@ These are starting points — tune to your deployment's noise floor.
 | TLS skip-verify left on in production                   | log-based — the plugin emits a WARN every hour
 |===
 
+== Tuning `writer.shards`
+
+The default (`1`) is the classic serialized pipeline. Raise it when the
+queue depth grows under bursty collection while the backend is healthy —
+the signature of the single-flusher throughput ceiling — or when one
+slow batch visibly stalls the drain.
+
+* Watch `shard_skew_pct` (registered when `writer.shards > 1`; 100 =
+  balanced, N×100 = everything on one shard). Persistent skew means hot
+  series dominate one shard; more shards won't help that shard, but the
+  others stay unaffected — worst case equals the old single-flusher
+  behavior for the hot shard only.
+* Scale `queue.capacity` with the shard count: validation requires
+  `queue.capacity / writer.shards ≥ batch.size`, and each shard's burst
+  absorption is its slice of the total.
+* The backend sees up to N concurrent streams; mind per-tenant ingest
+  limits (Mimir, VictoriaMetrics cluster). N is capped at
+  `http.max-connections`.
+* Queue mode only — `wal.enabled = true` requires `writer.shards = 1`
+  (the WAL is a single ordered log).
+
 == Log levels
 
 Set in `etc/org.ops4j.pax.logging.cfg` or via the Karaf shell
