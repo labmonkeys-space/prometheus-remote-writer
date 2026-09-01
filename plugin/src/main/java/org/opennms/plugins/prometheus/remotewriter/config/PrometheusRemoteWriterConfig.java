@@ -141,7 +141,7 @@ public class PrometheusRemoteWriterConfig {
     private String bearerToken;
 
     /** Scheme keyword of a custom {@code Authorization} header, e.g.
-     *  {@code Token} (InfluxDB v2) or {@code ApiKey} (Elasticsearch). Emitted
+     *  {@code Token} or {@code ApiKey}. Emitted
      *  verbatim — trimmed, never lowercased — as
      *  {@code Authorization: <type> <credentials>}. REQUIRED whenever
      *  {@link #authorizationCredentials} is set: there is deliberately no
@@ -387,8 +387,8 @@ public class PrometheusRemoteWriterConfig {
                 throw new IllegalStateException(
                     "auth.authorization.type is required whenever "
                     + "auth.authorization.credentials is set — there is no default scheme. "
-                    + "Set it to the keyword your backend expects (Token for InfluxDB v2, "
-                    + "ApiKey for Elasticsearch). For a plain bearer token use "
+                    + "Set it to the keyword your backend expects, e.g. Token or "
+                    + "ApiKey. For a plain bearer token use "
                     + "auth.bearer.token instead. If this key uses ${env:NAME}, check the "
                     + "variable is set: Karaf resolves an unset reference to an empty value.");
             }

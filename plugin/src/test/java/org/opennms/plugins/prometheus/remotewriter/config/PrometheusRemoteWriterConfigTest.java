@@ -272,8 +272,8 @@ class PrometheusRemoteWriterConfigTest {
     void authorization_type_is_required_when_credentials_are_set() {
         // There is deliberately NO Bearer default. With one, a typo'd
         // 'type = ${env:TYPO}' resolves to empty, Bearer substitutes, and the
-        // plugin sends 'Bearer <influx-token>' to a backend expecting
-        // 'Token <influx-token>' — 401 forever, clean startup, and a log line
+        // plugin sends 'Bearer <token>' to a backend expecting
+        // 'Token <token>' — 401 forever, clean startup, and a log line
         // claiming authentication is configured.
         PrometheusRemoteWriterConfig c = minimal();
         c.setAuthorizationCredentials("abc123");

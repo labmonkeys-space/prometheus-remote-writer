@@ -76,8 +76,8 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **BREAKING: custom `Authorization` schemes via `auth.authorization.type` +
   `auth.authorization.credentials`** (#56). Backends and gateways that
-  authenticate with a non-standard `Authorization` keyword — InfluxDB v2's
-  `Token`, Elasticsearch's `ApiKey` — had no configuration path at all:
+  authenticate with a non-standard `Authorization` keyword had no
+  configuration path at all:
   `auth.bearer.token` emits only `Bearer`, and `http.headers.Authorization`
   is reserved and hard-rejected. The new split block emits
   `Authorization: <type> <credentials>` on the write path and the read path
@@ -85,7 +85,7 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
   ```
   auth.authorization.type        = Token
-  auth.authorization.credentials = ${env:INFLUX_TOKEN}
+  auth.authorization.credentials = ${env:PROM_TOKEN}
   ```
 
   The block is named after Prometheus's own `authorization: {type,

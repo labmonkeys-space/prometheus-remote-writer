@@ -20,7 +20,7 @@ bundle restart).
 | `auth.basic.username`        | _(unset)_ | Basic auth — username.
 | `auth.basic.password`        | _(unset)_ | Basic auth — password.
 | `auth.bearer.token`          | _(unset)_ | Bearer auth. Produces the same header as `auth.authorization.type = Bearer`; the two cannot both be set.
-| `auth.authorization.type`    | _(unset)_ | Scheme keyword of a custom `Authorization` header — e.g. `Token` (InfluxDB v2) or `ApiKey` (Elasticsearch). Trimmed; casing preserved; no allowlist. Must be a single HTTP token. `Basic` is rejected. **Required** whenever credentials are set — there is no default scheme.
+| `auth.authorization.type`    | _(unset)_ | Scheme keyword of a custom `Authorization` header, e.g. `Token` or `ApiKey`. Trimmed; casing preserved; no allowlist. Must be a single HTTP token. `Basic` is rejected. **Required** whenever credentials are set — there is no default scheme.
 | `auth.authorization.credentials` | _(unset)_ | Credentials half of the custom `Authorization` header. Required whenever the block is used.
 | `tls.ca-file`                | _(unset)_ | PEM bundle to trust in addition to / in place of the JDK truststore.
 | `tls.insecure-skip-verify`   | `false`   | Disables hostname and certificate verification. Logs WARN on startup and every hour.
@@ -40,7 +40,7 @@ path:
 [source,properties]
 ----
 auth.authorization.type        = Token
-auth.authorization.credentials = ${env:INFLUX_TOKEN}
+auth.authorization.credentials = ${env:PROM_TOKEN}
 ----
 
 The block is named after Prometheus's own `authorization: {type, credentials}`

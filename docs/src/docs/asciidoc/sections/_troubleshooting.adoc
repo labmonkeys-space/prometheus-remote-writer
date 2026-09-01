@@ -62,7 +62,7 @@ reaching it at all. On a 401 or 403 the plugin logs the backend's own
 [source]
 ----
 WARN RemoteWriteHttpClient - Prometheus remote-write rejected with 401
-(backend asks for: Token realm="influxdb"): unauthorized access
+(backend asks for scheme: Token): unauthorized access
 ----
 
 That parenthesis is the fastest route to the cause, because it names the
@@ -71,8 +71,8 @@ scheme the server actually wants. Work through:
 * *Wrong scheme keyword* — the challenge says `Token` but
   `auth.authorization.type` says `Bearer` (or you used `auth.bearer.token`,
   which always sends `Bearer`). Set `auth.authorization.type` to the keyword
-  in the challenge. This is the single most common cause on InfluxDB v2 and
-  Elasticsearch.
+  in the challenge. This is the single most common cause when a backend uses
+  a non-standard scheme keyword.
 * *No `WWW-Authenticate` in the response* — logged as "no WWW-Authenticate
   header in the response". Common on API gateways, which often 403 without a
   challenge. Check the gateway's own access log for which header it expected.

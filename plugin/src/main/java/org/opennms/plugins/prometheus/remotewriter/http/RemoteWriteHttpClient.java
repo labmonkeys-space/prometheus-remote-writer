@@ -286,9 +286,18 @@ public final class RemoteWriteHttpClient {
      */
     static String describeChallenge(Response resp) {
         String challenge = resp.header("WWW-Authenticate");
-        return challenge == null || challenge.isEmpty()
-             ? "no WWW-Authenticate header in the response"
-             : "backend asks for: " + challenge;
+        if (challenge == null || challenge.isEmpty()) {
+            return "no WWW-Authenticate header in the response";
+        }
+        // Only the scheme keyword — the first token — is logged. That is the
+        // one fact an operator needs ("the server wants Bearer, you sent
+        // Token"), and it keeps the rest of the challenge out of the log:
+        // parameters such as realm, nonce and opaque are not ours to record,
+        // and a static analyser is right to object to writing a whole
+        // WWW-Authenticate value to disk.
+        int sp = challenge.indexOf(' ');
+        String scheme = sp < 0 ? challenge : challenge.substring(0, sp);
+        return "backend asks for scheme: " + scheme;
     }
 
     private static String readBodyQuiet(Response resp) {
