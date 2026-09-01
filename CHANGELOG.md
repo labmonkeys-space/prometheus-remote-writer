@@ -9,6 +9,18 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Misleading diagnostic told operators secrets must be cleartext** (#55).
+  The empty-value error under `http.headers.*` asserted that "the plugin does
+  not currently expand `${env:NAME}` in configuration values; the value must
+  be literal cleartext". The first half is true of the plugin and false of the
+  system: Karaf resolves `${env:NAME}` in every configuration value, and
+  `$[secret:name]` reads a value from a file, both on a stock OpenNMS Horizon
+  with no container changes. An unset reference resolves to an empty string,
+  which is exactly what produced this message — so the diagnostic was pointing
+  operators away from the mechanism that would have fixed their problem. The
+  message now names the likely cause, and the configuration reference gains a
+  section covering both forms.
+
 - **`opennms:prometheus-writer-stats` never registered** (#113).
   Karaf 4's command extender only inspects bundles carrying the `Karaf-Commands` manifest header and only registers `@Service`-annotated classes; the plugin's blueprint-published `Action` service satisfied neither gate, so the documented command reported "Command not found" on every deployment.
   The bundle now ships the header, and `StatsCommand` carries `@Service`/`@Reference` (concrete-type injection via a second, non-exported service registration).

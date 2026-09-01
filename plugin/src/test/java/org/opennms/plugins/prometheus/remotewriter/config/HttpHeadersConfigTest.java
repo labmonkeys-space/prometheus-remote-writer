@@ -303,6 +303,29 @@ class HttpHeadersConfigTest {
             .hasMessageContaining("empty value");
     }
 
+    /**
+     * The empty-value diagnostic is the one an operator hits when a Karaf
+     * {@code ${env:NAME}} reference names an unset variable — Karaf resolves
+     * that to an empty string rather than passing the literal through, so
+     * "empty value" is the symptom of a typo'd variable name. An earlier
+     * version of this message asserted the opposite, that values "must be
+     * literal cleartext", which would talk an operator out of the mechanism
+     * that actually works. Pinned so it cannot regress.
+     */
+    @Test
+    void empty_value_message_points_at_the_container_mechanism() {
+        HttpHeadersConfig cfg = new HttpHeadersConfig();
+        assertThatThrownBy(() ->
+            cfg.applyProperties(Map.of("http.headers.x-tenant", "")))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("${env:NAME}")
+            .hasMessageContaining("set in the plugin's environment")
+            .satisfies(e -> assertThat(e.getMessage())
+                .as("must not tell operators that literal cleartext is required")
+                .doesNotContain("literal cleartext")
+                .doesNotContain("does not currently expand"));
+    }
+
     @Test
     void whitespace_only_value_is_rejected_after_trim() {
         HttpHeadersConfig cfg = new HttpHeadersConfig();

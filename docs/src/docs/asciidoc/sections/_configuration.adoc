@@ -27,6 +27,72 @@ bundle restart).
 NOTE: The plugin refuses to start if both `auth.basic.*` and
 `auth.bearer.token` are configured.
 
+== Keeping secrets out of the configuration file
+
+You do not have to write secrets into `{cfg-file}`. Karaf resolves two
+placeholder forms in configuration values before the plugin ever sees them,
+and both are available on a stock OpenNMS Horizon with no container
+reconfiguration.
+
+**Environment variables — `${env:NAME}`.**
+
+[source,properties]
+----
+auth.bearer.token                    = ${env:PROM_TOKEN}
+http.headers.cf-access-client-secret = ${env:CF_SECRET}
+write.url                            = http://${env:BACKEND_HOST}:9090/api/v1/write
+----
+
+Resolution happens when Karaf reads the `.cfg`, before any key means anything
+to the plugin, so it applies to *every* configuration key and works anywhere
+in a value, not just as the whole value.
+
+**Secret files — `$[secret:name]`.**
+
+[source,properties]
+----
+auth.bearer.token = $[secret:prom-token]
+----
+
+reads `etc/prom-token` (the directory Karaf points `secretsdir` at) and uses its content as the value. This is the
+form to reach for when secrets arrive as files, which is what a Kubernetes
+`Secret` volume mount, the Secrets Store CSI driver, and HashiCorp Vault
+Agent all produce. It also keeps the secret behind filesystem permissions
+rather than in the process environment.
+
+CAUTION: The file's content is used *verbatim*, including a trailing newline.
+A newline in a header value is rejected by the CRLF guard, so write secret
+files without one (`printf '%s' "$TOKEN" > prom-token`).
+
+**When a reference does not resolve.** Karaf resolves an unset `${env:NAME}`
+to an *empty string* — it does not pass the literal through. The plugin's
+validation then rejects the empty value, names the offending key, and refuses
+to serve until the configuration is corrected. The failure is loud rather than
+silent, but the diagnostic says "empty value": if you see that on a key you
+believe you set, check the variable name first.
+
+[NOTE]
+====
+**A value written literally is cleartext on disk.** If you do not use either
+placeholder form above, restrict filesystem permissions on `{cfg-file}`
+(owner-readable only), or render it at deploy time:
+
+[source,shell]
+----
+envsubst < remote-writer.cfg.template > /opt/opennms/{cfg-file}
+----
+
+[source,properties]
+----
+# remote-writer.cfg.template — $CLIENT_ID and $CLIENT_SECRET expanded at deploy time
+http.headers.cf-access-client-id     = $CLIENT_ID
+http.headers.cf-access-client-secret = $CLIENT_SECRET
+----
+
+Note that deploy-time templating writes the resolved secret to disk, whereas
+`${env:NAME}` and `$[secret:name]` leave only a reference there.
+====
+
 == Wire format
 
 [cols="2,1,4",options="header"]
@@ -189,35 +255,12 @@ INFO HttpHeadersConfig - Custom HTTP headers attached: cf-access-client-id (valu
 A property-name typo (e.g., `http.header.foo` missing the `s`) shows up
 here as a missing entry; check the log immediately after activation.
 
-[NOTE]
-====
-**Secrets are stored cleartext in `{cfg-file}`.** The plugin does not
-currently expand `${env:NAME}` in configuration values — header values,
-like `auth.basic.password` and `auth.bearer.token`, must be literal
-cleartext. Use one of:
-
-* Restrict filesystem permissions on `{cfg-file}` (owner-readable only).
-* Deploy-time templating via `envsubst`, an init container, or a
-  Kubernetes `ConfigMap` rendered from a `Secret`:
-+
-[source,shell]
-----
-envsubst < remote-writer.cfg.template > /opt/opennms/{cfg-file}
-----
-+
-[source,properties]
-----
-# remote-writer.cfg.template — $CLIENT_ID and $CLIENT_SECRET expanded at deploy time
-http.headers.cf-access-client-id     = $CLIENT_ID
-http.headers.cf-access-client-secret = $CLIENT_SECRET
-----
-
-Plugin-wide `${env:NAME}` resolution is tracked as a separate enhancement.
-====
-
+[#keeping-secrets-out-of-the-cfg]
 === What is explicitly out of scope
 
-* **Environment-variable interpolation in values** — see the note above.
+* **Plugin-side environment-variable interpolation** — unnecessary: Karaf
+  already resolves `${env:NAME}` and `$[secret:name]` in every configuration
+  value. See <<keeping-secrets-out-of-the-cfg>>.
 * **Dynamic auth providers** (AWS SigV4, GCP Identity Tokens, OAuth
   refresh) — request signing and token refresh require behavior beyond
   static header attachment; a future enhancement.

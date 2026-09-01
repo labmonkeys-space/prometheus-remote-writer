@@ -526,11 +526,23 @@ public final class HttpHeadersConfig {
 
     private static void validateValue(String name, String trimmed) {
         if (trimmed.isEmpty()) {
+            // An empty value is the symptom an operator sees when a Karaf
+            // ${env:NAME} reference names a variable that is not set: the
+            // container resolves the unset reference to an empty string
+            // rather than passing the literal through. So the likeliest
+            // cause is a typo'd or missing variable, not a genuinely blank
+            // config line, and the message says so. (An earlier version of
+            // this message claimed the plugin cannot expand ${env:NAME} and
+            // that values must be literal cleartext. Both halves were
+            // misleading: the plugin does not expand it, but Karaf does,
+            // and it applies to every key.)
             throw new IllegalStateException(
-                "http.headers entry '" + name + "' has an empty value — "
-                + "if you intended to inject an environment variable, note "
-                + "that the plugin does not currently expand ${env:NAME} in "
-                + "configuration values; the value must be literal cleartext");
+                "http.headers entry '" + name + "' has an empty value — if "
+                + "this value uses ${env:NAME}, check that the variable is "
+                + "set in the plugin's environment; Karaf resolves an unset "
+                + "reference to an empty string. ${env:NAME} and "
+                + "$[secret:file] are both resolved by the container for "
+                + "every configuration key");
         }
         for (int i = 0; i < trimmed.length(); i++) {
             char c = trimmed.charAt(i);
