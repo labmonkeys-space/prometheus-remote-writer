@@ -10,10 +10,13 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.Base64;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Consumer;
 
 import okhttp3.mockwebserver.MockResponse;
 import okhttp3.mockwebserver.MockWebServer;
@@ -606,6 +609,120 @@ class PrometheusReadClientTest {
         // No stray operator-injected headers
         assertThat(req.getHeader("cf-access-client-id")).isNull();
         assertThat(req.getHeader("x-custom-tenant")).isNull();
+    }
+
+    // ---------- read-path auth ----------------------------------------------
+    //
+    // The read path emits the Authorization header from the same three
+    // mutually-exclusive config blocks as the write path — Zero-Trust
+    // gateways gate both endpoints with the same credential — but the chain
+    // is duplicated in PrometheusReadClient.executeGet, so it needs its own
+    // coverage or a change to one path can silently diverge from the other.
+
+    @Test
+    void basic_auth_header_is_attached_on_read_path() throws Exception {
+        assertThat(readPathAuthHeader(c -> {
+            c.setBasicUsername("alice");
+            c.setBasicPassword("s3cret");
+        })).isEqualTo("Basic " + Base64.getEncoder().encodeToString(
+                "alice:s3cret".getBytes(StandardCharsets.UTF_8)));
+    }
+
+    @Test
+    void no_auth_header_when_none_configured_on_read_path() throws Exception {
+        // Parity with the write suite's no_auth_header_when_none_configured.
+        assertThat(readPathAuthHeader(c -> { })).isNull();
+    }
+
+    @Test
+    void type_only_config_emits_no_header_on_read_path() throws Exception {
+        // This constructor never calls validate(), so the emitter's own guard
+        // is the only thing standing between a type-only config and the
+        // literal "Token null" going out as a credential.
+        assertThat(readPathAuthHeaderUnvalidated(c -> c.setAuthorizationType("Token")))
+                .isNull();
+    }
+
+    @Test
+    void bearer_auth_header_is_attached_on_read_path() throws Exception {
+        assertThat(readPathAuthHeader(c -> c.setBearerToken("tok-abc")))
+                .isEqualTo("Bearer tok-abc");
+    }
+
+    @Test
+    void custom_authorization_scheme_header_is_attached_on_read_path() throws Exception {
+        assertThat(readPathAuthHeader(c -> {
+            c.setAuthorizationType("Token");
+            c.setAuthorizationCredentials("abc123");
+        })).isEqualTo("Token abc123");
+    }
+
+    @Test
+    void custom_authorization_scheme_preserves_casing_on_read_path() throws Exception {
+        assertThat(readPathAuthHeader(c -> {
+            c.setAuthorizationType("  ApiKey  ");
+            c.setAuthorizationCredentials("abc123");
+        })).isEqualTo("ApiKey abc123");
+    }
+
+    @Test
+    void credentials_only_config_emits_no_header_on_read_path() throws Exception {
+        // No Bearer default — an absent type is a validation error, so the
+        // emitter sends nothing rather than guessing a scheme.
+        assertThat(readPathAuthHeaderUnvalidated(c -> c.setAuthorizationCredentials("abc123")))
+                .isNull();
+    }
+
+    @Test
+    void username_only_config_emits_no_header_on_read_path() throws Exception {
+        // Without the complete-block gate this sends base64 of "u:null".
+        assertThat(readPathAuthHeaderUnvalidated(c -> c.setBasicUsername("u"))).isNull();
+    }
+
+    /** Runs one findMetrics() through a dedicated client configured by
+     *  {@code auth} and returns the Authorization header the backend saw.
+     *  Validates first, so these only ever assert on a config the plugin
+     *  would actually start with. */
+    private String readPathAuthHeader(Consumer<PrometheusRemoteWriterConfig> auth)
+            throws Exception {
+        return readPathAuthHeader(auth, true);
+    }
+
+    /** As above, but skips validate() — for asserting the emitter's own guards
+     *  on a config that validate() would have rejected. This constructor
+     *  accepts one, so the guards must hold without it. */
+    private String readPathAuthHeaderUnvalidated(Consumer<PrometheusRemoteWriterConfig> auth)
+            throws Exception {
+        return readPathAuthHeader(auth, false);
+    }
+
+    private String readPathAuthHeader(Consumer<PrometheusRemoteWriterConfig> auth,
+                                      boolean validate) throws Exception {
+        // A dedicated server per call, NOT the shared @BeforeEach one. With the
+        // shared server, a findMetrics() that throws would leave the enqueued
+        // MockResponse sitting in the queue for whichever test ran next to
+        // consume — turning one failure into a cascade of unrelated ones.
+        MockWebServer authServer = new MockWebServer();
+        authServer.start();
+        try {
+            authServer.enqueue(new MockResponse()
+                    .setResponseCode(200)
+                    .setBody("{\"status\":\"success\",\"data\":[]}"));
+            PrometheusRemoteWriterConfig c = new PrometheusRemoteWriterConfig();
+            c.setWriteUrl(authServer.url("/api/v1/push").toString());
+            c.setReadUrl(authServer.url("").toString().replaceAll("/$", ""));
+            auth.accept(c);
+            if (validate) c.validate();
+            PrometheusReadClient authed = new PrometheusReadClient(c);
+            try {
+                authed.findMetrics(List.of(eq("name", "irrelevant")));
+                return authServer.takeRequest().getHeader("Authorization");
+            } finally {
+                authed.shutdown();
+            }
+        } finally {
+            authServer.shutdown();
+        }
     }
 
     private PrometheusReadClient customHeadersClient(Map<String, String> props) {

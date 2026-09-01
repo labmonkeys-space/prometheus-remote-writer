@@ -139,6 +139,21 @@ public class PrometheusRemoteWriterConfig {
     private String basicUsername;
     private String basicPassword;
     private String bearerToken;
+
+    /** Scheme keyword of a custom {@code Authorization} header, e.g.
+     *  {@code Token} or {@code ApiKey}. Emitted
+     *  verbatim — trimmed, never lowercased — as
+     *  {@code Authorization: <type> <credentials>}. REQUIRED whenever
+     *  {@link #authorizationCredentials} is set: there is deliberately no
+     *  default, so a typo'd {@code ${env:}} reference cannot silently become
+     *  {@code Bearer} against a backend expecting something else. Named after
+     *  Prometheus's own {@code authorization: {type, credentials}} block. */
+    private String authorizationType;
+
+    /** Credentials half of a custom {@code Authorization} header. Required
+     *  whenever the {@code auth.authorization.*} block is used at all. */
+    private String authorizationCredentials;
+
     private String tenantOrgId;
 
     // --- TLS ---
@@ -312,14 +327,98 @@ public class PrometheusRemoteWriterConfig {
         validateRenameTargets();
         validateCopyTargets();
         validateCrossPrimitiveTargets();
-        if (hasBasicAuth() && hasBearerAuth()) {
-            throw new IllegalStateException(
-                "auth.basic.* and auth.bearer.token are mutually exclusive — "
-                + "configure one or neither, not both");
+        // Header-safety, applied to EVERY operator-supplied value that lands
+        // verbatim in a request header. OkHttp throws IllegalArgumentException
+        // on an illegal byte when the request is built — at which point the
+        // write path's retry loop, which catches IOException only, lets it
+        // escape into Flusher's catch-all: an ERROR per batch, every batch
+        // dropped, and a plugin that still reports healthy. Reject at startup
+        // instead, so a config typo cannot become a permanent silent stall.
+        //
+        // auth.basic.* is deliberately absent from this list: both halves are
+        // base64-encoded before they reach the header, so no byte of them can
+        // reach addHeader raw, and RFC 7617 explicitly permits UTF-8 in Basic
+        // credentials. Guarding them here would reject working configurations
+        // to prevent a failure that cannot occur.
+        //
+        // Messages name the key and never echo the value — an operator who
+        // pasted a token into the wrong one of two adjacent keys must not have
+        // it copied into the Karaf log.
+        if (!isBlank(bearerToken)) {
+            requireNoCrLf("auth.bearer.token", bearerToken);
+            requirePrintableAscii("auth.bearer.token", bearerToken);
+        }
+        if (!isBlank(tenantOrgId)) {
+            requireNoCrLf("tenant.org-id", tenantOrgId);
+            requirePrintableAscii("tenant.org-id", tenantOrgId);
+        }
+        if (hasAnyAuthorizationField()) {
+            if (!isBlank(authorizationType)) {
+                requireNoCrLf("auth.authorization.type", authorizationType);
+                requireHttpToken("auth.authorization.type", authorizationType);
+            }
+            if (!isBlank(authorizationCredentials)) {
+                requireNoCrLf("auth.authorization.credentials", authorizationCredentials);
+                requirePrintableAscii("auth.authorization.credentials", authorizationCredentials);
+            }
+            // Rejected here rather than in the setter on purpose: a setter throw
+            // fails the Blueprint container permanently, while a validate()
+            // throw is caught by PrometheusRemoteWriterStorage.start() and
+            // leaves the plugin inert but recoverable on the next .cfg save.
+            // The message is the whole operator UX — it only ever surfaces as a
+            // Karaf log line. Echoing the value is safe in this one branch: it
+            // can only ever be the five letters of "basic", in some casing.
+            if ("basic".equalsIgnoreCase(authorizationType)) {
+                throw new IllegalStateException(
+                    "auth.authorization.type = '" + authorizationType + "' is not supported — "
+                    + "Basic credentials must be built from the username and the password. "
+                    + "Use auth.basic.username and auth.basic.password instead; the plugin "
+                    + "base64-encodes them for you.");
+            }
+            // No default scheme. A defaulted 'Bearer' would turn
+            // 'type = ${env:TYPO}' into a wrong-but-plausible header: the
+            // plugin would send 'Bearer <token>' to a backend expecting
+            // 'Token <token>', 401 forever, with a clean startup and a log line
+            // claiming authentication was configured. Prometheus defaults here
+            // because its authorization block is the only way to spell a bearer
+            // token; this plugin ships auth.bearer.token, so the default bought
+            // nothing and cost a silent failure mode.
+            if (isBlank(authorizationType)) {
+                throw new IllegalStateException(
+                    "auth.authorization.type is required whenever "
+                    + "auth.authorization.credentials is set — there is no default scheme. "
+                    + "Set it to the keyword your backend expects, e.g. Token or "
+                    + "ApiKey. For a plain bearer token use "
+                    + "auth.bearer.token instead. If this key uses ${env:NAME}, check the "
+                    + "variable is set: Karaf resolves an unset reference to an empty value.");
+            }
+            if (isBlank(authorizationCredentials)) {
+                throw new IllegalStateException(
+                    "auth.authorization.credentials is required whenever the "
+                    + "auth.authorization.* block is used — set it in "
+                    + "etc/org.opennms.plugins.tss.prometheusremotewriter.cfg, or remove "
+                    + "auth.authorization.type to disable the block");
+            }
         }
         if (hasBasicAuth() && (isBlank(basicUsername) || isBlank(basicPassword))) {
             throw new IllegalStateException(
                 "Basic auth requires both auth.basic.username and auth.basic.password");
+        }
+        // Exclusivity LAST, so an incomplete block reports its own missing key
+        // rather than being masked by a collision it only appears to have.
+        // Name the blocks the operator actually set — with three of them, a
+        // generic "these three are exclusive" line leaves them diffing the
+        // file to find which two collided.
+        List<String> configuredAuthBlocks = new ArrayList<>();
+        if (hasBasicAuth())             configuredAuthBlocks.add("auth.basic.*");
+        if (hasBearerAuth())            configuredAuthBlocks.add("auth.bearer.token");
+        if (hasAnyAuthorizationField()) configuredAuthBlocks.add("auth.authorization.*");
+        if (configuredAuthBlocks.size() > 1) {
+            throw new IllegalStateException(
+                "auth.basic.*, auth.bearer.token and auth.authorization.* are mutually "
+                + "exclusive — each one produces the Authorization header. Configured: "
+                + String.join(" and ", configuredAuthBlocks)
+                + ". Keep exactly one of the three blocks, or none.");
         }
         if (queueCapacity < 1) {
             throw new IllegalStateException("queue.capacity must be >= 1");
@@ -644,6 +743,48 @@ public class PrometheusRemoteWriterConfig {
 
     public boolean hasBasicAuth()  { return !isBlank(basicUsername) || !isBlank(basicPassword); }
     public boolean hasBearerAuth() { return !isBlank(bearerToken); }
+
+    /**
+     * True when EITHER half of the {@code auth.authorization.*} block is set —
+     * i.e. the operator touched the block at all, however incompletely. Only
+     * {@link #validate()} wants this reading: a half-configured block must
+     * reach a named error rather than silently sending nothing. Emitters must
+     * NOT branch on it; they want {@link #canEmitAuthorizationHeader()}.
+     * Package-private to keep that distinction from being picked up by accident
+     * outside this class.
+     */
+    boolean hasAnyAuthorizationField() {
+        return !isBlank(authorizationType) || !isBlank(authorizationCredentials);
+    }
+
+    /**
+     * True when the {@code auth.authorization.*} block is COMPLETE and can
+     * therefore produce a well-formed header — both the scheme keyword and the
+     * credentials are present. This is what the two emitters branch on.
+     *
+     * <p>{@link #validate()} rejects a half-configured block, but
+     * {@code PrometheusReadClient}'s constructor accepts a config it never
+     * validates, so an emitter trusting validation would send the literal
+     * {@code "Token null"} or {@code "null abc123"}. The guard belongs in the
+     * class that owns the invariant, not in a caller's assumption about another
+     * class.
+     */
+    public boolean canEmitAuthorizationHeader() {
+        return !isBlank(authorizationType) && !isBlank(authorizationCredentials);
+    }
+
+    /**
+     * True when {@code auth.basic.*} is COMPLETE. The sibling of
+     * {@link #canEmitAuthorizationHeader()}, and needed for the same reason:
+     * {@link #hasBasicAuth()} is either-half, so a username-only config that
+     * never went through {@link #validate()} would otherwise emit
+     * {@code Basic } + base64 of {@code "u:null"} — a garbage credential on the
+     * wire rather than no credential.
+     */
+    public boolean canEmitBasicAuthHeader() {
+        return !isBlank(basicUsername) && !isBlank(basicPassword);
+    }
+
     public boolean hasTenant()     { return !isBlank(tenantOrgId); }
 
     public List<String> labelsIncludeGlobs() { return parseCsv(labelsInclude); }
@@ -837,6 +978,9 @@ public class PrometheusRemoteWriterConfig {
         diffStr(out, "auth.basic.username",       other.basicUsername,         basicUsername);
         diffMasked(out, "auth.basic.password",    other.basicPassword,         basicPassword);
         diffMasked(out, "auth.bearer.token",      other.bearerToken,           bearerToken);
+        diffStr(out, "auth.authorization.type",   other.authorizationType,     authorizationType);
+        diffMasked(out, "auth.authorization.credentials",
+                                                  other.authorizationCredentials, authorizationCredentials);
         diffStr(out, "tenant.org-id",             other.tenantOrgId,           tenantOrgId);
         diffStr(out, "tls.ca-file",               other.tlsCaFile,             tlsCaFile);
         diffBool(out, "tls.insecure-skip-verify", other.tlsInsecureSkipVerify, tlsInsecureSkipVerify);
@@ -883,6 +1027,11 @@ public class PrometheusRemoteWriterConfig {
     public void setBasicUsername(String v)         { basicUsername = blankToNull(v); }
     public void setBasicPassword(String v)         { basicPassword = blankToNull(v); }
     public void setBearerToken(String v)           { bearerToken = blankToNull(v); }
+    // blankToNull trims and maps empty to null; casing is left alone, which is
+    // the contract for the scheme keyword. Validation of the value lives in
+    // validate(), never here — see the comment on the 'basic' rejection.
+    public void setAuthorizationType(String v)         { authorizationType = blankToNull(v); }
+    public void setAuthorizationCredentials(String v)  { authorizationCredentials = blankToNull(v); }
     public void setTenantOrgId(String v)           { tenantOrgId = blankToNull(v); }
     public void setTlsCaFile(String v)             { tlsCaFile = blankToNull(v); }
     public void setTlsInsecureSkipVerify(boolean v){ tlsInsecureSkipVerify = v; }
@@ -1189,6 +1338,8 @@ public class PrometheusRemoteWriterConfig {
     public String  getBasicUsername()         { return basicUsername; }
     public String  getBasicPassword()         { return basicPassword; }
     public String  getBearerToken()           { return bearerToken; }
+    public String  getAuthorizationType()        { return authorizationType; }
+    public String  getAuthorizationCredentials() { return authorizationCredentials; }
     public String  getTenantOrgId()           { return tenantOrgId; }
     public String  getTlsCaFile()             { return tlsCaFile; }
     public boolean isTlsInsecureSkipVerify()  { return tlsInsecureSkipVerify; }
@@ -1261,6 +1412,73 @@ public class PrometheusRemoteWriterConfig {
     // ---------- helpers -------------------------------------------------------
 
     private static boolean isBlank(String s) { return s == null || s.isEmpty(); }
+
+    // ---------- Authorization header-safety checks ----------------------------
+    //
+    // These mirror HttpHeadersConfig.validateValue's rules for the same reason
+    // it has them: the value ends up in an HTTP header. Every message names the
+    // key and never echoes the value.
+
+    /** Header-splitting / response-splitting guard. */
+    private static void requireNoCrLf(String key, String value) {
+        for (int i = 0; i < value.length(); i++) {
+            char c = value.charAt(i);
+            if (c == '\r' || c == '\n') {
+                throw new IllegalStateException(
+                    key + " contains a CR or LF character — rejected to prevent header "
+                    + "injection. (The offending value is not echoed here.)");
+            }
+        }
+    }
+
+    /** Printable ASCII, with HT and SP allowed — the rule http.headers.* values
+     *  already follow. Some schemes carry parameter lists with spaces, so SP
+     *  stays legal in the credentials half. */
+    private static void requirePrintableAscii(String key, String value) {
+        for (int i = 0; i < value.length(); i++) {
+            char c = value.charAt(i);
+            if (c == '\t' || c == ' ') continue;
+            if (c < 0x20 || c > 0x7E) {
+                // No offset: in a message whose whole point is not echoing the
+                // value, an index would still tell a log reader where the first
+                // illegal byte of a secret sits. The sibling in
+                // HttpHeadersConfig omits it for the same reason.
+                throw new IllegalStateException(
+                    key + " contains a non-printable or non-ASCII byte — header content "
+                    + "must be printable ASCII (HT and SP allowed). Base64-encode a binary "
+                    + "credential at the source. (The offending value is not echoed here.)");
+            }
+        }
+    }
+
+    /**
+     * The scheme keyword must be a single RFC 7230 token: {@code tchar+}, i.e.
+     * {@code [!#$%&'*+.^_`|~0-9A-Za-z-]+}. This is NOT an allowlist — it rejects
+     * no legitimate scheme keyword, registered or otherwise. What it catches is
+     * the plausible misreading of the key as "the whole header value":
+     * {@code auth.authorization.type = Token abc123} would otherwise emit
+     * {@code Authorization: Token abc123 <credentials>}, silently wrong.
+     */
+    private static void requireHttpToken(String key, String value) {
+        for (int i = 0; i < value.length(); i++) {
+            char c = value.charAt(i);
+            boolean tchar = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+                         || (c >= '0' && c <= '9')
+                         || "!#$%&'*+-.^_`|~".indexOf(c) >= 0;
+            if (tchar) continue;
+            if (c == ' ' || c == '\t') {
+                throw new IllegalStateException(
+                    key + " contains whitespace — it takes only the scheme keyword (a "
+                    + "single word such as Token or ApiKey), not the whole header value. "
+                    + "Put the rest in auth.authorization.credentials. (The offending "
+                    + "value is not echoed here.)");
+            }
+            throw new IllegalStateException(
+                key + " contains a character that is not legal in an HTTP scheme keyword "
+                + "— it must match [!#$%&'*+-.^_`|~0-9A-Za-z]+. "
+                + "(The offending value is not echoed here.)");
+        }
+    }
 
     private static String blankToNull(String s) {
         if (s == null) return null;

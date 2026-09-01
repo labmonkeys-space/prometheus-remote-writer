@@ -225,13 +225,24 @@ public final class RemoteWriteHttpClient {
                 .addHeader("X-Prometheus-Remote-Write-Version", rwVersion)
                 .addHeader("User-Agent", USER_AGENT);
 
-        if (config.hasBasicAuth()) {
+        // Each branch gates on a COMPLETE block. validate() enforces the same
+        // thing, but PrometheusReadClient's constructor accepts an unvalidated
+        // config, so trusting validation here would put a garbage credential on
+        // the wire (base64 of "u:null", or the literal "Token null") instead of
+        // no credential at all.
+        if (config.canEmitBasicAuthHeader()) {
             String creds = config.getBasicUsername() + ":" + config.getBasicPassword();
             String encoded = Base64.getEncoder()
                     .encodeToString(creds.getBytes(StandardCharsets.UTF_8));
             b.addHeader("Authorization", "Basic " + encoded);
         } else if (config.hasBearerAuth()) {
             b.addHeader("Authorization", "Bearer " + config.getBearerToken());
+        } else if (config.canEmitAuthorizationHeader()) {
+            // Custom scheme keyword, emitted with its operator-supplied casing
+            // and exactly one space before the credentials. No default scheme —
+            // an absent type is a validation error, not a silent Bearer.
+            b.addHeader("Authorization", config.getAuthorizationType()
+                    + " " + config.getAuthorizationCredentials());
         }
         if (config.hasTenant()) {
             b.addHeader("X-Scope-OrgID", config.getTenantOrgId());

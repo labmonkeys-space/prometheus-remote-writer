@@ -19,13 +19,81 @@ bundle restart).
 | `tenant.org-id`              | _(unset)_ | Sets the `X-Scope-OrgID` header. Cortex/Mimir/VictoriaMetrics-cluster/Thanos partition by this.
 | `auth.basic.username`        | _(unset)_ | Basic auth — username.
 | `auth.basic.password`        | _(unset)_ | Basic auth — password.
-| `auth.bearer.token`          | _(unset)_ | Bearer auth. Mutually exclusive with Basic.
+| `auth.bearer.token`          | _(unset)_ | Bearer auth. Produces the same header as `auth.authorization.type = Bearer`; the two cannot both be set.
+| `auth.authorization.type`    | _(unset)_ | Scheme keyword of a custom `Authorization` header, e.g. `Token` or `ApiKey`. Trimmed; casing preserved; no allowlist. Must be a single HTTP token. `Basic` is rejected. **Required** whenever credentials are set — there is no default scheme.
+| `auth.authorization.credentials` | _(unset)_ | Credentials half of the custom `Authorization` header. Required whenever the block is used.
 | `tls.ca-file`                | _(unset)_ | PEM bundle to trust in addition to / in place of the JDK truststore.
 | `tls.insecure-skip-verify`   | `false`   | Disables hostname and certificate verification. Logs WARN on startup and every hour.
 |===
 
-NOTE: The plugin refuses to start if both `auth.basic.*` and
-`auth.bearer.token` are configured.
+NOTE: `auth.basic.*`, `auth.bearer.token` and `auth.authorization.*` each
+produce the `Authorization` header, so they are mutually exclusive. The plugin
+refuses to start if more than one is configured.
+
+=== Custom `Authorization` schemes
+
+Backends and gateways that authenticate with a non-standard `Authorization`
+keyword are configured through the split `auth.authorization.*` block, which
+emits `Authorization: <type> <credentials>` on the write path **and** the read
+path:
+
+[source,properties]
+----
+auth.authorization.type        = Token
+auth.authorization.credentials = ${env:PROM_TOKEN}
+----
+
+The block is named after Prometheus's own `authorization: {type, credentials}`
+and behaves the same way. The scheme keyword is emitted verbatim: leading and
+trailing whitespace is trimmed, casing is preserved (`ApiKey` stays `ApiKey`),
+and it is joined to the credentials with exactly one space. There is no
+allowlist of known schemes — most backends this serves authenticate with an
+unregistered keyword, so an allowlist would reject exactly the deployments the
+block exists for.
+
+Rules enforced at startup:
+
+* `auth.authorization.type = Basic` (in any casing) is rejected. Basic
+  credentials are built from a username and a password, so use
+  `auth.basic.username` / `auth.basic.password`, which base64-encode them for
+  you.
+* Both keys are required together. `auth.authorization.type` has no default:
+  an unset type with credentials set fails at startup by name. That is
+  deliberate — a `Bearer` default would turn a typo'd
+  `type = pass:[${env:NAME}]` into a plausible-looking wrong header, sending
+  `Bearer <token>` to a backend expecting `Token <token>`: 401 forever, with a
+  clean startup and a log line claiming authentication was configured.
+* Both halves must be legal HTTP header content: no CR or LF, no non-printable
+  or non-ASCII bytes. Note that leading and trailing whitespace is stripped
+  before this check, so a credential read from a file that ends in a newline is
+  accepted and the trimmed value is sent; only an *interior* CR or LF is
+  rejected.
+* `auth.authorization.type` must be a single HTTP token — no spaces. The
+  permitted characters are exactly:
++
+----
+! # $ % & ' * + - . ^ _ ` | ~   plus   0-9  A-Z  a-z
+----
++
+This catches the common misreading of the key as "the whole header value":
+`type = Token abc123` would otherwise emit
+`Authorization: Token abc123 <credentials>`. It is a safety rule, not an
+allowlist; it rejects no legitimate scheme keyword.
+
+These errors name the offending key and never echo its value, so a credential
+pasted into the wrong key does not reach the Karaf log.
+
+For a plain bearer token use `auth.bearer.token`. It produces exactly the same
+header as `auth.authorization.type = Bearer` with the same credentials — the
+two are alternative spellings of one thing, not composable: setting both is a
+startup failure like any other pair of auth blocks.
+
+Dynamic schemes that require request signing or token refresh (AWS SigV4,
+OAuth2, GCP IAM, Azure AD) are out of scope here: they need a signer, not a
+static configuration value. Challenge-response schemes that need a round trip
+with the server before the credential can be computed fall on the same side of
+that line. The block sends a static, precomputed credential on every request —
+if that is what your backend accepts, it fits.
 
 [#keeping-secrets-out-of-the-cfg]
 == Keeping secrets out of the configuration file
@@ -109,6 +177,15 @@ matters:
 | `auth.bearer.token`, `tenant.org-id`
 | **Silent.** An empty value is indistinguishable from "not configured", so
   the plugin starts and sends no credential.
+
+| `auth.authorization.type` / `auth.authorization.credentials`
+| The plugin refuses to start, naming whichever half resolved empty, as long
+  as the other half is set. This is why `type` has no default: a defaulted
+  `Bearer` would make an empty type silent, and send the wrong scheme. If
+  *both* halves resolve empty the block reads as "not configured" and the
+  plugin starts with no credential — so keep at least one of the two a
+  literal, which the recommended shape (literal `type`, `${env:}`
+  `credentials`) does for you.
 |===
 
 WARNING: For `auth.bearer.token` and `tenant.org-id` the plugin cannot detect
@@ -246,7 +323,7 @@ until the entry is removed:
 | `Accept-Encoding`                    | Managed by OkHttp. Setting it disables transparent gzip, so read responses arrive compressed and fail to parse.
 | `TE`, `Expect`                       | Hop-by-hop transport negotiation.
 | `Www-Authenticate`                   | A response header; meaningless on a request.
-| `Authorization`                      | Managed by `auth.basic.*` / `auth.bearer.token`. Use those instead.
+| `Authorization`                      | Managed by `auth.basic.*` / `auth.bearer.token` / `auth.authorization.*`. Use those instead — `auth.authorization.type` covers non-standard scheme keywords such as `Token` and `ApiKey`.
 | `Proxy-Authorization`                | The plugin does not proxy-authenticate; configure credentials on the proxy.
 | `X-Scope-OrgID`                      | Managed by `tenant.org-id`. Use that instead.
 |===
@@ -320,8 +397,6 @@ here as a missing entry; check the log immediately after activation.
   static header attachment; a future enhancement.
 * **Multi-value headers** (same name, repeated, e.g. Accept-style). One
   value per header name.
-* **Custom `Authorization:` schemes** — hard-rejected; tracked as a
-  dedicated auth knob with explicit scheme semantics.
 * **Split write/read header sets** — single key drives both clients. Real
   Zero-Trust deployments (Cloudflare Access, GCP IAP) gate both
   endpoints with the same credentials, so this is the right shape today.

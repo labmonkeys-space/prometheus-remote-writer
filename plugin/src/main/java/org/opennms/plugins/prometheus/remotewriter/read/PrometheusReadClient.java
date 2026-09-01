@@ -407,13 +407,20 @@ public final class PrometheusReadClient {
 
     private String executeGet(String url) throws StorageException {
         Request.Builder rb = new Request.Builder().url(url).get();
-        if (config.hasBasicAuth()) {
+        // Each branch gates on a COMPLETE block — this constructor never calls
+        // validate(), so these guards are the only thing standing between a
+        // half-configured file and a garbage credential on the wire.
+        if (config.canEmitBasicAuthHeader()) {
             String creds = config.getBasicUsername() + ":" + config.getBasicPassword();
             rb.addHeader("Authorization", "Basic "
                 + java.util.Base64.getEncoder()
                     .encodeToString(creds.getBytes(StandardCharsets.UTF_8)));
         } else if (config.hasBearerAuth()) {
             rb.addHeader("Authorization", "Bearer " + config.getBearerToken());
+        } else if (config.canEmitAuthorizationHeader()) {
+            // Same emission as the write path — Zero-Trust gateways gate both.
+            rb.addHeader("Authorization", config.getAuthorizationType()
+                + " " + config.getAuthorizationCredentials());
         }
         if (config.hasTenant()) {
             rb.addHeader("X-Scope-OrgID", config.getTenantOrgId());

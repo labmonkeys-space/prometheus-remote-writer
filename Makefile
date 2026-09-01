@@ -189,8 +189,8 @@ smoke: kar ## Run e2e smoke against BACKENDS (defaults exclude sentinel; SMOKE_T
 	    gate_ok=1; \
 	    if [ "$$gate_check" = 1 ]; then \
 	        echo "=== [$$backend] verifying the auth gate actually gates ==="; \
-	        naked=$$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:8081/api/v1/query?query=up" 2>/dev/null || echo 000); \
-	        tokened=$$(curl -s -o /dev/null -w '%{http_code}' -H 'X-Smoke-Token: s3cr3t-smoke' -H 'X-Smoke-Instance: e2e-headers' "http://localhost:8081/api/v1/query?query=up" 2>/dev/null || echo 000); \
+	        naked=$$(curl -s --noproxy '*' -o /dev/null -w '%{http_code}' "http://127.0.0.1:8081/api/v1/query?query=up" 2>/dev/null || echo 000); \
+	        tokened=$$(curl -s --noproxy '*' -o /dev/null -w '%{http_code}' -H 'X-Smoke-Token: s3cr3t-smoke' -H 'X-Smoke-Instance: e2e-headers' -H 'Authorization: Token s3cr3t-smoke' "http://127.0.0.1:8081/api/v1/query?query=up" 2>/dev/null || echo 000); \
 	        if [ "$$naked" != "403" ]; then \
 	            echo "=== [$$backend] FAIL (gate): returned $$naked without the header, expected 403 — the gate is open, so any samples prove nothing ===" >&2; \
 	            gate_ok=0; \
@@ -198,7 +198,7 @@ smoke: kar ## Run e2e smoke against BACKENDS (defaults exclude sentinel; SMOKE_T
 	            echo "=== [$$backend] FAIL (gate): returned $$tokened WITH the header, expected 200 — the gate is broken, not the plugin ===" >&2; \
 	            gate_ok=0; \
 	        else \
-	            echo "=== [$$backend] PASS (gate): 403 without X-Smoke-Token, 200 with it ==="; \
+	            echo "=== [$$backend] PASS (gate): 403 without them, 200 with X-Smoke-Token + X-Smoke-Instance + Authorization ==="; \
 	        fi; \
 	        echo "=== [$$backend] checking the plugin's writes actually traversed the gate ==="; \
 	        if ! grep -Eq '^[[:space:]]*write\.url[[:space:]]*=[[:space:]]*http://authgate:8080' "$$plugin_cfg"; then \
@@ -206,10 +206,10 @@ smoke: kar ## Run e2e smoke against BACKENDS (defaults exclude sentinel; SMOKE_T
 	            gate_ok=0; \
 	        else \
 	            docker compose -f "$$file" logs authgate >"$$keydir/gate.log" 2>/dev/null || true; \
-	            if grep -Eq '"POST /api/v1/write [^"]*" -> 2[0-9][0-9] x-smoke-token=\[s3cr3t-smoke\] x-smoke-instance=\[e2e-headers\]' "$$keydir/gate.log"; then \
-	                echo "=== [$$backend] PASS (traversal): the gate logged an accepted POST /api/v1/write carrying both operator headers ==="; \
+	            if grep -Eq '"POST /api/v1/write [^"]*" -> 2[0-9][0-9] x-smoke-token=\[s3cr3t-smoke\] x-smoke-instance=\[e2e-headers\] authorization=\[Token s3cr3t-smoke\]' "$$keydir/gate.log"; then \
+	                echo "=== [$$backend] PASS (traversal): the gate logged an accepted POST /api/v1/write carrying both operator headers AND Authorization: Token ==="; \
 	            else \
-	                echo "=== [$$backend] FAIL (traversal): no accepted write carrying both operator headers in the gate access log ===" >&2; \
+	                echo "=== [$$backend] FAIL (traversal): no accepted write carrying both operator headers and Authorization: Token in the gate access log ===" >&2; \
 	                grep "api/v1/write" "$$keydir/gate.log" | tail -5 >&2 || true; \
 	                gate_ok=0; \
 	            fi; \

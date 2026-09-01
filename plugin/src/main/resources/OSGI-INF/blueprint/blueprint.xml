@@ -28,6 +28,8 @@
             <cm:property name="auth.basic.username" value=""/>
             <cm:property name="auth.basic.password" value=""/>
             <cm:property name="auth.bearer.token"   value=""/>
+            <cm:property name="auth.authorization.type"        value=""/>
+            <cm:property name="auth.authorization.credentials" value=""/>
             <cm:property name="tenant.org-id"       value=""/>
             <!-- TLS -->
             <cm:property name="tls.ca-file"               value=""/>
@@ -94,6 +96,8 @@
         <property name="basicUsername"           value="${auth.basic.username}"/>
         <property name="basicPassword"           value="${auth.basic.password}"/>
         <property name="bearerToken"             value="${auth.bearer.token}"/>
+        <property name="authorizationType"        value="${auth.authorization.type}"/>
+        <property name="authorizationCredentials" value="${auth.authorization.credentials}"/>
         <property name="tenantOrgId"             value="${tenant.org-id}"/>
         <property name="tlsCaFile"               value="${tls.ca-file}"/>
         <property name="tlsInsecureSkipVerify"   value="${tls.insecure-skip-verify}"/>

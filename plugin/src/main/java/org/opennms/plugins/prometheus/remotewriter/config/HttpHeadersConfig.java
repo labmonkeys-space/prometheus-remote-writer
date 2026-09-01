@@ -502,8 +502,11 @@ public final class HttpHeadersConfig {
         if (RESERVED_MANAGED.contains(lower)) {
             String pointer = switch (lower) {
                 case "authorization" ->
-                    "use auth.basic.username + auth.basic.password, or "
-                    + "auth.bearer.token, instead";
+                    "use auth.basic.username + auth.basic.password, "
+                    + "auth.bearer.token, or — for a non-standard scheme "
+                    + "keyword such as Token or ApiKey — "
+                    + "auth.authorization.type + auth.authorization.credentials, "
+                    + "instead";
                 case "proxy-authorization" ->
                     "the plugin does not proxy-authenticate; configure the "
                     + "proxy credentials on the proxy itself";

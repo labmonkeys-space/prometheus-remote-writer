@@ -15,6 +15,8 @@ import java.util.List;
 import java.util.Map;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 class PrometheusRemoteWriterConfigTest {
 
@@ -232,6 +234,439 @@ class PrometheusRemoteWriterConfigTest {
         assertThatCode(c::validate).doesNotThrowAnyException();
         assertThat(c.hasBearerAuth()).isTrue();
         assertThat(c.hasBasicAuth()).isFalse();
+    }
+
+    // ---------- auth.authorization.* (custom schemes) ------------------------
+
+    @Test
+    void custom_authorization_scheme_alone_is_accepted() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setAuthorizationType("Token");
+        c.setAuthorizationCredentials("abc123");
+        assertThatCode(c::validate).doesNotThrowAnyException();
+        assertThat(c.canEmitAuthorizationHeader()).isTrue();
+        assertThat(c.hasBasicAuth()).isFalse();
+        assertThat(c.hasBearerAuth()).isFalse();
+        assertThat(c.getAuthorizationType()).isEqualTo("Token");
+    }
+
+    @Test
+    void authorization_type_preserves_operator_casing() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setAuthorizationType("ApiKey");
+        c.setAuthorizationCredentials("abc123");
+        assertThatCode(c::validate).doesNotThrowAnyException();
+        assertThat(c.getAuthorizationType()).isEqualTo("ApiKey");
+    }
+
+    @Test
+    void authorization_type_is_trimmed_but_not_otherwise_normalised() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setAuthorizationType("  Token  ");
+        c.setAuthorizationCredentials("abc123");
+        assertThatCode(c::validate).doesNotThrowAnyException();
+        assertThat(c.getAuthorizationType()).isEqualTo("Token");
+    }
+
+    @Test
+    void authorization_type_is_required_when_credentials_are_set() {
+        // There is deliberately NO Bearer default. With one, a typo'd
+        // 'type = ${env:TYPO}' resolves to empty, Bearer substitutes, and the
+        // plugin sends 'Bearer <token>' to a backend expecting
+        // 'Token <token>' — 401 forever, clean startup, and a log line
+        // claiming authentication is configured.
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setAuthorizationCredentials("abc123");
+        assertThatThrownBy(c::validate)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("auth.authorization.type is required")
+            // Must point a plain-bearer user at the key that serves them.
+            .hasMessageContaining("auth.bearer.token")
+            .hasMessageNotContaining("abc123");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = { "basic", "Basic", "BASIC", "BaSiC" })
+    void authorization_type_basic_is_rejected_in_any_casing(String scheme) {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setAuthorizationType(scheme);
+        c.setAuthorizationCredentials("abc123");
+        assertThatThrownBy(c::validate)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("auth.basic.username")
+            .hasMessageContaining("auth.basic.password");
+    }
+
+    @Test
+    void authorization_credentials_are_required_when_type_is_set() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setAuthorizationType("Token");
+        assertThatThrownBy(c::validate)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("auth.authorization.credentials");
+    }
+
+    @Test
+    void authorization_and_bearer_are_mutually_exclusive() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setAuthorizationType("Token");
+        c.setAuthorizationCredentials("abc123");
+        c.setBearerToken("tok");
+        assertThatThrownBy(c::validate)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("mutually exclusive")
+            .hasMessageContaining("auth.basic.*")
+            .hasMessageContaining("auth.bearer.token")
+            .hasMessageContaining("auth.authorization.*");
+    }
+
+    @Test
+    void authorization_and_basic_are_mutually_exclusive() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setAuthorizationType("Token");
+        c.setAuthorizationCredentials("abc123");
+        c.setBasicUsername("u");
+        c.setBasicPassword("p");
+        assertThatThrownBy(c::validate)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("mutually exclusive")
+            .hasMessageContaining("auth.basic.*")
+            .hasMessageContaining("auth.bearer.token")
+            .hasMessageContaining("auth.authorization.*");
+    }
+
+    @Test
+    void no_auth_configured_at_all_is_accepted() {
+        PrometheusRemoteWriterConfig c = minimal();
+        assertThatCode(c::validate).doesNotThrowAnyException();
+        assertThat(c.hasBasicAuth()).isFalse();
+        assertThat(c.hasBearerAuth()).isFalse();
+        assertThat(c.hasAnyAuthorizationField()).isFalse();
+    }
+
+    @Test
+    void blank_authorization_halves_read_as_not_configured() {
+        // The documented silent-degradation case: both halves resolve empty
+        // (e.g. two typo'd ${env:} references), which is indistinguishable
+        // from "not configured". The plugin must start and send nothing —
+        // not fail the credentials-required check on a block nobody used.
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setAuthorizationType("");
+        c.setAuthorizationCredentials("   ");
+        assertThatCode(c::validate).doesNotThrowAnyException();
+        assertThat(c.hasAnyAuthorizationField()).isFalse();
+        assertThat(c.canEmitAuthorizationHeader()).isFalse();
+    }
+
+    @Test
+    void explicit_bearer_type_is_accepted_and_equivalent_to_bearer_token() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setAuthorizationType("Bearer");
+        c.setAuthorizationCredentials("tok");
+        assertThatCode(c::validate).doesNotThrowAnyException();
+        assertThat(c.getAuthorizationType()).isEqualTo("Bearer");
+        // Same emitted header as auth.bearer.token = tok, by construction:
+        // both produce "Bearer tok". Asserted end-to-end in the two client
+        // test suites.
+        assertThat(c.hasBearerAuth()).isFalse();
+    }
+
+    @Test
+    void explicit_bearer_type_still_clashes_with_bearer_token() {
+        // "Equivalent to" must not be read as "composes with".
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setAuthorizationType("Bearer");
+        c.setAuthorizationCredentials("tok");
+        c.setBearerToken("tok");
+        assertThatThrownBy(c::validate)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("mutually exclusive");
+    }
+
+    @Test
+    void exclusivity_error_names_the_blocks_actually_configured() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setBearerToken("tok");
+        c.setAuthorizationType("Token");
+        c.setAuthorizationCredentials("abc123");
+        // Names the offending two; must not claim auth.basic.* was set.
+        assertThatThrownBy(c::validate)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("Configured: auth.bearer.token and auth.authorization.*");
+    }
+
+    @Test
+    void type_only_block_cannot_emit_a_header() {
+        // validate() rejects this, but PrometheusReadClient's constructor never
+        // validates — so the guard the emitters branch on must hold on its own.
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setAuthorizationType("Token");
+        assertThat(c.hasAnyAuthorizationField()).isTrue();
+        assertThat(c.canEmitAuthorizationHeader()).isFalse();
+    }
+
+    // ---------- auth.authorization.* header safety ---------------------------
+
+    @ParameterizedTest
+    @ValueSource(strings = { "Tok\ren", "Tok\nen", "Token\r\nX-Evil: 1" })
+    void authorization_type_rejects_cr_and_lf(String bad) {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setAuthorizationType(bad);
+        c.setAuthorizationCredentials("abc123");
+        assertThatThrownBy(c::validate)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("auth.authorization.type")
+            .hasMessageContaining("CR or LF")
+            // Never echo the value.
+            .hasMessageNotContaining(bad);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = { "abc\r123", "abc\n123", "abc\r\nX-Evil: 1" })
+    void authorization_credentials_reject_cr_and_lf(String bad) {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setAuthorizationType("Token");
+        c.setAuthorizationCredentials(bad);
+        assertThatThrownBy(c::validate)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("auth.authorization.credentials")
+            .hasMessageContaining("CR or LF")
+            .hasMessageNotContaining(bad);
+    }
+
+    @Test
+    void authorization_credentials_reject_non_ascii() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setAuthorizationType("Token");
+        c.setAuthorizationCredentials("abcé123");
+        assertThatThrownBy(c::validate)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("auth.authorization.credentials")
+            .hasMessageContaining("non-printable or non-ASCII")
+            .hasMessageNotContaining("abcé123");
+    }
+
+    @Test
+    void authorization_credentials_reject_non_printable_control_byte() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setAuthorizationType("Token");
+        c.setAuthorizationCredentials("abc" + (char) 0x07 + "123");
+        assertThatThrownBy(c::validate)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("auth.authorization.credentials")
+            .hasMessageContaining("non-printable or non-ASCII");
+    }
+
+    @Test
+    void authorization_credentials_allow_space_for_parameterised_schemes() {
+        // Some schemes carry a parameter list. SP stays legal in the
+        // credentials half, exactly as it is for http.headers.* values.
+        // Deliberately not Digest — the docs classify challenge-response
+        // schemes as out of scope, so using one as the positive example here
+        // would contradict them.
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setAuthorizationType("AWS4-HMAC-SHA256");
+        c.setAuthorizationCredentials("Credential=AKIAEXAMPLE/20260101, Signature=abc123");
+        assertThatCode(c::validate).doesNotThrowAnyException();
+    }
+
+    @Test
+    void authorization_credentials_allow_horizontal_tab() {
+        // HT is legal in an HTTP field value and the sibling http.headers.*
+        // validator allows it; the boundary is asserted rather than assumed.
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setAuthorizationType("Token");
+        c.setAuthorizationCredentials("abc\t123");
+        assertThatCode(c::validate).doesNotThrowAnyException();
+        assertThat(c.getAuthorizationCredentials()).isEqualTo("abc\t123");
+    }
+
+    @Test
+    void authorization_credentials_reject_del_the_exact_upper_boundary() {
+        // 0x7F is the first byte above the printable range and the byte OkHttp
+        // itself rejects — the exact edge of the `> 0x7E` test.
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setAuthorizationType("Token");
+        c.setAuthorizationCredentials("abc" + (char) 0x7F + "123");
+        assertThatThrownBy(c::validate)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("auth.authorization.credentials")
+            .hasMessageContaining("non-printable or non-ASCII");
+    }
+
+    @Test
+    void authorization_credentials_accept_tilde_the_last_printable_byte() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setAuthorizationType("Token");
+        c.setAuthorizationCredentials("abc~123");   // 0x7E, must be accepted
+        assertThatCode(c::validate).doesNotThrowAnyException();
+    }
+
+    @Test
+    void trailing_newline_in_credentials_is_trimmed_and_accepted() {
+        // The realistic $[secret:name] case: the file ends with a newline.
+        // blankToNull strips it before validate() runs, so it is accepted and
+        // the trimmed value is what goes on the wire. Only an INTERIOR CR/LF
+        // reaches the guard — the troubleshooting docs must say so.
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setAuthorizationType("Token");
+        c.setAuthorizationCredentials("abc123\n");
+        assertThatCode(c::validate).doesNotThrowAnyException();
+        assertThat(c.getAuthorizationCredentials()).isEqualTo("abc123");
+    }
+
+    // ---------- header safety on the sibling auth keys ------------------------
+    //
+    // auth.bearer.token and tenant.org-id are emitted into headers RAW, exactly
+    // like auth.authorization.*, so they need the identical guard. Without it
+    // the very failure this feature's guard prevents stays reachable through
+    // the key the docs call "equivalent".
+
+    @ParameterizedTest
+    @ValueSource(strings = { "tok\ren", "tok\nen", "tok\r\nX-Evil: 1" })
+    void bearer_token_rejects_cr_and_lf(String bad) {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setBearerToken(bad);
+        assertThatThrownBy(c::validate)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("auth.bearer.token")
+            .hasMessageContaining("CR or LF")
+            .hasMessageNotContaining(bad);
+    }
+
+    @Test
+    void bearer_token_rejects_non_ascii() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setBearerToken("tokén");
+        assertThatThrownBy(c::validate)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("auth.bearer.token")
+            .hasMessageContaining("non-printable or non-ASCII")
+            .hasMessageNotContaining("tokén");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = { "team\ra", "team\na", "team\r\nX-Evil: 1" })
+    void tenant_org_id_rejects_cr_and_lf(String bad) {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setTenantOrgId(bad);
+        assertThatThrownBy(c::validate)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("tenant.org-id")
+            .hasMessageContaining("CR or LF")
+            .hasMessageNotContaining(bad);
+    }
+
+    @Test
+    void tenant_org_id_rejects_non_ascii() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setTenantOrgId("téam");
+        assertThatThrownBy(c::validate)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("tenant.org-id")
+            .hasMessageContaining("non-printable or non-ASCII");
+    }
+
+    @Test
+    void basic_credentials_may_contain_non_ascii() {
+        // Deliberately NOT guarded: both halves are base64-encoded before they
+        // reach the header, so no byte of them can reach addHeader raw, and
+        // RFC 7617 permits UTF-8 in Basic credentials. Guarding them would
+        // reject working configurations to prevent a failure that cannot
+        // occur. This test pins that decision.
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setBasicUsername("üser");
+        c.setBasicPassword("päss-with-ümlauts");
+        assertThatCode(c::validate).doesNotThrowAnyException();
+    }
+
+    // ---------- emission guards on a complete block --------------------------
+
+    @Test
+    void username_only_config_cannot_emit_a_basic_header() {
+        // hasBasicAuth() is either-half; the emission gate must not be.
+        // Without the distinction an unvalidated username-only config sends
+        // base64 of "u:null" as a credential.
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setBasicUsername("u");
+        assertThat(c.hasBasicAuth()).isTrue();
+        assertThat(c.canEmitBasicAuthHeader()).isFalse();
+    }
+
+    @Test
+    void credentials_only_config_cannot_emit_an_authorization_header() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setAuthorizationCredentials("abc123");
+        assertThat(c.hasAnyAuthorizationField()).isTrue();
+        assertThat(c.canEmitAuthorizationHeader()).isFalse();
+    }
+
+    @Test
+    void all_three_auth_blocks_at_once_names_all_three() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setBasicUsername("u");
+        c.setBasicPassword("p");
+        c.setBearerToken("tok");
+        c.setAuthorizationType("Token");
+        c.setAuthorizationCredentials("abc123");
+        assertThatThrownBy(c::validate)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining(
+                "Configured: auth.basic.* and auth.bearer.token and auth.authorization.*");
+    }
+
+    @Test
+    void incomplete_block_reports_its_own_missing_key_not_exclusivity() {
+        // Ordering contract: a type-only authorization block alongside another
+        // auth block must report the missing credentials, not a collision it
+        // only appears to have. The exclusivity message would send the
+        // operator to delete the wrong thing.
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setAuthorizationType("Token");   // credentials missing
+        c.setBearerToken("tok");
+        assertThatThrownBy(c::validate)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("auth.authorization.credentials is required")
+            .hasMessageNotContaining("mutually exclusive");
+    }
+
+    @Test
+    void authorization_type_rejects_interior_whitespace() {
+        // The plausible misreading: operator puts the whole header value in
+        // the type key, which would otherwise emit
+        // "Authorization: Token abc123 <credentials>".
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setAuthorizationType("Token abc123");
+        c.setAuthorizationCredentials("abc123");
+        assertThatThrownBy(c::validate)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("auth.authorization.type")
+            .hasMessageContaining("whitespace")
+            .hasMessageContaining("auth.authorization.credentials")
+            .hasMessageNotContaining("Token abc123");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = { "To:ken", "To ken", "To\tken", "Tok(en)", "Tokén", "Tok\"en\"" })
+    void authorization_type_rejects_non_token_characters(String bad) {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setAuthorizationType(bad);
+        c.setAuthorizationCredentials("abc123");
+        assertThatThrownBy(c::validate)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("auth.authorization.type");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = { "Token", "ApiKey", "Bearer", "GenieKey", "SSWS", "X-Custom_1.0", "a+b~c" })
+    void authorization_type_accepts_any_legal_scheme_keyword(String good) {
+        // The token check must reject no legitimate keyword — it is a safety
+        // rule, not an allowlist. Registered and unregistered alike pass.
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setAuthorizationType(good);
+        c.setAuthorizationCredentials("abc123");
+        assertThatCode(c::validate).doesNotThrowAnyException();
+        assertThat(c.getAuthorizationType()).isEqualTo(good);
     }
 
     // ---------- numeric bounds ----------------------------------------------
@@ -825,11 +1260,19 @@ class PrometheusRemoteWriterConfigTest {
         after.setBasicUsername("u");
         after.setBasicPassword("hunter2");
         after.setBearerToken("dont-leak-me");
+        after.setAuthorizationType("Token");
+        after.setAuthorizationCredentials("dont-leak-me-either");
 
         List<String> lines = after.diff(before);
         assertThat(lines).anyMatch(l -> l.contains("auth.basic.password"));
         assertThat(lines).noneMatch(l -> l.contains("hunter2"));
         assertThat(lines).noneMatch(l -> l.contains("dont-leak-me"));
+        // The scheme keyword is not a secret — it shows in the clear so an
+        // operator can see a hot-reload actually changed it.
+        assertThat(lines).anyMatch(l -> l.contains("auth.authorization.type")
+                                     && l.contains("Token"));
+        assertThat(lines).anyMatch(l -> l.contains("auth.authorization.credentials"));
+        assertThat(lines).noneMatch(l -> l.contains("dont-leak-me-either"));
     }
 
     @Test

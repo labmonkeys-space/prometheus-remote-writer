@@ -236,6 +236,12 @@ class HttpHeadersConfigTest {
             .hasMessageContaining("Authorization")
             .hasMessageContaining("auth.basic")
             .hasMessageContaining("auth.bearer.token")
+            // This message is the only discovery path for the custom-scheme
+            // block: an operator reaching for http.headers.Authorization is
+            // exactly the operator who needs auth.authorization.*. The docs
+            // promise it points there, so pin both halves by name.
+            .hasMessageContaining("auth.authorization.type")
+            .hasMessageContaining("auth.authorization.credentials")
             // Secret hygiene: the offending value must NOT appear in the
             // message — a misconfigured operator's bearer would otherwise
             // leak to the Karaf log.
