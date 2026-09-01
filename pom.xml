@@ -17,6 +17,18 @@
     </description>
     <url>https://github.com/labmonkeys-space/prometheus-remote-writer</url>
 
+    <!--
+        cyclonedx-maven-plugin maps this to each component's `publisher` field
+        in the SBOM. Without it the modules carry no originator at all, and
+        SBOM tooling falls back to the Maven groupId (`org.opennms.plugins`),
+        which names a namespace rather than whoever publishes the artifact.
+        Inherited by every module.
+    -->
+    <organization>
+        <name>No42 (ronny@no42.org)</name>
+        <url>https://no42.org</url>
+    </organization>
+
     <licenses>
         <license>
             <name>The Apache License, Version 2.0</name>

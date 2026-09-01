@@ -20,6 +20,19 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **SBOM components now declare an originator.** The POM gained a project-level
+  `<organization>` (`No42 (ronny@no42.org)`), which `cyclonedx-maven-plugin`
+  maps to each component's `publisher` field. The plugin's own modules
+  previously declared no originator at all, so SBOM tooling fell back to the
+  Maven groupId and attributed them to `org.opennms.plugins`, a namespace
+  rather than a publisher. Third-party dependencies were unaffected and still
+  carry their own publishers.
+
+  Side effect worth knowing: `<organization>` also feeds `Bundle-Vendor`, so
+  the OSGi bundles now carry `Bundle-Vendor: No42 (ronny@no42.org)` where they
+  previously had no vendor header. It is informational only, visible in Karaf
+  `bundle:info`, and does not affect resolution or wiring.
+
 - **Release notes are curated rather than a CHANGELOG dump.** `release.yml`
   now prefers `docs/release-notes/<tag>.md` when it exists and falls back to
   the `## [X.Y.Z]` CHANGELOG section otherwise, so releases without a curated
