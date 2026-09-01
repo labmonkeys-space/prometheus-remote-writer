@@ -15,7 +15,7 @@ GitHub-registered GPG keys, builds the KAR, extracts the matching section from
 `CHANGELOG.md`, attests the artifacts via Sigstore, and creates a GitHub
 Release with the KAR (versioned plus a stable-name
 `prometheus-remote-writer.kar` alias for `releases/latest/download/` URLs)
-and SBOM attached. Prerelease tags (e.g. `v1.0.0-rc1`) are marked as
+SBOM and SBOM HTML report attached. Prerelease tags (e.g. `v1.0.0-rc1`) are marked as
 prereleases and never become `latest`.
 
 Tags follow [SemVer](https://semver.org): `vMAJOR.MINOR.PATCH` (`v0.1.0`,
@@ -31,7 +31,7 @@ project GPG key. Two distinct trust paths cover the release:
    The canonical trust path for verifiers is `https://github.com/<maintainer>.gpg`,
    which returns every key the maintainer has ever registered on the
    profile (active + historical).
-2. **The release artifacts (KAR, SBOM)** are signed in CI via Sigstore
+2. **The release artifacts (KAR, SBOM, SBOM report)** are signed in CI via Sigstore
    using GitHub Artifact Attestations. The signature is bound to the
    workflow run's OIDC token — no long-lived key, nothing for a repo-admin
    compromise to ex-filtrate.
@@ -165,8 +165,9 @@ Pushing the tag triggers `.github/workflows/release.yml`:
 - Builds the KAR via `make kar`; generates the SBOM via `make sbom`.
 - Resolves the release body (see "Release notes" below): `docs/release-notes/v0.4.4.md`
   if it exists, otherwise the `## [0.4.4]` section of `CHANGELOG.md`.
-- Produces SLSA Build Provenance attestations (one for the KAR, one for the SBOM) via Sigstore.
-- Creates a GitHub Release named `v0.4.4` with the KAR and SBOM attached as assets.
+- Renders the SBOM to a self-contained HTML report via the pinned `no42-org/blitsbom` action.
+- Produces SLSA Build Provenance attestations (KAR, SBOM, SBOM report) via Sigstore.
+- Creates a GitHub Release named `v0.4.4` with the KAR, SBOM and SBOM report attached as assets.
 
 Watch the run:
 
@@ -266,7 +267,8 @@ For a patch release (e.g. `v0.4.5`) on top of `v0.4.4`:
 | `prometheus-remote-writer-kar-<version>.kar` | GitHub Release asset | Download and install via Karaf `kar:install <path>`. Verify with `gh attestation verify` — see "Verifying a release" below. |
 | `prometheus-remote-writer.kar` | GitHub Release asset | Stable-name alias of the versioned KAR (same bytes, same SHA-256, so the same attestation verifies it). Exists so `releases/latest/download/prometheus-remote-writer.kar` — the README install URL — keeps working across releases. |
 | `prometheus-remote-writer-<version>.cdx.json` | GitHub Release asset | CycloneDX 1.6 SBOM (aggregate across the full Maven reactor); fed to Trivy / Grype / Dependency-Track / FOSSA-style consumers. Generate locally with `make sbom`. Verify with `gh attestation verify`. |
-| Build provenance attestations | <https://github.com/labmonkeys-space/prometheus-remote-writer/attestations> | One per artifact (KAR + SBOM). SLSA Build Provenance signed by Sigstore via GitHub Actions OIDC. Fetched server-side by `gh attestation verify`; not a downloadable release asset. |
+| `prometheus-remote-writer-<version>-sbom.html` | GitHub Release asset | Self-contained HTML report rendered from the same CycloneDX SBOM by [blitsbom](https://github.com/no42-org/blitsbom). Open it in a browser to read components and licences without installing tooling; it needs no network at view time. Verify with `gh attestation verify`. |
+| Build provenance attestations | <https://github.com/labmonkeys-space/prometheus-remote-writer/attestations> | One per artifact (KAR, SBOM, SBOM report). SLSA Build Provenance signed by Sigstore via GitHub Actions OIDC. Fetched server-side by `gh attestation verify`; not a downloadable release asset. |
 | `prometheus-remote-writer-<version>.jar` (bundle) | Not auto-published | Planned. The repo's migration to `labmonkeys-space` is done; remaining decision is the Maven-repo target (Central via Sonatype, GitHub Packages, or a private Nexus). When Maven Central publication lands, the maintainer's personal GPG key serves as the Central PGP identity (a common pattern for single-maintainer projects). |
 | `prometheus-remote-writer-features-<version>-features.xml` | Not auto-published | Same as above — consumed via `feature:repo-add mvn:…/xml/features` when a Maven repo is available. |
 

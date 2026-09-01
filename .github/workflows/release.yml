@@ -225,6 +225,29 @@ jobs:
           cp target/bom.json "$SBOM"
           echo "path=$SBOM" >> "$GITHUB_OUTPUT"
 
+      - name: Render SBOM HTML report
+        # A self-contained HTML view of the same CycloneDX SBOM, attached
+        # alongside the raw JSON so components and licences can be read
+        # without installing tooling. No network at view time.
+        #
+        # The action is a composite that runs
+        # ghcr.io/no42-org/blitsbom:report-<version> under Docker. Pinning
+        # it by SHA still selects a version-matched generator: for a SHA ref
+        # the action reads the version from its own package.json at that
+        # commit, rather than falling back to the mutable main-tip
+        # :report-rc image.
+        id: sbom-html
+        uses: no42-org/blitsbom@2340603607fe7154085ec12301d8056da2918ac1  # v0.8.1
+        with:
+          sbom: ${{ steps.sbom.outputs.path }}
+          output: prometheus-remote-writer-${{ steps.resolve.outputs.version }}-sbom.html
+          # Both passed explicitly rather than left to the action's defaults,
+          # which derive from the ref. On the workflow_dispatch re-run path
+          # github.ref_name is a branch rather than the tag, and the report
+          # would silently fall back to the version recorded inside the SBOM.
+          project: prometheus-remote-writer
+          version: ${{ steps.resolve.outputs.version }}
+
       - name: Attest KAR build provenance
         # SLSA Build Provenance attestation for the KAR. Signed by
         # Sigstore using a Fulcio-issued ephemeral certificate bound to
@@ -236,16 +259,25 @@ jobs:
           subject-path: ${{ steps.kar.outputs.path }}
 
       - name: Attest SBOM build provenance
-        # Same treatment for the SBOM. Two attestations, one per
-        # release artifact — verifiers run `gh attestation verify`
-        # against each downloaded file independently.
+        # Same treatment for the SBOM. One attestation per release
+        # artifact — verifiers run `gh attestation verify` against each
+        # downloaded file independently.
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
         with:
           subject-path: ${{ steps.sbom.outputs.path }}
 
+      - name: Attest SBOM report build provenance
+        # The HTML report is a published release asset like any other, so
+        # it carries provenance too. Without it the one asset a human is
+        # most likely to open in a browser would be the only one whose
+        # origin cannot be checked.
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
+        with:
+          subject-path: ${{ steps.sbom-html.outputs.report }}
+
       - name: Create GitHub Release
-        # Three assets: the versioned KAR, its stable-name alias, and the
-        # SBOM. Authenticity is verified via the build provenance
+        # Four assets: the versioned KAR, its stable-name alias, the SBOM
+        # and its HTML report. Authenticity is verified via the build provenance
         # attestations, fetched server-side by `gh attestation verify`.
         # No .asc / KEYS / checksum files — the attestation encodes the
         # artifact's SHA-256 and binds it to this workflow's OIDC identity.
@@ -254,6 +286,7 @@ jobs:
           TAG: ${{ steps.resolve.outputs.tag }}
           KAR: ${{ steps.kar.outputs.path }}
           SBOM: ${{ steps.sbom.outputs.path }}
+          SBOM_HTML: ${{ steps.sbom-html.outputs.report }}
           NOTES_FILE: ${{ steps.notes.outputs.notes-file }}
         run: |
           # The v*.*.* trigger glob also matches prerelease tags like
@@ -268,6 +301,7 @@ jobs:
             "$KAR"
             prometheus-remote-writer.kar
             "$SBOM"
+            "$SBOM_HTML"
           )
           if [ -n "$NOTES_FILE" ]; then
             gh release create "$TAG" \
