@@ -7,6 +7,8 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.1] — 2026-09-01
+
 ### Added
 
 - **SBOM HTML report attached to every release.** Releases now carry
@@ -1520,7 +1522,8 @@ Go sanitization rules.
 - Karaf feature `prometheus-remote-writer` shipping a pre-populated
   `etc/org.opennms.plugins.tss.prometheusremotewriter.cfg` on install.
 
-[Unreleased]: https://github.com/labmonkeys-space/prometheus-remote-writer/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/labmonkeys-space/prometheus-remote-writer/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/labmonkeys-space/prometheus-remote-writer/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/labmonkeys-space/prometheus-remote-writer/compare/v0.4.5...v0.5.0
 [0.4.5]: https://github.com/labmonkeys-space/prometheus-remote-writer/compare/v0.4.4...v0.4.5
 [0.4.4]: https://github.com/labmonkeys-space/prometheus-remote-writer/compare/v0.4.3...v0.4.4
