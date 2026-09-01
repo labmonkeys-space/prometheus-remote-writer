@@ -186,21 +186,45 @@ smoke: kar ## Run e2e smoke against BACKENDS (defaults exclude sentinel; SMOKE_T
 	            echo "=== [$$backend] PASS (label-bound): $$label_count distinct label names <= $(SMOKE_LABEL_BOUND) ==="; \
 	        fi; \
 	    fi; \
-	    if [ "$$ok" = 1 ] && [ "$$gate_check" = 1 ]; then \
+	    gate_ok=1; \
+	    if [ "$$gate_check" = 1 ]; then \
 	        echo "=== [$$backend] verifying the auth gate actually gates ==="; \
 	        naked=$$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:8081/api/v1/query?query=up" 2>/dev/null || echo 000); \
-	        tokened=$$(curl -s -o /dev/null -w '%{http_code}' -H 'X-Smoke-Token: s3cr3t-smoke' "http://localhost:8081/api/v1/query?query=up" 2>/dev/null || echo 000); \
+	        tokened=$$(curl -s -o /dev/null -w '%{http_code}' -H 'X-Smoke-Token: s3cr3t-smoke' -H 'X-Smoke-Instance: e2e-headers' "http://localhost:8081/api/v1/query?query=up" 2>/dev/null || echo 000); \
 	        if [ "$$naked" != "403" ]; then \
-	            echo "=== [$$backend] FAIL: gate returned $$naked without the header, expected 403 — the samples above prove nothing ===" >&2; \
-	            labels_ok=0; \
+	            echo "=== [$$backend] FAIL (gate): returned $$naked without the header, expected 403 — the gate is open, so any samples prove nothing ===" >&2; \
+	            gate_ok=0; \
 	        elif [ "$$tokened" != "200" ]; then \
-	            echo "=== [$$backend] FAIL: gate returned $$tokened WITH the header, expected 200 — gate is broken, not the plugin ===" >&2; \
-	            labels_ok=0; \
+	            echo "=== [$$backend] FAIL (gate): returned $$tokened WITH the header, expected 200 — the gate is broken, not the plugin ===" >&2; \
+	            gate_ok=0; \
 	        else \
-	            echo "=== [$$backend] PASS (gate): 403 without X-Smoke-Token, 200 with it — so the $$count series above could only arrive via http.headers.* ==="; \
-	            echo "=== [$$backend] PASS (co-activation): write.url came from <cm:property-placeholder> and the header from <cm:cm-properties>, so both beans took the same PID ==="; \
+	            echo "=== [$$backend] PASS (gate): 403 without X-Smoke-Token, 200 with it ==="; \
+	        fi; \
+	        echo "=== [$$backend] checking the plugin's writes actually traversed the gate ==="; \
+	        if ! grep -Eq '^[[:space:]]*write\.url[[:space:]]*=[[:space:]]*http://authgate:8080' "$$plugin_cfg"; then \
+	            echo "=== [$$backend] FAIL (gate): $$plugin_cfg write.url does not point at the gate — the run would prove nothing about http.headers.* ===" >&2; \
+	            gate_ok=0; \
+	        else \
+	            docker compose -f "$$file" logs authgate >"$$keydir/gate.log" 2>/dev/null || true; \
+	            if grep -Eq '"POST /api/v1/write [^"]*" -> 2[0-9][0-9] x-smoke-token=\[s3cr3t-smoke\] x-smoke-instance=\[e2e-headers\]' "$$keydir/gate.log"; then \
+	                echo "=== [$$backend] PASS (traversal): the gate logged an accepted POST /api/v1/write carrying both operator headers ==="; \
+	            else \
+	                echo "=== [$$backend] FAIL (traversal): no accepted write carrying both operator headers in the gate access log ===" >&2; \
+	                grep "api/v1/write" "$$keydir/gate.log" | tail -5 >&2 || true; \
+	                gate_ok=0; \
+	            fi; \
+	        fi; \
+	        echo "=== [$$backend] checking both config beans took the same PID ==="; \
+	        if docker compose -f "$$file" exec -T "$$log_container" grep -q "Custom HTTP headers attached" "$$log_path" 2>/dev/null; then \
+	            echo "=== [$$backend] PASS (co-activation): HttpHeadersConfig logged its activation, so <cm:cm-properties> resolved the same PID as the placeholder ==="; \
+	        elif [ "$$gate_ok" = 1 ]; then \
+	            echo "=== [$$backend] NOTE (co-activation): no activation line in karaf.log (log level may filter it); traversal above already proves delivery ==="; \
+	        else \
+	            echo "=== [$$backend] FAIL (co-activation): no activation line AND no proven traversal ===" >&2; \
+	            gate_ok=0; \
 	        fi; \
 	    fi; \
+	    if [ "$$gate_ok" = 0 ]; then labels_ok=0; fi; \
 	    if [ "$$ok" = 1 ] && [ "$$labels_ok" = 1 ]; then \
 	        if [ -n "$$discovery_query" ]; then \
 	            echo "=== [$$backend] probing /api/v1/label/resourceId/values ==="; \

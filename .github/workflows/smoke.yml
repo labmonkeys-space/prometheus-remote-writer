@@ -20,7 +20,18 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        backend: [prometheus, mimir, victoriametrics]
+        # Keep in sync with SMOKE_DEFAULT_BACKENDS in the Makefile. This list
+        # is hardcoded rather than derived, so a backend added there is NOT
+        # picked up here — `headers` was added to the Makefile default and
+        # silently never ran in CI until a review caught it.
+        #
+        # `headers` is the only gate that proves operator-configured HTTP
+        # headers reach the wire: it fronts the backend with a proxy that
+        # rejects any request lacking them, so samples land iff delivery
+        # worked. Unit tests provably cannot cover that — the feature shipped
+        # broken twice with the whole suite green — so this entry is the
+        # regression barrier, not a nice-to-have.
+        backend: [prometheus, mimir, victoriametrics, headers]
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1

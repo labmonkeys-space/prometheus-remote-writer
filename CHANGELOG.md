@@ -106,18 +106,18 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   value would leave the read client parsing compressed bytes as JSON.
 
   *Configuration delivery.* The property set arrives through Blueprint's
-  `<cm:cm-properties>`, which is resolved as a dependency before the beans
-  that consume it are instantiated. That ordering is load-bearing rather
-  than incidental. Two earlier wirings shipped in this change's history
-  looked correct and delivered nothing: `<cm:managed-properties
-  update-strategy="component-managed">` invokes its update-method on a
-  configuration *change* only, so a plugin that started with
-  `http.headers.*` already in the `.cfg` received no headers at all; and a
-  `ManagedService` registration is delivered by Configuration Admin only
-  after the service is registered, which Blueprint does after it has run
-  the storage bean's `init-method` and built the HTTP clients. Under both,
-  every request went out without the operator's headers while the entire
-  unit suite stayed green. The `headers` e2e backend now gates this.
+  `<cm:cm-properties>`, resolved before the beans that consume it are
+  instantiated. The plugin refuses to start if that delivery never happens,
+  so a wiring fault surfaces as a loud startup error rather than as requests
+  quietly missing their headers. The reasoning behind the mechanism is in
+  `blueprint.xml` and the `HttpHeadersConfig` javadoc.
+
+  *Undelivered configuration is treated as a fault, not as "no headers".*
+  An empty header set means the operator configured none; it must never be
+  the symptom of a wiring failure. The plugin now tracks whether the
+  configuration reached the bean at all and refuses to start when it did
+  not, naming the fault as a wiring problem rather than a configuration
+  mistake.
 
   *Invalid configuration leaves the plugin inert, not unauthenticated.*
   A rejected header set logs an `ERROR` and the storage declines to

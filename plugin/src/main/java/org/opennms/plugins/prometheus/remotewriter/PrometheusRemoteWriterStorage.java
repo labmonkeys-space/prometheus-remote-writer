@@ -180,16 +180,34 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
             return;
         }
 
-        // Same posture as the core-config check above, for the same reason.
-        // HttpHeadersConfig is a component-managed bean, so its validation
-        // exception lands on a ConfigAdmin dispatch thread and cannot abort
-        // activation on its own. Declining to activate here is what makes an
-        // invalid header set inert rather than silently unauthenticated: a
-        // typo'd gateway token must not degrade into requests that leave
-        // without it. We log and leave active == null (SPI calls are rejected
-        // in that state) rather than throwing, because a throw marks the
-        // Blueprint container permanently failed and the placeholder reload
-        // could not revive it from a corrected .cfg.
+        // Two separate header-config failures, both of which must stop the
+        // plugin serving rather than let it write without the operator's
+        // headers.
+        //
+        // First: was the configuration delivered at all? "Never delivered"
+        // and "operator configured no headers" both leave the header map
+        // empty, so without this check they are indistinguishable — and
+        // "never delivered" is precisely the state this plugin shipped in
+        // twice, under two different Blueprint wirings, with the whole unit
+        // suite green. A false here is a wiring regression, not operator
+        // error, so the message says so.
+        if (!httpHeadersConfig.isDelivered()) {
+            LOG.error("prometheus-remote-writer not started — the http.headers.* "
+                    + "configuration was never delivered to the plugin. This is a "
+                    + "wiring fault rather than a configuration mistake: the "
+                    + "Blueprint <cm:cm-properties> element for the plugin PID did "
+                    + "not reach HttpHeadersConfig.init(). Custom headers would be "
+                    + "silently absent from every request, so the plugin declines "
+                    + "to serve.");
+            return;
+        }
+
+        // Second: was what arrived valid? Same posture as the core-config
+        // check above, for the same reason. We log and leave active == null
+        // (SPI calls are rejected in that state) rather than throwing,
+        // because a throw marks the Blueprint container permanently failed
+        // and the placeholder reload could not revive it from a corrected
+        // .cfg.
         String headersError = httpHeadersConfig.validationError();
         if (headersError != null) {
             LOG.error("prometheus-remote-writer not started — invalid "

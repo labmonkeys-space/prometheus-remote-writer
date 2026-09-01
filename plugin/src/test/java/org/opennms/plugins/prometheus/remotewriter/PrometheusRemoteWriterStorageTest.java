@@ -27,8 +27,10 @@ import org.junit.jupiter.api.parallel.ExecutionMode;
 import org.junit.jupiter.api.parallel.Isolated;
 import org.opennms.integration.api.v1.timeseries.Aggregation;
 import org.opennms.integration.api.v1.timeseries.StorageException;
+import org.opennms.integration.api.v1.timeseries.TagMatcher;
 import org.opennms.integration.api.v1.timeseries.immutables.ImmutableMetric;
 import org.opennms.integration.api.v1.timeseries.immutables.ImmutableSample;
+import org.opennms.integration.api.v1.timeseries.immutables.ImmutableTagMatcher;
 import org.opennms.plugins.prometheus.remotewriter.config.HttpHeadersConfig;
 import org.opennms.plugins.prometheus.remotewriter.config.PrometheusRemoteWriterConfig;
 import org.opennms.plugins.prometheus.remotewriter.metrics.PluginMetrics;
@@ -368,6 +370,100 @@ class PrometheusRemoteWriterStorageTest {
             }
             assertThat(server.takeRequest().getHeader("cf-access-client-id"))
                 .isEqualTo("abc123");
+        }
+    }
+
+    /**
+     * The read half of the symmetric-application claim. Zero-Trust gateways
+     * gate both endpoints with the same credentials, so a write-only
+     * implementation 403s on every dashboard query — which the CHANGELOG
+     * calls out by name as "a hard bug to spot in production".
+     *
+     * <p>Without this, swapping {@code startQueueMode}'s read client for
+     * {@code HttpHeadersConfig.empty()} leaves the whole suite green:
+     * {@code BlueprintWiringTest} checks XML, {@code PrometheusReadClientTest}
+     * supplies its own header config, and the write test above only inspects
+     * the POST.
+     */
+    @Test
+    void configured_http_headers_reach_the_read_endpoint_through_storage() throws Exception {
+        try (MockWebServer server = new MockWebServer()) {
+            server.start();
+            server.enqueue(new MockResponse()
+                    .setResponseCode(200)
+                    .setBody("{\"status\":\"success\",\"data\":["
+                           + "{\"__name__\":\"ifHCInOctets\",\"node\":\"1:1\"}"
+                           + "]}"));
+
+            PrometheusRemoteWriterConfig c = new PrometheusRemoteWriterConfig();
+            c.setWriteUrl(server.url("/api/v1/push").toString());
+            c.setReadUrl(server.url("").toString());
+            c.setShutdownGracePeriodMs(1_000);
+
+            HttpHeadersConfig h = HttpHeadersConfig.empty();
+            h.applyProperties(Map.of("http.headers.cf-access-client-id", "abc123"));
+
+            PrometheusRemoteWriterStorage s = new PrometheusRemoteWriterStorage(c, h);
+            s.start();
+            try {
+                s.findMetrics(List.of(ImmutableTagMatcher.builder()
+                        .type(TagMatcher.Type.EQUALS)
+                        .key("name").value("ifHCInOctets").build()));
+            } finally {
+                s.stop();
+            }
+            assertThat(server.takeRequest().getHeader("cf-access-client-id"))
+                .isEqualTo("abc123");
+        }
+    }
+
+    /**
+     * "Never delivered" and "operator configured no headers" both leave the
+     * header map empty. Only the delivery flag separates them, and the first
+     * is the state this plugin shipped in twice.
+     */
+    @Test
+    void storage_refuses_to_start_when_header_config_was_never_delivered() {
+        PrometheusRemoteWriterConfig c = new PrometheusRemoteWriterConfig();
+        c.setWriteUrl("http://localhost:9090/api/v1/push");
+        c.setReadUrl("http://localhost:9090");
+
+        // Blueprint construction whose init() never ran — the wiring regression.
+        HttpHeadersConfig undelivered = new HttpHeadersConfig(Map.of(
+                "http.headers.cf-access-client-id", "abc123"));
+        assertThat(undelivered.isDelivered()).isFalse();
+
+        PrometheusRemoteWriterStorage s = new PrometheusRemoteWriterStorage(c, undelivered);
+        s.start();
+        try {
+            assertThatThrownBy(() -> s.findMetrics(List.of()))
+                .isInstanceOf(StorageException.class);
+        } finally {
+            s.stop();
+        }
+    }
+
+    @Test
+    void storage_starts_when_no_headers_are_configured_at_all() throws Exception {
+        // The legitimate empty case must NOT be mistaken for undelivered.
+        HttpHeadersConfig none = HttpHeadersConfig.empty();
+        assertThat(none.isDelivered()).isTrue();
+        assertThat(none.headers()).isEmpty();
+
+        try (MockWebServer server = new MockWebServer()) {
+            server.start();
+            PrometheusRemoteWriterConfig c = new PrometheusRemoteWriterConfig();
+            c.setWriteUrl(server.url("/api/v1/push").toString());
+            c.setReadUrl(server.url("/prometheus").toString());
+            c.setShutdownGracePeriodMs(1_000);
+
+            PrometheusRemoteWriterStorage s = new PrometheusRemoteWriterStorage(c, none);
+            s.start();
+            try {
+                assertThat(s.getMetrics()).isNotNull();
+            } finally {
+                s.stop();
+            }
         }
     }
 

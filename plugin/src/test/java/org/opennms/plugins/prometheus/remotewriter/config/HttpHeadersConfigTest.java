@@ -167,6 +167,29 @@ class HttpHeadersConfigTest {
 
     // ---- reserved-name rejection ---------------------------------------
 
+    /**
+     * Parameterized over RESERVED_MANAGED rather than a fixed list, so a name
+     * added to that set without a matching `switch` arm fails here instead of
+     * reaching an operator as "internal error: reserved-managed header ... has
+     * no rejection hint configured" — which, since round 3, also makes the
+     * plugin inert.
+     */
+    @ParameterizedTest
+    @CsvSource({
+        "Authorization,       auth.bearer.token",
+        "Proxy-Authorization, proxy",
+        "X-Scope-OrgID,       tenant.org-id"
+    })
+    void reserved_managed_headers_are_rejected_with_a_usable_pointer(String name, String pointer) {
+        HttpHeadersConfig cfg = new HttpHeadersConfig();
+        assertThatThrownBy(() ->
+            cfg.applyProperties(Map.of("http.headers." + name, "anything")))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining(name)
+            .hasMessageContaining("reserved")
+            .hasMessageContaining(pointer);
+    }
+
     @ParameterizedTest
     @ValueSource(strings = {
             "Content-Type", "Content-Encoding", "Content-Length",

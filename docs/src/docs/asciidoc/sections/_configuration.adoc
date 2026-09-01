@@ -146,10 +146,12 @@ inert — it logs a name-only `ERROR` in the Karaf log (the offending *value*
 is never echoed, for secret hygiene) and serves no requests, so a typo'd
 gateway token can never degrade into requests that leave without it.
 
-Correcting `{cfg-file}` and saving revives the plugin on the next
-configuration reload; no bundle restart is required. The plugin deliberately
-does not throw here, because a throw would mark the Blueprint container
-permanently failed and a corrected file could not recover it.
+The plugin deliberately does not throw here: a throw would mark the Blueprint
+container permanently failed, and a corrected file could not recover it.
+Correcting `{cfg-file}` and saving is therefore intended to bring the plugin
+up on the next configuration reload. That recovery path is not yet covered by
+an automated test — if the plugin stays inert after a correction, restart the
+bundle and please file an issue.
 
 * Header names must match the RFC 7230 token grammar: letters, digits, and
   `!#$%&'*+-.^_\`|~` only. No whitespace; no `:`, `(`, `)`, `,`, `/`, `<`,
@@ -200,7 +202,7 @@ cleartext. Use one of:
 +
 [source,shell]
 ----
-envsubst < remote-writer.cfg.template > /opennms/{cfg-file}
+envsubst < remote-writer.cfg.template > /opt/opennms/{cfg-file}
 ----
 +
 [source,properties]

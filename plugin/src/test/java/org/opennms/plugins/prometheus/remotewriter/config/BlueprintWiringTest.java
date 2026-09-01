@@ -411,12 +411,28 @@ class BlueprintWiringTest {
                 .as("init-method=\"%s\" must name a public no-arg method on %s",
                         initMethod, beanClass.getName())
                 .isTrue();
+        // Map, not merely "something Properties fits into" — Object would
+        // satisfy isAssignableFrom too and pin nothing.
         assertThat(java.util.Arrays.stream(beanClass.getConstructors())
                         .anyMatch(c -> c.getParameterCount() == 1
-                                && c.getParameterTypes()[0].isAssignableFrom(java.util.Properties.class)))
-                .as("%s needs a single-arg constructor accepting the injected Properties",
+                                && c.getParameterTypes()[0] == Map.class))
+                .as("%s needs a single-Map-arg constructor for the injected properties",
                         beanClass.getName())
                 .isTrue();
+
+        // Every recovery claim the plugin makes — the start() error message,
+        // the docs, the CHANGELOG — rests on the placeholder rebuilding the
+        // container on a .cfg save. Dropping this one attribute would make an
+        // invalid header set permanently fatal with the whole suite green.
+        Element placeholder = (Element) doc
+                .getElementsByTagNameNS("*", "property-placeholder").item(0);
+        assertThat(placeholder.getAttribute("update-strategy"))
+                .as("the placeholder must reload the container on a .cfg change, or a "
+                    + "corrected configuration can never revive an inert plugin")
+                .isEqualTo("reload");
+        assertThat(props.getAttribute("update"))
+                .as("cm-properties must track configuration updates")
+                .isEqualTo("true");
     }
 
     /**

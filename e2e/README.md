@@ -51,11 +51,18 @@ rejects anything not carrying `X-Smoke-Token` — a value supplied only through
 That inversion is the point. Samples reach Prometheus if and only if the
 custom header reached the wire, so the harness's ordinary "samples landed"
 assertion becomes an end-to-end proof of the feature rather than a log-scrape.
-The run additionally pins the gate itself (403 without the header, 200 with
-it) so a misconfigured gate cannot let the check pass vacuously, and greps
-`karaf.log` for the startup line that proves the prefix-scanned
-`HttpHeadersConfig` bean activated on the same PID as the scalar
-property-placeholder.
+The run pins three things beyond "samples landed", so that a misconfigured
+gate cannot let the check pass vacuously:
 
-Ports are shifted (Prometheus on 9091, gate on 8081) so it can run alongside
-the other stacks.
+- the gate itself — 403 without the headers, 200 with them;
+- traversal — `write.url` points at the gate, and the gate's access log shows
+  an accepted `POST /api/v1/write` carrying both operator headers;
+- co-activation — the `HttpHeadersConfig` startup line in `karaf.log`, when
+  the deployment's log level emits it. Its absence is only a failure if
+  traversal was not already proven, since that line depends on log
+  configuration rather than on the plugin.
+
+Prometheus is on 9091 and the gate on 8081 to stay clear of
+`compose.prometheus.yml`, but this stack cannot run concurrently with the
+others: `core` (8980, 8101) and `grafana` (3000) keep the default host ports
+they inherit from `compose.base.yml`.

@@ -419,7 +419,7 @@ public final class PrometheusReadClient {
             rb.addHeader("X-Scope-OrgID", config.getTenantOrgId());
         }
         // Operator-supplied custom headers — applied AFTER managed headers.
-        // Symmetric with RemoteWriteHttpClient; HttpHeadersConfig.updated()
+        // Symmetric with RemoteWriteHttpClient; HttpHeadersConfig validation
         // has already excluded reserved names. User-Agent override uses .header() so
         // a duplicate replaces the default; other headers use .addHeader().
         for (Map.Entry<String, String> h : httpHeadersConfig.headers().entrySet()) {

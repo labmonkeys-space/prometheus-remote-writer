@@ -86,6 +86,10 @@ public final class HttpHeadersConfig {
             // bytes). TE and Expect are hop-by-hop transport negotiation;
             // Www-Authenticate is a response header with no meaning on a
             // request. Prometheus reserves all of these too.
+            //
+            // Accept is deliberately NOT reserved: PrometheusReadClient sets
+            // none of its own, so an operator value is the only one on the
+            // request, and a backend-specific Accept is a legitimate need.
             "accept-encoding",
             "te",
             "expect",
@@ -132,10 +136,25 @@ public final class HttpHeadersConfig {
      */
     private final Map<?, ?> injectedProperties;
 
+    /**
+     * True once the configuration has actually been handed to this bean.
+     *
+     * <p>Exists because "nothing was delivered" and "the operator configured
+     * no headers" are otherwise indistinguishable — both leave
+     * {@link #headers} empty and {@link #validationError} null. That is the
+     * exact state this plugin shipped in twice under two different Blueprint
+     * wirings, sending every request without the operator's headers while the
+     * unit suite stayed green. {@code PrometheusRemoteWriterStorage.start()}
+     * refuses to activate when this is false, so a delivery regression is
+     * loud instead of silent.
+     */
+    private volatile boolean delivered;
+
     /** No-arg construction — no operator properties; used by tests and
-     *  {@link #empty()}. */
+     *  {@link #empty()}. Born delivered: there is nothing to wait for. */
     public HttpHeadersConfig() {
         this.injectedProperties = null;
+        this.delivered = true;
     }
 
     /**
@@ -160,38 +179,73 @@ public final class HttpHeadersConfig {
      * a corrected .cfg.
      */
     public void init() {
-        if (injectedProperties == null) return;
+        if (injectedProperties == null) {
+            delivered = true;
+            return;
+        }
+        // Snapshot under the injected object's own lock before iterating:
+        // update="true" means Aries mutates this instance in place, and a
+        // concurrent update mid-iteration would throw
+        // ConcurrentModificationException out of init() — the permanent
+        // container failure this method exists to avoid.
         Map<String, Object> copy = new LinkedHashMap<>();
-        for (Map.Entry<?, ?> e : injectedProperties.entrySet()) {
-            if (e.getKey() != null) copy.put(e.getKey().toString(), e.getValue());
+        synchronized (injectedProperties) {
+            for (Map.Entry<?, ?> e : injectedProperties.entrySet()) {
+                if (e.getKey() != null) copy.put(e.getKey().toString(), e.getValue());
+            }
         }
         try {
             applyProperties(copy);
-        } catch (IllegalStateException bad) {
-            // Already recorded in validationError() and logged at ERROR by
-            // applyProperties; swallow so the container still builds and the
-            // storage bean can report the problem and stay inert.
-            LOG.debug("http.headers.* rejected at activation", bad);
+        } catch (RuntimeException bad) {
+            // RuntimeException, not just IllegalStateException: anything that
+            // escapes here aborts bean creation and fails the container
+            // permanently, which no .cfg correction can revive.
+            // applyProperties already recorded and logged the validation case;
+            // record anything else so start() still refuses to serve.
+            if (validationError == null) {
+                validationError = String.valueOf(bad.getMessage());
+                LOG.error("http.headers.* could not be applied — the plugin will "
+                        + "not serve until it is corrected", bad);
+            } else {
+                LOG.debug("http.headers.* rejected at activation", bad);
+            }
+        } finally {
+            // Delivery happened either way. The distinction start() cares
+            // about is "did anything reach this bean", not "was it valid".
+            delivered = true;
         }
     }
 
     /**
-     * Applies a property dictionary. Called from {@link #updated(Dictionary)}
-     * in production and directly from tests. Receives the full property set at
+     * Whether the configuration was ever handed to this bean. False means
+     * Blueprint never ran {@link #init()} — a wiring regression, not an
+     * operator mistake. See {@link #delivered}.
+     */
+    public boolean isDelivered() {
+        return delivered;
+    }
+
+    /**
+     * Applies a property dictionary. Called from {@link #init()} in
+     * production and directly from tests. Receives the full property set at
      * the plugin's PID; we filter, parse, and validate the
      * {@code http.headers.*} subset.
      *
      * <p>Two failure shapes:
      * <ul>
-     *   <li>{@code properties == null} — ConfigAdmin signals "no configuration
-     *       set". The {@link #headers} snapshot is RESET to empty; clients
-     *       attach no custom headers on the next request. A non-empty to
+     *   <li>{@code properties == null} — "no configuration set". The
+     *       {@link #headers} snapshot is RESET to empty and the non-empty to
      *       empty transition is logged, because it silently moves a
-     *       gateway-authenticated deployment to unauthenticated.</li>
+     *       gateway-authenticated deployment to unauthenticated. NOTE: this
+     *       branch is currently reachable only from tests — {@link #init()}
+     *       returns early on a null injection and otherwise always passes a
+     *       non-null copy. It is kept because any future re-delivery path
+     *       must not drop headers silently.</li>
      *   <li>Validation throws {@link IllegalStateException} — the message is
      *       first recorded in {@link #validationError()} and logged at ERROR
-     *       (name-only diagnostic; values are never echoed), then rethrown so
-     *       Configuration Admin also surfaces it. {@code PrometheusRemoteWriterStorage.start()}
+     *       (name-only diagnostic; values are never echoed), then rethrown to
+     *       {@link #init()}, which records it and returns.
+     *       {@code PrometheusRemoteWriterStorage.start()}
      *       consults {@link #validationError()} and refuses to activate, so a
      *       bad header set makes the plugin inert rather than silently
      *       unauthenticated.</li>
@@ -228,10 +282,9 @@ public final class HttpHeadersConfig {
         try {
             parsed = extractAndValidate(properties);
         } catch (IllegalStateException bad) {
-            // Record before rethrowing: with update-strategy="component-managed"
-            // the throw only reaches Aries' ConfigAdmin dispatch thread, where
-            // it cannot abort bean creation. PrometheusRemoteWriterStorage
-            // reads validationError() and declines to activate instead, which
+            // Record before rethrowing. init() catches the throw so bean
+            // creation still succeeds; PrometheusRemoteWriterStorage reads
+            // validationError() and declines to activate instead, which
             // mirrors how start() already handles an invalid core config —
             // inert but revivable by a corrected .cfg, rather than a
             // permanently failed container.
@@ -266,12 +319,12 @@ public final class HttpHeadersConfig {
      * Message from the most recent failed {@code http.headers.*} validation,
      * or {@code null} when the current configuration is valid.
      *
-     * <p>Exists because {@code update-strategy="component-managed"} delivers
-     * configuration on a ConfigAdmin dispatch thread, where a thrown exception
-     * is logged and discarded rather than aborting bean activation. The
-     * storage bean polls this at {@code start()} and declines to activate when
-     * it is non-null, so a rejected header set never degrades into "started,
-     * but sending unauthenticated requests".
+     * <p>Exists because {@link #init()} deliberately swallows the validation
+     * throw — letting it escape would fail the Blueprint container
+     * permanently, and no {@code .cfg} correction could revive it. The storage
+     * bean reads this at {@code start()} and declines to activate when it is
+     * non-null, so a rejected header set never degrades into "started, but
+     * sending unauthenticated requests".
      */
     public String validationError() {
         return validationError;
