@@ -139,21 +139,7 @@ public final class RemoteWriteHttpClient {
                 }
                 if (code >= 400 && code < 500) {
                     String body = readBodyQuiet(resp);
-                    // On an auth rejection, surface the backend's own
-                    // WWW-Authenticate challenge. It names the scheme the
-                    // server actually wants, which is the single most useful
-                    // fact when auth.authorization.type is set to the wrong
-                    // keyword — otherwise the operator sees only "401" and has
-                    // to guess. It is a response header, so nothing the plugin
-                    // sends can forge it.
-                    if (code == 401 || code == 403) {
-                        LOG.warn("Prometheus remote-write rejected with {} ({}): {}. "
-                               + "Check auth.basic.*, auth.bearer.token or "
-                               + "auth.authorization.* against what the backend expects.",
-                                 code, describeChallenge(resp), body);
-                    } else {
-                        LOG.warn("Prometheus remote-write rejected with {}: {}", code, body);
-                    }
+                    LOG.warn("Prometheus remote-write rejected with {}: {}", code, body);
                     writes4xx.incrementAndGet();
                     return new WriteResult(WriteOutcome.DROPPED_4XX, code, attempt, body);
                 }
@@ -277,27 +263,6 @@ public final class RemoteWriteHttpClient {
         }
         b.post(RequestBody.create(body, contentType));
         return b.build();
-    }
-
-    /**
-     * Render the backend's {@code WWW-Authenticate} challenge for an auth
-     * rejection, or a note that it sent none. Package-private and static so a
-     * test can assert the shape without a log-capture appender.
-     */
-    static String describeChallenge(Response resp) {
-        String challenge = resp.header("WWW-Authenticate");
-        if (challenge == null || challenge.isEmpty()) {
-            return "no WWW-Authenticate header in the response";
-        }
-        // Only the scheme keyword — the first token — is logged. That is the
-        // one fact an operator needs ("the server wants Bearer, you sent
-        // Token"), and it keeps the rest of the challenge out of the log:
-        // parameters such as realm, nonce and opaque are not ours to record,
-        // and a static analyser is right to object to writing a whole
-        // WWW-Authenticate value to disk.
-        int sp = challenge.indexOf(' ');
-        String scheme = sp < 0 ? challenge : challenge.substring(0, sp);
-        return "backend asks for scheme: " + scheme;
     }
 
     private static String readBodyQuiet(Response resp) {

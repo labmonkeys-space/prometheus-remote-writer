@@ -56,26 +56,27 @@ on its own — fix the underlying cause.
 == Backend returns 401 or 403 on every request
 
 The credential is reaching the backend and being refused, or it is not
-reaching it at all. On a 401 or 403 the plugin logs the backend's own
-`WWW-Authenticate` challenge alongside the status:
+reaching it at all. The plugin logs the status and the response body:
 
 [source]
 ----
-WARN RemoteWriteHttpClient - Prometheus remote-write rejected with 401
-(backend asks for scheme: Token): unauthorized access
+WARN RemoteWriteHttpClient - Prometheus remote-write rejected with 401: unauthorized access
 ----
 
-That parenthesis is the fastest route to the cause, because it names the
-scheme the server actually wants. Work through:
+The plugin deliberately does not log the backend's `WWW-Authenticate`
+challenge. It would name the scheme the server wants, which is genuinely
+useful, but writing an authentication header into a log file is the wrong
+habit for a plugin that is otherwise careful never to put credential
+material on disk. Read the scheme from the backend's own documentation or
+access log instead. Work through:
 
-* *Wrong scheme keyword* — the challenge says `Token` but
-  `auth.authorization.type` says `Bearer` (or you used `auth.bearer.token`,
-  which always sends `Bearer`). Set `auth.authorization.type` to the keyword
-  in the challenge. This is the single most common cause when a backend uses
-  a non-standard scheme keyword.
-* *No `WWW-Authenticate` in the response* — logged as "no WWW-Authenticate
-  header in the response". Common on API gateways, which often 403 without a
-  challenge. Check the gateway's own access log for which header it expected.
+* *Wrong scheme keyword* — the backend wants `Token` but
+  `auth.authorization.type` says something else, or you used
+  `auth.bearer.token`, which always sends `Bearer`. Set
+  `auth.authorization.type` to the keyword the backend documents.
+* *No challenge at all* — API gateways commonly 403 without a
+  `WWW-Authenticate` header. Check the gateway's access log for the header
+  it expected.
 * *Credential empty* — a typo'd `${env:NAME}` resolves to empty. Read the
   startup line `prometheus-remote-writer authentication: ...`: if it says
   `none`, nothing was sent at all.

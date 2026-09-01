@@ -124,9 +124,11 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   name, whereas an `auth.authorization.*` block with both halves empty reads
   as "not configured" and starts silently.
 
-  On a 401 or 403 the plugin now logs the backend's `WWW-Authenticate`
-  challenge next to the status, which names the scheme the server actually
-  wants — the fastest route to a wrong-keyword misconfiguration.
+  A 401/403 troubleshooting section walks through the causes, starting with
+  the wrong scheme keyword. The plugin deliberately does not log the
+  backend's `WWW-Authenticate` challenge: it would name the scheme the
+  server wants, but writing an authentication header to disk is the wrong
+  habit for a plugin that otherwise never puts credential material in a log.
 
   Karaf's existing
   `${env:NAME}` / `$[secret:name]` resolution covers the credentials value —
