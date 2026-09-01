@@ -368,9 +368,9 @@ class RemoteWriteHttpClientTest {
 
     private static HttpHeadersConfig headers(Map<String, String> props) {
         HttpHeadersConfig h = new HttpHeadersConfig();
-        // Note: HttpHeadersConfig.updated() accepts Map<String, ?>; pass
+        // Note: HttpHeadersConfig.applyProperties() accepts Map<String, ?>; pass
         // through directly so we exercise the prefix-scan path.
-        h.updated(java.util.Collections.unmodifiableMap(props));
+        h.applyProperties(java.util.Collections.unmodifiableMap(props));
         return h;
     }
 }

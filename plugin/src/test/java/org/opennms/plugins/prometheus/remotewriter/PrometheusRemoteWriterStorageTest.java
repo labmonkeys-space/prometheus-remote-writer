@@ -344,7 +344,7 @@ class PrometheusRemoteWriterStorageTest {
             c.setShutdownGracePeriodMs(1_000);
 
             HttpHeadersConfig h = HttpHeadersConfig.empty();
-            h.updated(Map.of("http.headers.cf-access-client-id", "abc123"));
+            h.applyProperties(Map.of("http.headers.cf-access-client-id", "abc123"));
 
             PrometheusRemoteWriterStorage s = new PrometheusRemoteWriterStorage(c, h);
             s.start();
@@ -385,7 +385,7 @@ class PrometheusRemoteWriterStorageTest {
 
         HttpHeadersConfig h = HttpHeadersConfig.empty();
         // Authorization is reserved: updated() records the error and rethrows.
-        assertThatThrownBy(() -> h.updated(Map.of("http.headers.Authorization", "HMAC sig")))
+        assertThatThrownBy(() -> h.applyProperties(Map.of("http.headers.Authorization", "HMAC sig")))
             .isInstanceOf(IllegalStateException.class);
         assertThat(h.validationError()).contains("Authorization");
 

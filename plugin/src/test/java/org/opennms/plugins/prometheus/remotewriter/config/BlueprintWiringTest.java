@@ -367,34 +367,55 @@ class BlueprintWiringTest {
      * was written to prevent for {@code labels.copy}.
      */
     @Test
-    void http_headers_bean_is_wired_to_a_real_update_method_at_the_plugin_pid() throws Exception {
+    void http_headers_bean_is_fed_by_cm_properties_at_the_plugin_pid() throws Exception {
         Document doc = loadBlueprint();
         Element bean = findBeanById(doc, "httpHeadersConfig");
-
         Class<?> beanClass = Class.forName(bean.getAttribute("class"));
 
-        NodeList managed = bean.getElementsByTagNameNS("*", "managed-properties");
-        assertThat(managed.getLength())
-                .as("httpHeadersConfig must declare exactly one <cm:managed-properties>")
+        // Delivery MUST NOT go back to <cm:managed-properties>. Aries invokes
+        // that update-method on a configuration CHANGE only, so a plugin
+        // starting with http.headers.* already in the .cfg never receives
+        // them and sends every request bare. The e2e headers gate caught
+        // exactly that; this pins it so it cannot regress silently.
+        assertThat(bean.getElementsByTagNameNS("*", "managed-properties").getLength())
+                .as("httpHeadersConfig must NOT use <cm:managed-properties>: component-managed "
+                    + "fires on config CHANGE only, so initial activation delivers nothing")
+                .isZero();
+
+        // The injected argument must be a <cm:cm-properties> on the same PID
+        // as the placeholder, or the bean is handed nothing.
+        String pid = ((Element) doc.getElementsByTagNameNS("*", "property-placeholder").item(0))
+                .getAttribute("persistent-id");
+        NodeList cmProps = doc.getElementsByTagNameNS("*", "cm-properties");
+        assertThat(cmProps.getLength())
+                .as("blueprint.xml must declare a <cm:cm-properties> for the header bean")
                 .isEqualTo(1);
-        Element mp = (Element) managed.item(0);
+        Element props = (Element) cmProps.item(0);
+        assertThat(props.getAttribute("persistent-id"))
+                .as("cm-properties must read the same PID as the property-placeholder")
+                .isEqualTo(pid);
 
-        // Same PID as the scalar placeholder, or the bean silently never
-        // receives the operator's http.headers.* properties.
-        Element placeholder = (Element) doc
-                .getElementsByTagNameNS("*", "property-placeholder").item(0);
-        assertThat(mp.getAttribute("persistent-id"))
-                .as("the headers bean must listen on the same PID as the property-placeholder")
-                .isEqualTo(placeholder.getAttribute("persistent-id"));
+        NodeList args = bean.getElementsByTagNameNS("*", "argument");
+        assertThat(args.getLength())
+                .as("httpHeadersConfig must take exactly the injected properties")
+                .isEqualTo(1);
+        assertThat(((Element) args.item(0)).getAttribute("ref"))
+                .isEqualTo(props.getAttribute("id"));
 
-        String updateMethod = mp.getAttribute("update-method");
-        assertThat(updateMethod).isNotBlank();
+        // init-method must name a real no-arg method, and a matching
+        // constructor must exist, or Blueprint fails at container start.
+        String initMethod = bean.getAttribute("init-method");
+        assertThat(initMethod).isNotBlank();
         assertThat(java.util.Arrays.stream(beanClass.getMethods())
-                        .anyMatch(m -> m.getName().equals(updateMethod)
-                                && m.getParameterCount() == 1
-                                && m.getParameterTypes()[0] == Map.class))
-                .as("update-method=\"%s\" must name a public single-Map-arg method on %s",
-                        updateMethod, beanClass.getName())
+                        .anyMatch(m -> m.getName().equals(initMethod) && m.getParameterCount() == 0))
+                .as("init-method=\"%s\" must name a public no-arg method on %s",
+                        initMethod, beanClass.getName())
+                .isTrue();
+        assertThat(java.util.Arrays.stream(beanClass.getConstructors())
+                        .anyMatch(c -> c.getParameterCount() == 1
+                                && c.getParameterTypes()[0].isAssignableFrom(java.util.Properties.class)))
+                .as("%s needs a single-arg constructor accepting the injected Properties",
+                        beanClass.getName())
                 .isTrue();
     }
 

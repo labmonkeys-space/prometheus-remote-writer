@@ -24,11 +24,19 @@ import org.slf4j.LoggerFactory;
 
 /**
  * Holds the operator-supplied set of arbitrary HTTP headers attached to
- * outbound write and read requests. Wired via Aries Blueprint's
- * {@code <cm:managed-properties>} so the bean receives the full property
- * dictionary at the plugin's ConfigAdmin PID; the bean filters keys by the
- * {@code http.headers.} prefix, validates names and values, and exposes the
- * accepted set via {@link #headers()}.
+ * outbound write and read requests. Blueprint injects the full property set
+ * at the plugin's ConfigAdmin PID through {@code <cm:cm-properties>}; the
+ * bean filters keys by the {@code http.headers.} prefix, validates names and
+ * values, and exposes the accepted set via {@link #headers()}.
+ *
+ * <p>The injection mechanism is load-bearing. Neither
+ * {@code <cm:managed-properties update-strategy="component-managed">} nor a
+ * {@code ManagedService} registration works here: the first fires only on a
+ * configuration change, and the second is delivered after Blueprint has
+ * already run the storage bean's {@code init-method}, which builds the HTTP
+ * clients. Both left the plugin sending requests with no operator headers.
+ * {@code <cm:cm-properties>} is resolved as a dependency before bean
+ * instantiation, which is the ordering this bean needs.
  *
  * <p>This bean is intentionally a separate Blueprint bean from
  * {@link PrometheusRemoteWriterConfig}: that class uses the
@@ -102,7 +110,7 @@ public final class HttpHeadersConfig {
     /**
      * Snapshot of validated headers, preserving operator casing for the on-
      * the-wire header name. Volatile because Aries can call
-     * {@link #updated(Map)} from a ConfigAdmin thread concurrently with
+     * {@link #applyProperties(Map)} from a ConfigAdmin thread concurrently with
      * clients reading via {@link #headers()}.
      */
     private volatile Map<String, String> headers = Collections.emptyMap();
@@ -117,10 +125,61 @@ public final class HttpHeadersConfig {
     private volatile String validationError;
 
     /**
-     * Aries Blueprint callback invoked at bean activation and on every
-     * {@code .cfg} change. Receives the full property dictionary at the
-     * plugin's PID; we filter, parse, and validate the {@code http.headers.*}
-     * subset.
+     * Properties injected by Blueprint's {@code <cm:cm-properties>}, or
+     * {@code null} for the no-arg (test / empty) construction path. Held as
+     * the raw injected reference: with {@code update="true"} Aries mutates
+     * this object in place on a configuration change.
+     */
+    private final Map<?, ?> injectedProperties;
+
+    /** No-arg construction — no operator properties; used by tests and
+     *  {@link #empty()}. */
+    public HttpHeadersConfig() {
+        this.injectedProperties = null;
+    }
+
+    /**
+     * Blueprint construction. Takes the full property set at the plugin PID
+     * from {@code <cm:cm-properties>}; {@link #init()} parses it.
+     *
+     * @param injectedProperties the PID dictionary (a {@link java.util.Properties}
+     *                           in practice, hence the wildcard key type)
+     */
+    public HttpHeadersConfig(Map<?, ?> injectedProperties) {
+        this.injectedProperties = injectedProperties;
+    }
+
+    /**
+     * Blueprint {@code init-method}. Runs during bean creation, which
+     * Blueprint performs before the storage bean's own {@code init-method}
+     * builds the HTTP clients — so the header set is populated by the time
+     * anything reads it. A validation failure is recorded in
+     * {@link #validationError()} rather than thrown: throwing here would
+     * fail the Blueprint container permanently, and the
+     * {@code update-strategy="reload"} placeholder could not revive it from
+     * a corrected .cfg.
+     */
+    public void init() {
+        if (injectedProperties == null) return;
+        Map<String, Object> copy = new LinkedHashMap<>();
+        for (Map.Entry<?, ?> e : injectedProperties.entrySet()) {
+            if (e.getKey() != null) copy.put(e.getKey().toString(), e.getValue());
+        }
+        try {
+            applyProperties(copy);
+        } catch (IllegalStateException bad) {
+            // Already recorded in validationError() and logged at ERROR by
+            // applyProperties; swallow so the container still builds and the
+            // storage bean can report the problem and stay inert.
+            LOG.debug("http.headers.* rejected at activation", bad);
+        }
+    }
+
+    /**
+     * Applies a property dictionary. Called from {@link #updated(Dictionary)}
+     * in production and directly from tests. Receives the full property set at
+     * the plugin's PID; we filter, parse, and validate the
+     * {@code http.headers.*} subset.
      *
      * <p>Two failure shapes:
      * <ul>
@@ -132,7 +191,7 @@ public final class HttpHeadersConfig {
      *   <li>Validation throws {@link IllegalStateException} — the message is
      *       first recorded in {@link #validationError()} and logged at ERROR
      *       (name-only diagnostic; values are never echoed), then rethrown so
-     *       Aries also surfaces it. {@code PrometheusRemoteWriterStorage.start()}
+     *       Configuration Admin also surfaces it. {@code PrometheusRemoteWriterStorage.start()}
      *       consults {@link #validationError()} and refuses to activate, so a
      *       bad header set makes the plugin inert rather than silently
      *       unauthenticated.</li>
@@ -153,7 +212,7 @@ public final class HttpHeadersConfig {
      * @param properties full ConfigAdmin dictionary at the plugin PID, or
      *                   {@code null} if no configuration has been set yet
      */
-    public synchronized void updated(Map<String, ?> properties) {
+    public synchronized void applyProperties(Map<String, ?> properties) {
         if (properties == null) {
             if (!this.headers.isEmpty()) {
                 LOG.info("http.headers.* configuration removed — the {} custom "
@@ -248,7 +307,7 @@ public final class HttpHeadersConfig {
      * Used by callers that need to snapshot the {@code volatile} {@link #headers}
      * field exactly once and pass the same reference into both the prior-
      * anchor capture and the diff call — eliminates a sub-microsecond
-     * window where a concurrent {@link #updated(Map)} between the two
+     * window where a concurrent {@link #applyProperties(Map)} between the two
      * reads would compute the diff against the wrong "after" snapshot.
      *
      * @param previous the prior snapshot, or {@code null}

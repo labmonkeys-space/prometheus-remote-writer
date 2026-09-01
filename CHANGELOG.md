@@ -105,6 +105,20 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   transparent gzip only for the header it added itself — an operator
   value would leave the read client parsing compressed bytes as JSON.
 
+  *Configuration delivery.* The property set arrives through Blueprint's
+  `<cm:cm-properties>`, which is resolved as a dependency before the beans
+  that consume it are instantiated. That ordering is load-bearing rather
+  than incidental. Two earlier wirings shipped in this change's history
+  looked correct and delivered nothing: `<cm:managed-properties
+  update-strategy="component-managed">` invokes its update-method on a
+  configuration *change* only, so a plugin that started with
+  `http.headers.*` already in the `.cfg` received no headers at all; and a
+  `ManagedService` registration is delivered by Configuration Admin only
+  after the service is registered, which Blueprint does after it has run
+  the storage bean's `init-method` and built the HTTP clients. Under both,
+  every request went out without the operator's headers while the entire
+  unit suite stayed green. The `headers` e2e backend now gates this.
+
   *Invalid configuration leaves the plugin inert, not unauthenticated.*
   A rejected header set logs an `ERROR` and the storage declines to
   activate, so SPI calls are refused rather than sent without the

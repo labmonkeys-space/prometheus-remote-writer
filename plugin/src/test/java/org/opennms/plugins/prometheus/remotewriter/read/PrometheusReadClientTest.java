@@ -578,7 +578,7 @@ class PrometheusReadClientTest {
         c.setBasicPassword("s3cret");
         c.validate();
         HttpHeadersConfig h = new HttpHeadersConfig();
-        h.updated(Map.of("http.headers.x-custom-tenant", "team-alpha"));
+        h.applyProperties(Map.of("http.headers.x-custom-tenant", "team-alpha"));
         PrometheusReadClient cust = new PrometheusReadClient(c, null, h);
         try {
             cust.findMetrics(List.of(eq("name", "irrelevant")));
@@ -614,7 +614,7 @@ class PrometheusReadClientTest {
         c.setReadUrl(server.url("").toString().replaceAll("/$", ""));
         c.validate();
         HttpHeadersConfig h = new HttpHeadersConfig();
-        h.updated(java.util.Collections.unmodifiableMap(props));
+        h.applyProperties(java.util.Collections.unmodifiableMap(props));
         return new PrometheusReadClient(c, null, h);
     }
 

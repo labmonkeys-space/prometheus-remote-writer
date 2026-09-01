@@ -7,11 +7,13 @@
 package org.opennms.plugins.prometheus.remotewriter.config;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.entry;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Properties;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -32,7 +34,7 @@ class HttpHeadersConfigTest {
     @Test
     void empty_properties_yields_empty_headers_and_no_startup_message() {
         HttpHeadersConfig cfg = new HttpHeadersConfig();
-        cfg.updated(Map.of());
+        cfg.applyProperties(Map.of());
         assertThat(cfg.headers()).isEmpty();
         // Activation log skipped for empty map — verified indirectly by
         // formatActivationMessage being called only when non-empty in the
@@ -42,13 +44,65 @@ class HttpHeadersConfigTest {
     @Test
     void null_properties_resets_headers_to_empty() {
         HttpHeadersConfig cfg = new HttpHeadersConfig();
-        cfg.updated(Map.of("http.headers.x-test", "value"));
+        cfg.applyProperties(Map.of("http.headers.x-test", "value"));
         assertThat(cfg.headers()).hasSize(1);
-        cfg.updated(null);
+        cfg.applyProperties(null);
         assertThat(cfg.headers()).isEmpty();
         // Clearing the configuration is not a validation failure — the plugin
         // must still start, just without custom headers.
         assertThat(cfg.validationError()).isNull();
+    }
+
+    // ---- Blueprint cm-properties delivery path --------------------------
+
+    /**
+     * The path that actually runs in a deployed plugin. Blueprint resolves
+     * {@code <cm:cm-properties>} and passes the whole PID dictionary to this
+     * constructor, then calls {@link HttpHeadersConfig#init()} — all before
+     * the storage bean's init-method builds the HTTP clients.
+     *
+     * <p>Uses {@link Properties} deliberately: that is what Aries injects,
+     * and its raw {@code Map<Object,Object>} keys are why {@code init()}
+     * stringifies rather than casting.
+     */
+    @Test
+    void blueprint_injection_populates_headers_before_init_returns() {
+        Properties props = new Properties();
+        props.put("write.url", "http://example.com/write");
+        props.put("http.headers.X-Smoke-Token", "s3cr3t");
+
+        HttpHeadersConfig cfg = new HttpHeadersConfig(props);
+        assertThat(cfg.headers()).as("nothing parsed until init()").isEmpty();
+
+        cfg.init();
+
+        assertThat(cfg.headers()).containsExactly(entry("X-Smoke-Token", "s3cr3t"));
+        assertThat(cfg.validationError()).isNull();
+    }
+
+    @Test
+    void blueprint_injection_of_null_properties_is_the_no_configuration_case() {
+        HttpHeadersConfig cfg = new HttpHeadersConfig(null);
+        cfg.init();
+        assertThat(cfg.headers()).isEmpty();
+        assertThat(cfg.validationError()).isNull();
+    }
+
+    /**
+     * init() must not throw: a throw fails the Blueprint container
+     * permanently and the update-strategy="reload" placeholder cannot revive
+     * it from a corrected .cfg. The error is recorded instead, and the
+     * storage bean refuses to activate on it.
+     */
+    @Test
+    void blueprint_injection_records_invalid_config_without_throwing() {
+        Properties props = new Properties();
+        props.put("http.headers.Authorization", "HMAC sig");
+
+        HttpHeadersConfig cfg = new HttpHeadersConfig(props);
+
+        assertThatCode(cfg::init).doesNotThrowAnyException();
+        assertThat(cfg.validationError()).contains("Authorization");
     }
 
     // ---- validity accessor ---------------------------------------------
@@ -59,12 +113,12 @@ class HttpHeadersConfigTest {
         assertThat(cfg.validationError()).isNull();
 
         assertThatThrownBy(() ->
-            cfg.updated(Map.of("http.headers.Content-Type", "text/plain")))
+            cfg.applyProperties(Map.of("http.headers.Content-Type", "text/plain")))
             .isInstanceOf(IllegalStateException.class);
 
-        // Recorded before the rethrow: with update-strategy="component-managed"
-        // the exception only reaches a ConfigAdmin dispatch thread, so the
-        // storage bean has no other way to learn the config was rejected.
+        // Recorded before the rethrow: the exception only reaches a
+        // ConfigAdmin dispatch thread, so the storage bean has no other way
+        // to learn the configuration was rejected.
         assertThat(cfg.validationError())
             .isNotNull()
             .contains("Content-Type");
@@ -74,11 +128,11 @@ class HttpHeadersConfigTest {
     void a_subsequent_valid_update_clears_the_recorded_error() {
         HttpHeadersConfig cfg = new HttpHeadersConfig();
         assertThatThrownBy(() ->
-            cfg.updated(Map.of("http.headers.Host", "evil.example.com")))
+            cfg.applyProperties(Map.of("http.headers.Host", "evil.example.com")))
             .isInstanceOf(IllegalStateException.class);
         assertThat(cfg.validationError()).isNotNull();
 
-        cfg.updated(Map.of("http.headers.x-tenant", "alpha"));
+        cfg.applyProperties(Map.of("http.headers.x-tenant", "alpha"));
 
         assertThat(cfg.validationError()).isNull();
         assertThat(cfg.headers()).containsExactly(entry("x-tenant", "alpha"));
@@ -91,7 +145,7 @@ class HttpHeadersConfigTest {
         // ConfigAdmin values are Object-typed; an array would otherwise reach
         // the wire as "[Ljava.lang.String;@1a2b".
         props.put("http.headers.x-tenant", new String[] {"alpha", "beta"});
-        assertThatThrownBy(() -> cfg.updated(props))
+        assertThatThrownBy(() -> cfg.applyProperties(props))
             .isInstanceOf(IllegalStateException.class)
             .hasMessageContaining("x-tenant")
             .hasMessageContaining("single");
@@ -106,7 +160,7 @@ class HttpHeadersConfigTest {
         props.put("http.headers.x-tenant", "alpha");
         props.put("http.headersnotaprefix", "ignored");      // missing trailing dot
         props.put("nothttp.headers.x", "ignored");           // wrong prefix
-        cfg.updated(props);
+        cfg.applyProperties(props);
         assertThat(cfg.headers()).containsOnlyKeys("x-tenant");
         assertThat(cfg.headers().get("x-tenant")).isEqualTo("alpha");
     }
@@ -127,7 +181,7 @@ class HttpHeadersConfigTest {
     void reserved_protocol_headers_are_hard_rejected(String reservedName) {
         HttpHeadersConfig cfg = new HttpHeadersConfig();
         assertThatThrownBy(() ->
-            cfg.updated(Map.of("http.headers." + reservedName, "anything")))
+            cfg.applyProperties(Map.of("http.headers." + reservedName, "anything")))
             .isInstanceOf(IllegalStateException.class)
             .hasMessageContaining(reservedName)
             .hasMessageContaining("reserved");
@@ -144,7 +198,7 @@ class HttpHeadersConfigTest {
     void reserved_name_check_is_case_insensitive(String variant) {
         HttpHeadersConfig cfg = new HttpHeadersConfig();
         assertThatThrownBy(() ->
-            cfg.updated(Map.of("http.headers." + variant, "v")))
+            cfg.applyProperties(Map.of("http.headers." + variant, "v")))
             .isInstanceOf(IllegalStateException.class)
             .hasMessageContaining("reserved");
     }
@@ -153,7 +207,7 @@ class HttpHeadersConfigTest {
     void authorization_rejection_points_at_auth_config_keys() {
         HttpHeadersConfig cfg = new HttpHeadersConfig();
         assertThatThrownBy(() ->
-            cfg.updated(Map.of("http.headers.Authorization", "Bearer xyz")))
+            cfg.applyProperties(Map.of("http.headers.Authorization", "Bearer xyz")))
             .isInstanceOf(IllegalStateException.class)
             .hasMessageContaining("Authorization")
             .hasMessageContaining("auth.basic")
@@ -170,7 +224,7 @@ class HttpHeadersConfigTest {
     void x_scope_orgid_rejection_points_at_tenant_org_id() {
         HttpHeadersConfig cfg = new HttpHeadersConfig();
         assertThatThrownBy(() ->
-            cfg.updated(Map.of("http.headers.X-Scope-OrgID", "team-alpha")))
+            cfg.applyProperties(Map.of("http.headers.X-Scope-OrgID", "team-alpha")))
             .isInstanceOf(IllegalStateException.class)
             .hasMessageContaining("X-Scope-OrgID")
             .hasMessageContaining("tenant.org-id")
@@ -181,7 +235,7 @@ class HttpHeadersConfigTest {
     @Test
     void user_agent_override_is_accepted_and_preserves_casing() {
         HttpHeadersConfig cfg = new HttpHeadersConfig();
-        cfg.updated(Map.of("http.headers.User-Agent", "onms-edge-site-7/1.0"));
+        cfg.applyProperties(Map.of("http.headers.User-Agent", "onms-edge-site-7/1.0"));
         assertThat(cfg.headers())
             .containsEntry("User-Agent", "onms-edge-site-7/1.0");
     }
@@ -200,7 +254,7 @@ class HttpHeadersConfigTest {
     void malformed_header_names_are_rejected(String badName) {
         HttpHeadersConfig cfg = new HttpHeadersConfig();
         assertThatThrownBy(() ->
-            cfg.updated(Map.of("http.headers." + badName, "v")))
+            cfg.applyProperties(Map.of("http.headers." + badName, "v")))
             .isInstanceOf(IllegalStateException.class)
             .hasMessageContaining("RFC 7230");
     }
@@ -209,7 +263,7 @@ class HttpHeadersConfigTest {
     void empty_header_name_after_prefix_is_rejected() {
         HttpHeadersConfig cfg = new HttpHeadersConfig();
         assertThatThrownBy(() ->
-            cfg.updated(Map.of("http.headers.", "v")))
+            cfg.applyProperties(Map.of("http.headers.", "v")))
             .isInstanceOf(IllegalStateException.class)
             .hasMessageContaining("empty header name");
     }
@@ -220,7 +274,7 @@ class HttpHeadersConfigTest {
     void empty_value_is_rejected() {
         HttpHeadersConfig cfg = new HttpHeadersConfig();
         assertThatThrownBy(() ->
-            cfg.updated(Map.of("http.headers.x-tenant", "")))
+            cfg.applyProperties(Map.of("http.headers.x-tenant", "")))
             .isInstanceOf(IllegalStateException.class)
             .hasMessageContaining("x-tenant")
             .hasMessageContaining("empty value");
@@ -230,7 +284,7 @@ class HttpHeadersConfigTest {
     void whitespace_only_value_is_rejected_after_trim() {
         HttpHeadersConfig cfg = new HttpHeadersConfig();
         assertThatThrownBy(() ->
-            cfg.updated(Map.of("http.headers.x-tenant", "   ")))
+            cfg.applyProperties(Map.of("http.headers.x-tenant", "   ")))
             .isInstanceOf(IllegalStateException.class)
             .hasMessageContaining("x-tenant")
             .hasMessageContaining("empty value");
@@ -241,7 +295,7 @@ class HttpHeadersConfigTest {
         HttpHeadersConfig cfg = new HttpHeadersConfig();
         String hostile = "ok\rX-Injected: bad";
         assertThatThrownBy(() ->
-            cfg.updated(Map.of("http.headers.x-tenant", hostile)))
+            cfg.applyProperties(Map.of("http.headers.x-tenant", hostile)))
             .isInstanceOf(IllegalStateException.class)
             .hasMessageContaining("x-tenant")
             .hasMessageContaining("CR or LF")
@@ -254,7 +308,7 @@ class HttpHeadersConfigTest {
         HttpHeadersConfig cfg = new HttpHeadersConfig();
         String hostile = "ok\nX-Injected: bad";
         assertThatThrownBy(() ->
-            cfg.updated(Map.of("http.headers.x-tenant", hostile)))
+            cfg.applyProperties(Map.of("http.headers.x-tenant", hostile)))
             .isInstanceOf(IllegalStateException.class)
             .hasMessageContaining("CR or LF")
             .extracting(Throwable::getMessage)
@@ -266,7 +320,7 @@ class HttpHeadersConfigTest {
         HttpHeadersConfig cfg = new HttpHeadersConfig();
         String hostile = "ok\u0007bell";              // BEL 0x07
         assertThatThrownBy(() ->
-            cfg.updated(Map.of("http.headers.x-tenant", hostile)))
+            cfg.applyProperties(Map.of("http.headers.x-tenant", hostile)))
             .isInstanceOf(IllegalStateException.class)
             .hasMessageContaining("non-printable");
     }
@@ -276,7 +330,7 @@ class HttpHeadersConfigTest {
         HttpHeadersConfig cfg = new HttpHeadersConfig();
         String hostile = "ok\u00a0nbsp";              // NBSP 0xA0
         assertThatThrownBy(() ->
-            cfg.updated(Map.of("http.headers.x-tenant", hostile)))
+            cfg.applyProperties(Map.of("http.headers.x-tenant", hostile)))
             .isInstanceOf(IllegalStateException.class)
             .hasMessageContaining("non-printable");
     }
@@ -291,14 +345,14 @@ class HttpHeadersConfigTest {
     })
     void values_with_internal_punctuation_are_accepted(String value) {
         HttpHeadersConfig cfg = new HttpHeadersConfig();
-        cfg.updated(Map.of("http.headers.x-link", value));
+        cfg.applyProperties(Map.of("http.headers.x-link", value));
         assertThat(cfg.headers()).containsEntry("x-link", value);
     }
 
     @Test
     void surrounding_whitespace_in_value_is_trimmed_but_internal_is_preserved() {
         HttpHeadersConfig cfg = new HttpHeadersConfig();
-        cfg.updated(Map.of("http.headers.x-tenant", "  team alpha  "));
+        cfg.applyProperties(Map.of("http.headers.x-tenant", "  team alpha  "));
         // Internal space preserved; surrounding stripped.
         assertThat(cfg.headers()).containsEntry("x-tenant", "team alpha");
     }
@@ -315,25 +369,25 @@ class HttpHeadersConfigTest {
 
         // Reserved name (value is the sentinel)
         assertThatThrownBy(() ->
-            cfg.updated(Map.of("http.headers.Content-Type", sentinel)))
+            cfg.applyProperties(Map.of("http.headers.Content-Type", sentinel)))
             .extracting(Throwable::getMessage)
             .satisfies(m -> assertThat(m).doesNotContain(sentinel));
 
         // Authorization rejection (value is the sentinel)
         assertThatThrownBy(() ->
-            cfg.updated(Map.of("http.headers.Authorization", sentinel)))
+            cfg.applyProperties(Map.of("http.headers.Authorization", sentinel)))
             .extracting(Throwable::getMessage)
             .satisfies(m -> assertThat(m).doesNotContain(sentinel));
 
         // CRLF injection (value contains the sentinel)
         assertThatThrownBy(() ->
-            cfg.updated(Map.of("http.headers.x-tenant", "x\r" + sentinel)))
+            cfg.applyProperties(Map.of("http.headers.x-tenant", "x\r" + sentinel)))
             .extracting(Throwable::getMessage)
             .satisfies(m -> assertThat(m).doesNotContain(sentinel));
 
         // Non-printable (value contains the sentinel)
         assertThatThrownBy(() ->
-            cfg.updated(Map.of("http.headers.x-tenant", sentinel + "\u0001")))
+            cfg.applyProperties(Map.of("http.headers.x-tenant", sentinel + "\u0001")))
             .extracting(Throwable::getMessage)
             .satisfies(m -> assertThat(m).doesNotContain(sentinel));
     }
@@ -365,7 +419,7 @@ class HttpHeadersConfigTest {
     @Test
     void headers_returns_immutable_map() {
         HttpHeadersConfig cfg = new HttpHeadersConfig();
-        cfg.updated(Map.of("http.headers.x-tenant", "alpha"));
+        cfg.applyProperties(Map.of("http.headers.x-tenant", "alpha"));
         Map<String, String> view = cfg.headers();
         assertThatThrownBy(() -> view.put("y-other", "v"))
             .isInstanceOf(UnsupportedOperationException.class);
@@ -374,7 +428,7 @@ class HttpHeadersConfigTest {
     @Test
     void operator_casing_preserved_in_map_keys() {
         HttpHeadersConfig cfg = new HttpHeadersConfig();
-        cfg.updated(Map.of("http.headers.Cf-Access-Client-Id", "abc123"));
+        cfg.applyProperties(Map.of("http.headers.Cf-Access-Client-Id", "abc123"));
         // The map key preserves the operator's exact casing — important for
         // wire-side fidelity even though HTTP headers are case-insensitive.
         assertThat(cfg.headers()).containsKey("Cf-Access-Client-Id");
@@ -384,7 +438,7 @@ class HttpHeadersConfigTest {
     @Test
     void to_string_masks_values() {
         HttpHeadersConfig cfg = new HttpHeadersConfig();
-        cfg.updated(Map.of("http.headers.x-tenant", "must-not-appear-in-toString"));
+        cfg.applyProperties(Map.of("http.headers.x-tenant", "must-not-appear-in-toString"));
         assertThat(cfg.toString())
             .contains("count=1")
             .contains("redacted")
@@ -403,7 +457,7 @@ class HttpHeadersConfigTest {
     void cr_in_header_name_is_rejected_log_injection_guard() {
         HttpHeadersConfig cfg = new HttpHeadersConfig();
         assertThatThrownBy(() ->
-            cfg.updated(java.util.Map.of("http.headers.x\rinjected", "v")))
+            cfg.applyProperties(java.util.Map.of("http.headers.x\rinjected", "v")))
             .isInstanceOf(IllegalStateException.class)
             .hasMessageContaining("CR or LF");
     }
@@ -412,7 +466,7 @@ class HttpHeadersConfigTest {
     void lf_in_header_name_is_rejected_log_injection_guard() {
         HttpHeadersConfig cfg = new HttpHeadersConfig();
         assertThatThrownBy(() ->
-            cfg.updated(java.util.Map.of("http.headers.x\ninjected", "v")))
+            cfg.applyProperties(java.util.Map.of("http.headers.x\ninjected", "v")))
             .isInstanceOf(IllegalStateException.class)
             .hasMessageContaining("CR or LF");
     }
@@ -422,7 +476,7 @@ class HttpHeadersConfigTest {
         HttpHeadersConfig cfg = new HttpHeadersConfig();
         String hostile = "good\u0000bad";
         assertThatThrownBy(() ->
-            cfg.updated(java.util.Map.of("http.headers.x-tenant", hostile)))
+            cfg.applyProperties(java.util.Map.of("http.headers.x-tenant", hostile)))
             .isInstanceOf(IllegalStateException.class)
             .hasMessageContaining("non-printable");
     }
@@ -433,7 +487,7 @@ class HttpHeadersConfigTest {
         Map<String, Object> props = new LinkedHashMap<>();
         props.put("http.headers.X-Foo", "v1");
         props.put("http.headers.x-foo", "v2");
-        assertThatThrownBy(() -> cfg.updated(props))
+        assertThatThrownBy(() -> cfg.applyProperties(props))
             .isInstanceOf(IllegalStateException.class)
             .hasMessageContaining("differing only in case");
     }
@@ -442,11 +496,11 @@ class HttpHeadersConfigTest {
     void validation_failure_retains_previous_headers_snapshot() {
         HttpHeadersConfig cfg = new HttpHeadersConfig();
         // First, install a good snapshot
-        cfg.updated(java.util.Map.of("http.headers.x-tenant", "team-alpha"));
+        cfg.applyProperties(java.util.Map.of("http.headers.x-tenant", "team-alpha"));
         assertThat(cfg.headers()).containsEntry("x-tenant", "team-alpha");
         // Now push a bad config that validation rejects
         assertThatThrownBy(() ->
-            cfg.updated(java.util.Map.of(
+            cfg.applyProperties(java.util.Map.of(
                 "http.headers.x-tenant",  "still-ok",
                 "http.headers.Content-Type", "rejected"   // reserved
             )))
@@ -468,7 +522,7 @@ class HttpHeadersConfigTest {
     @Test
     void diff_detects_added_header() {
         HttpHeadersConfig cfg = new HttpHeadersConfig();
-        cfg.updated(java.util.Map.of("http.headers.x-tenant", "alpha"));
+        cfg.applyProperties(java.util.Map.of("http.headers.x-tenant", "alpha"));
         java.util.List<String> lines = cfg.diff(java.util.Collections.emptyMap());
         assertThat(lines).containsExactly("http.headers.x-tenant: (unset) -> (set)");
     }
@@ -485,7 +539,7 @@ class HttpHeadersConfigTest {
     @Test
     void diff_detects_changed_value_with_set_to_set_redaction() {
         HttpHeadersConfig cfg = new HttpHeadersConfig();
-        cfg.updated(java.util.Map.of("http.headers.x-tenant", "newvalue"));
+        cfg.applyProperties(java.util.Map.of("http.headers.x-tenant", "newvalue"));
         java.util.List<String> lines =
             cfg.diff(java.util.Map.of("x-tenant", "oldvalue"));
         assertThat(lines).containsExactly("http.headers.x-tenant: (set) -> (set)");
@@ -496,7 +550,7 @@ class HttpHeadersConfigTest {
     @Test
     void diff_is_empty_when_snapshots_are_equal() {
         HttpHeadersConfig cfg = new HttpHeadersConfig();
-        cfg.updated(java.util.Map.of("http.headers.x-tenant", "alpha"));
+        cfg.applyProperties(java.util.Map.of("http.headers.x-tenant", "alpha"));
         assertThat(cfg.diff(java.util.Map.of("x-tenant", "alpha"))).isEmpty();
     }
 
@@ -507,7 +561,7 @@ class HttpHeadersConfigTest {
         in.put("http.headers.zebra", "v");
         in.put("http.headers.alpha", "v");
         in.put("http.headers.mike",  "v");
-        cfg.updated(in);
+        cfg.applyProperties(in);
         java.util.List<String> lines = cfg.diff(java.util.Collections.emptyMap());
         assertThat(lines).containsExactly(
             "http.headers.alpha: (unset) -> (set)",
@@ -532,7 +586,7 @@ class HttpHeadersConfigTest {
     @Test
     void diff_mixed_add_remove_change_lines() {
         HttpHeadersConfig cfg = new HttpHeadersConfig();
-        cfg.updated(java.util.Map.of(
+        cfg.applyProperties(java.util.Map.of(
             "http.headers.changed",  "new",
             "http.headers.added",    "v"
         ));

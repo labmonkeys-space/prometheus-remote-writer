@@ -23,7 +23,8 @@
 #   MAVEN_FLAGS        Extra Maven flags (default: -B --no-transfer-progress)
 #   MAVEN_OPTS         JVM options for Maven
 #   BACKENDS           Space-separated list for `make smoke` (default:
-#                      prometheus mimir victoriametrics; sentinel is opt-in)
+#                      prometheus mimir victoriametrics headers; sentinel
+#                      is opt-in)
 #   SMOKE_TIMEOUT      Per-backend deadline in seconds (default: 600)
 #   SMOKE_POLL         Poll interval in seconds (default: 15)
 #   SMOKE_LABEL_BOUND  Max distinct label names after ingestion (default: 50)
@@ -56,11 +57,12 @@ SMOKE_POLL             ?= 15
 # operator-shaped headroom while still catching label-name explosions
 # (issue #112 was 5,646 names; include=* in e2e produced 423).
 SMOKE_LABEL_BOUND      ?= 50
-SMOKE_DEFAULT_BACKENDS ?= prometheus mimir victoriametrics
+SMOKE_DEFAULT_BACKENDS ?= prometheus mimir victoriametrics headers
 BACKENDS               ?= $(SMOKE_DEFAULT_BACKENDS)
 
 .PHONY: help build test verify kar smoke \
         smoke-prometheus smoke-mimir smoke-victoriametrics smoke-sentinel \
+        smoke-headers \
         sentinel-poc sentinel-poc-down docs sbom clean test-class
 
 .DEFAULT_GOAL := help
@@ -114,7 +116,7 @@ smoke: kar ## Run e2e smoke against BACKENDS (defaults exclude sentinel; SMOKE_T
 	    && pub=$$(cut -d' ' -f2 "$$keydir/id_rsa.pub") \
 	    || { echo "WARN: could not generate the Karaf SSH test key; the stats-command gate will fail" >&2; }; \
 	for backend in $(BACKENDS); do \
-	    discovery_query=""; labels_query=""; plugin_cfg=""; \
+	    discovery_query=""; labels_query=""; plugin_cfg=""; gate_check=0; \
 	    case "$$backend" in \
 	        prometheus) \
 	            file=e2e/compose.prometheus.yml; \
@@ -137,12 +139,20 @@ smoke: kar ## Run e2e smoke against BACKENDS (defaults exclude sentinel; SMOKE_T
 	            labels_query="curl -sfG 'http://localhost:8428/api/v1/labels'"; \
 	            plugin_cfg=e2e/opennms/victoriametrics.cfg; \
 	            log_container=core; log_path=/opt/opennms/logs/karaf.log ;; \
+	        headers) \
+	            file=e2e/compose.headers.yml; \
+	            query="curl -sfG 'http://localhost:9091/api/v1/query' --data-urlencode 'query=count({__name__=~\".+\"})'"; \
+	            discovery_query="curl -sfG 'http://localhost:9091/api/v1/label/resourceId/values'"; \
+	            labels_query="curl -sfG 'http://localhost:9091/api/v1/labels'"; \
+	            plugin_cfg=e2e/opennms/headers.cfg; \
+	            gate_check=1; \
+	            log_container=core; log_path=/opt/opennms/logs/karaf.log ;; \
 	        sentinel) \
 	            file=e2e/sentinel/compose.yml; \
 	            query="curl -sfG 'http://localhost:9090/api/v1/query' --data-urlencode 'query=count({onms_instance_id=\"e2e-sentinel\"})'"; \
 	            log_container=sentinel; log_path=/opt/sentinel/logs/karaf.log ;; \
 	        *) \
-	            echo "ERROR: unknown backend '$$backend' (known: prometheus mimir victoriametrics sentinel)" >&2; \
+	            echo "ERROR: unknown backend '$$backend' (known: prometheus mimir victoriametrics headers sentinel)" >&2; \
 	            failed="$$failed $$backend"; continue ;; \
 	    esac; \
 	    current_file="$$file"; current_backend="$$backend"; \
@@ -174,6 +184,21 @@ smoke: kar ## Run e2e smoke against BACKENDS (defaults exclude sentinel; SMOKE_T
 	            labels_ok=0; \
 	        else \
 	            echo "=== [$$backend] PASS (label-bound): $$label_count distinct label names <= $(SMOKE_LABEL_BOUND) ==="; \
+	        fi; \
+	    fi; \
+	    if [ "$$ok" = 1 ] && [ "$$gate_check" = 1 ]; then \
+	        echo "=== [$$backend] verifying the auth gate actually gates ==="; \
+	        naked=$$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:8081/api/v1/query?query=up" 2>/dev/null || echo 000); \
+	        tokened=$$(curl -s -o /dev/null -w '%{http_code}' -H 'X-Smoke-Token: s3cr3t-smoke' "http://localhost:8081/api/v1/query?query=up" 2>/dev/null || echo 000); \
+	        if [ "$$naked" != "403" ]; then \
+	            echo "=== [$$backend] FAIL: gate returned $$naked without the header, expected 403 — the samples above prove nothing ===" >&2; \
+	            labels_ok=0; \
+	        elif [ "$$tokened" != "200" ]; then \
+	            echo "=== [$$backend] FAIL: gate returned $$tokened WITH the header, expected 200 — gate is broken, not the plugin ===" >&2; \
+	            labels_ok=0; \
+	        else \
+	            echo "=== [$$backend] PASS (gate): 403 without X-Smoke-Token, 200 with it — so the $$count series above could only arrive via http.headers.* ==="; \
+	            echo "=== [$$backend] PASS (co-activation): write.url came from <cm:property-placeholder> and the header from <cm:cm-properties>, so both beans took the same PID ==="; \
 	        fi; \
 	    fi; \
 	    if [ "$$ok" = 1 ] && [ "$$labels_ok" = 1 ]; then \
@@ -279,6 +304,9 @@ smoke-mimir: ## Smoke against Grafana Mimir backend only
 
 smoke-victoriametrics: ## Smoke against VictoriaMetrics backend only
 	@$(MAKE) --no-print-directory smoke BACKENDS=victoriametrics
+
+smoke-headers: ## Smoke http.headers.* end-to-end behind an auth gate that 403s without them
+	@$(MAKE) --no-print-directory smoke BACKENDS=headers
 
 smoke-sentinel: ## Smoke against sentinel stack only (no sample driver — fails by design)
 	@$(MAKE) --no-print-directory smoke BACKENDS=sentinel
