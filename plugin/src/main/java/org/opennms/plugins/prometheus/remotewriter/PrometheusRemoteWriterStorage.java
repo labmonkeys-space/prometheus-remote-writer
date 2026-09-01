@@ -247,20 +247,70 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
      * configuration, not a fault.
      */
     private void logEffectiveAuth() {
-        final String mode;
-        if (config.hasBasicAuth()) {
-            mode = "basic (auth.basic.username + auth.basic.password)";
-        } else if (config.hasBearerAuth()) {
-            mode = "bearer (auth.bearer.token)";
-        } else {
-            mode = "none — no Authorization header will be sent. If you "
-                 + "configured auth.bearer.token or auth.basic.* with an "
-                 + "${env:NAME} reference, check that the variable is set: "
-                 + "Karaf resolves an unset reference to an empty value, "
-                 + "which is indistinguishable from leaving the key blank";
+        AUTH_LINE_COUNT.incrementAndGet();
+        LOG.info("prometheus-remote-writer authentication: {}", effectiveAuthLine());
+    }
+
+    /** The full line body, tenant suffix included. Package-private so a test
+     *  can assert the suffix, which is otherwise unreachable. */
+    String effectiveAuthLine() {
+        return effectiveAuthDescription()
+             + (config.hasTenant() ? "; tenant.org-id set" : "");
+    }
+
+    /** Counts emissions of the startup authentication line. Sits inside
+     *  {@link #logEffectiveAuth()} alongside the {@code LOG.info} so a test can
+     *  assert the line was actually emitted from a real {@code start()} —
+     *  asserting only {@link #effectiveAuthDescription()} would let a refactor
+     *  that drops the call from {@code start()} ship with a green suite. Same
+     *  proxy-for-the-log pattern, and the same limitation, as
+     *  {@link #INSTANCE_ID_UNSET_WARN_COUNT}. */
+    private static final AtomicInteger AUTH_LINE_COUNT = new AtomicInteger(0);
+
+    /** Visible for tests — number of startup authentication lines emitted in
+     *  this JVM. */
+    static int getAuthLineCountForTesting() {
+        return AUTH_LINE_COUNT.get();
+    }
+
+    /** Visible for tests — resets the authentication-line emission counter. */
+    static void resetAuthLineCountForTesting() {
+        AUTH_LINE_COUNT.set(0);
+    }
+
+    /**
+     * Describe the authentication mode the plugin will actually use. Split out
+     * of {@link #logEffectiveAuth()} and package-private so unit tests can
+     * assert it as a pure function, without the log-capture appender this repo
+     * has declined to add as a test dependency. Same precedent as
+     * {@code HttpHeadersConfig.formatActivationMessage}.
+     *
+     * <p>Names keys, never values. The scheme keyword is operator-supplied text
+     * sitting one line above the credentials in the same file, so a paste into
+     * the wrong key is an easy slip; echoing it here would copy the secret into
+     * the Karaf log. Nothing else in this codebase echoes a configured value —
+     * {@code HttpHeadersConfig} logs names only, {@code diff()} masks.
+     */
+    String effectiveAuthDescription() {
+        // Branches must mirror the emitters' exactly, including their order:
+        // a line that reports a mode the request builder would not produce is
+        // worse than no line. Both use the complete-block predicates.
+        if (config.canEmitBasicAuthHeader()) {
+            return "basic (auth.basic.username + auth.basic.password)";
         }
-        LOG.info("prometheus-remote-writer authentication: {}{}", mode,
-                config.hasTenant() ? "; tenant.org-id set" : "");
+        if (config.hasBearerAuth()) {
+            return "bearer (auth.bearer.token)";
+        }
+        if (config.canEmitAuthorizationHeader()) {
+            return "custom scheme (auth.authorization.type + "
+                 + "auth.authorization.credentials; the keyword is not echoed here)";
+        }
+        return "none — no Authorization header will be sent. If you "
+             + "configured auth.bearer.token, auth.basic.* or "
+             + "auth.authorization.* with an "
+             + "${env:NAME} reference, check that the variable is set: "
+             + "Karaf resolves an unset reference to an empty value, "
+             + "which is indistinguishable from leaving the key blank";
     }
 
     private void startQueueMode() {

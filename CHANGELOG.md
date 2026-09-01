@@ -38,6 +38,27 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Auth-exclusivity startup error message reworded** (#56). Adding a third
+  mutually exclusive auth block changed the text the plugin logs when more
+  than one is configured. It was:
+
+  ```
+  auth.basic.* and auth.bearer.token are mutually exclusive — configure one or neither, not both
+  ```
+
+  It is now, with the blocks actually configured named at the end:
+
+  ```
+  auth.basic.*, auth.bearer.token and auth.authorization.* are mutually exclusive — each one produces the Authorization header. Configured: auth.basic.* and auth.bearer.token. Keep exactly one of the three blocks, or none.
+  ```
+
+  Log-scraping alerts or runbooks matching the old string need updating.
+  The startup authentication line
+  (`prometheus-remote-writer authentication: ...`) also changed shape: it no
+  longer echoes any configured value, and it reports a mode only when the
+  corresponding block is complete enough to actually produce a header, so it
+  can no longer claim authentication that the request builder would not send.
+
 - **BREAKING: bounded default label schema (`labels.profile = native`).**
   The default emission is now a curated, fixed-size label set (≤ ~15
   label names regardless of deployment size). The resource
@@ -53,6 +74,65 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **BREAKING: custom `Authorization` schemes via `auth.authorization.type` +
+  `auth.authorization.credentials`** (#56). Backends and gateways that
+  authenticate with a non-standard `Authorization` keyword — InfluxDB v2's
+  `Token`, Elasticsearch's `ApiKey` — had no configuration path at all:
+  `auth.bearer.token` emits only `Bearer`, and `http.headers.Authorization`
+  is reserved and hard-rejected. The new split block emits
+  `Authorization: <type> <credentials>` on the write path and the read path
+  alike, since Zero-Trust gateways gate both.
+
+  ```
+  auth.authorization.type        = Token
+  auth.authorization.credentials = ${env:INFLUX_TOKEN}
+  ```
+
+  The block is named after Prometheus's own `authorization: {type,
+  credentials}` and behaves the same way. The scheme keyword is emitted
+  verbatim — trimmed, casing preserved, joined to the credentials with
+  exactly one space — and no allowlist of known schemes is applied, since
+  most backends this serves authenticate with an unregistered keyword.
+  `Basic` is rejected in any casing and
+  points at `auth.basic.username` / `auth.basic.password`; the credentials
+  half is required whenever the block is used; and the block is mutually
+  exclusive with both `auth.basic.*` and `auth.bearer.token`, which makes
+  that exclusivity three-way.
+
+  **Both keys are required together — there is no default scheme.** Setting
+  credentials without a type fails at startup by name. A `Bearer` default
+  (which Prometheus has, because its `authorization` block is the only way to
+  spell a bearer token there) would turn a typo'd
+  `auth.authorization.type = ${env:NAME}` into `Bearer <token>` against a
+  backend expecting `Token <token>`: 401 forever, clean startup, and a log
+  line claiming authentication was configured. This plugin already ships
+  `auth.bearer.token`, which produces exactly the same header as
+  `type = Bearer`, so the default bought nothing and cost a silent failure
+  mode. The two cannot both be set.
+
+  Character validation now covers every operator-supplied value that lands in
+  a request header raw — `auth.authorization.*`, `auth.bearer.token` and
+  `tenant.org-id`: no CR/LF, no non-printable or non-ASCII bytes, and the
+  scheme keyword must be a single HTTP token. Without it an illegal byte
+  throws out of OkHttp's request builder, escapes the write path's
+  IOException-only retry catch, and drops every batch forever while the
+  plugin still reports healthy. These errors name the key and never echo the
+  value. `auth.basic.*` is deliberately exempt: it is base64-encoded before
+  emission, so no byte of it reaches the header raw, and RFC 7617 permits
+  UTF-8 there. The coverage is close to, but not identical with,
+  `http.headers.*`: that validator additionally rejects an empty value by
+  name, whereas an `auth.authorization.*` block with both halves empty reads
+  as "not configured" and starts silently.
+
+  On a 401 or 403 the plugin now logs the backend's `WWW-Authenticate`
+  challenge next to the status, which names the scheme the server actually
+  wants — the fastest route to a wrong-keyword misconfiguration.
+
+  Karaf's existing
+  `${env:NAME}` / `$[secret:name]` resolution covers the credentials value —
+  no plugin-side interpolation is involved. AWS SigV4, OAuth2, GCP IAM and
+  Azure AD remain out of scope: they need a request signer, not a
+  configuration value.
 - **`writer.shards` configuration key** (default `1` — unchanged
   behavior): opt-in parallel write pipeline. N shards each own a
   disjoint set of series (hash of the label set), a queue slice, and a

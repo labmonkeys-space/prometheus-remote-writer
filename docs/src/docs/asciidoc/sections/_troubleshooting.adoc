@@ -17,7 +17,13 @@ Karaf shell shows the bundle as `Failure` or unresolved.
 | `labels.rename target 'X' collides with the default label 'X'`     | Pick a non-reserved target — see <<label-mapping>>.
 | `labels.copy target 'X' collides …`                                | Same as above; rules apply symmetrically to copy.
 | `wire.protocol-version=3 is not a valid value`                     | Set to `1` or `2`.
-| `Both auth.basic.* and auth.bearer.token are configured`           | They're mutually exclusive — pick one.
+| `auth.basic.*, auth.bearer.token and auth.authorization.* are mutually exclusive` | Each produces the `Authorization` header — configure exactly one block. The message names the two that collided.
+| `auth.authorization.type = '<value>' is not supported`             | You set the scheme to `Basic` (in some casing). Use `auth.basic.username` / `auth.basic.password`; the plugin base64-encodes them.
+| `auth.authorization.credentials is required`                       | The credentials half is mandatory whenever `auth.authorization.*` is used.
+| `auth.authorization.type is required`                              | The credentials half is set but the scheme is not. There is no default. Name the keyword your backend expects, or use `auth.bearer.token` for a plain bearer token.
+| `auth.authorization.type contains whitespace`                      | The key takes only the scheme keyword (`Token`), not the whole header value. Put the rest in `auth.authorization.credentials`.
+| `<key> contains a CR or LF character`                              | An *interior* newline in `auth.authorization.*`, `auth.bearer.token` or `tenant.org-id`. A trailing newline (e.g. from a `$[secret:name]` file) is stripped before validation and is fine — this fires only on one in the middle of the value.
+| `<key> contains a non-printable or non-ASCII byte`                 | Base64-encode a binary credential at the source. Values are never echoed in these messages. `auth.basic.*` is exempt: it is base64-encoded by the plugin, so UTF-8 is legal there.
 | `instance.id contains a control character` / `… exceeds 2048 bytes`| Validation rejects unprintable / oversized values.
 | `WAL path is not writable: …`                                      | The Karaf user can't write to `wal.path`. Check ownership / SELinux / mount options.
 | `Corrupt checkpoint.json: …`                                       | Recover by stopping the plugin and removing the WAL directory.
@@ -36,7 +42,8 @@ The endpoint is rejecting the format. This is usually one of:
   <<wire-protocols>>). Drop to v1 to confirm.
 * *Auth* — Bearer token expired, Basic auth incorrect, or
   `tenant.org-id` not whitelisted on the backend. The 4xx response body
-  is logged at WARN — read it.
+  is logged at WARN — read it. See <<auth-401-403>> for 401 and 403
+  specifically.
 * *Sample rejection* — Mimir / Cortex limit on series-per-tenant or
   label-name length. Look for `out of order sample`, `max-series-per-user`,
   `label name too long` in the logged response body.
@@ -44,6 +51,53 @@ The endpoint is rejecting the format. This is usually one of:
 `samples_dropped_4xx_total` increments by the rejected batch size each
 time. If you're seeing a steady rate, the deployment isn't recovering
 on its own — fix the underlying cause.
+
+[#auth-401-403]
+== Backend returns 401 or 403 on every request
+
+The credential is reaching the backend and being refused, or it is not
+reaching it at all. On a 401 or 403 the plugin logs the backend's own
+`WWW-Authenticate` challenge alongside the status:
+
+[source]
+----
+WARN RemoteWriteHttpClient - Prometheus remote-write rejected with 401
+(backend asks for: Token realm="influxdb"): unauthorized access
+----
+
+That parenthesis is the fastest route to the cause, because it names the
+scheme the server actually wants. Work through:
+
+* *Wrong scheme keyword* — the challenge says `Token` but
+  `auth.authorization.type` says `Bearer` (or you used `auth.bearer.token`,
+  which always sends `Bearer`). Set `auth.authorization.type` to the keyword
+  in the challenge. This is the single most common cause on InfluxDB v2 and
+  Elasticsearch.
+* *No `WWW-Authenticate` in the response* — logged as "no WWW-Authenticate
+  header in the response". Common on API gateways, which often 403 without a
+  challenge. Check the gateway's own access log for which header it expected.
+* *Credential empty* — a typo'd `${env:NAME}` resolves to empty. Read the
+  startup line `prometheus-remote-writer authentication: ...`: if it says
+  `none`, nothing was sent at all.
+* *Credential in the wrong key* — see below.
+
+=== The mirror-image slip: a scheme inside the credentials
+
+The plugin rejects `auth.authorization.type = Token abc123`, because a scheme
+keyword can never contain a space. The mirror image is *not* detected:
+
+[source,properties]
+----
+auth.authorization.type        = Token
+auth.authorization.credentials = Token abc123    # <1>
+----
+<1> Sends `Authorization: Token Token abc123`.
+
+Nothing catches this, deliberately: a credential legitimately may begin with a
+word and a space (`AWS4-HMAC-SHA256 Credential=..., Signature=...` is a valid
+credentials value), so any heuristic would reject working configurations. If a
+401 persists and the scheme keyword looks right, check whether the keyword is
+also present at the front of the credentials value.
 
 == Backend returns 5xx persistently
 

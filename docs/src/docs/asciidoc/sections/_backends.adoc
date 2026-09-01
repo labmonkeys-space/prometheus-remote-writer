@@ -67,9 +67,11 @@ backend.
 * *Per-series metadata* (`help`, `unit`, `created_timestamp`) — same
   reasoning as histograms: v2 reserves the fields; no source-side
   population today.
-* *mTLS client certificates* — Basic, Bearer, and tenant-id header
-  cover the common deployment shapes. Client-cert auth is a candidate
-  for a future release if demand materializes.
+* *mTLS client certificates* — Basic, Bearer, a custom `Authorization`
+  scheme (`auth.authorization.*`), arbitrary headers (`http.headers.*`)
+  and the tenant-id header cover the common deployment shapes.
+  Client-cert auth is a candidate for a future release if demand
+  materializes.
 * *Per-tenant routing / multi-destination fan-out* — one `write.url`
   and one `tenant.org-id` per plugin instance. For multi-destination,
   run multiple OpenNMS instances; an in-process fan-out remains a

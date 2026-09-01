@@ -236,6 +236,130 @@ class PrometheusRemoteWriterStorageTest {
         return c;
     }
 
+    // ---------- effective-authentication startup line ------------------------
+    //
+    // Asserted as a pure function rather than through a log-capture appender —
+    // same approach as HttpHeadersConfig.formatActivationMessage, and for the
+    // same reason: this repo has declined to take a logging-backend test
+    // dependency. The .cfg and the docs both tell operators to read this line
+    // after changing an ${env:} reference, so its content is a contract.
+
+    @Test
+    void effective_auth_reports_none_when_nothing_is_configured() {
+        assertThat(new PrometheusRemoteWriterStorage(minimal()).effectiveAuthDescription())
+                .startsWith("none")
+                .contains("auth.authorization.*");
+    }
+
+    @Test
+    void effective_auth_reports_basic() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setBasicUsername("u");
+        c.setBasicPassword("p");
+        assertThat(new PrometheusRemoteWriterStorage(c).effectiveAuthDescription())
+                .startsWith("basic")
+                .contains("auth.basic.username");
+    }
+
+    @Test
+    void effective_auth_reports_bearer() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setBearerToken("tok");
+        assertThat(new PrometheusRemoteWriterStorage(c).effectiveAuthDescription())
+                .startsWith("bearer")
+                .contains("auth.bearer.token");
+    }
+
+    @Test
+    void effective_auth_reports_custom_scheme_without_echoing_the_keyword() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setAuthorizationType("Token");
+        c.setAuthorizationCredentials("s3cret-in-the-wrong-key");
+        String desc = new PrometheusRemoteWriterStorage(c).effectiveAuthDescription();
+        assertThat(desc)
+                .contains("custom scheme")
+                .contains("auth.authorization.type")
+                .contains("auth.authorization.credentials");
+        // The type is operator-supplied text one line above the credentials in
+        // the same file. A paste into the wrong key must not reach the log.
+        assertThat(desc).doesNotContain("Token")
+                        .doesNotContain("s3cret-in-the-wrong-key");
+    }
+
+    @Test
+    void effective_auth_reports_none_for_an_incomplete_authorization_block() {
+        // The description must mirror the emitters exactly: they gate on a
+        // COMPLETE block, so a credentials-only config sends no header and the
+        // line must not claim otherwise. (validate() rejects this config; the
+        // description is still defined on it.)
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setAuthorizationCredentials("tok");   // no type — nothing is emitted
+        String desc = new PrometheusRemoteWriterStorage(c).effectiveAuthDescription();
+        assertThat(desc).startsWith("none");
+        assertThat(desc).doesNotContain("custom scheme");
+    }
+
+    @Test
+    void effective_auth_reports_none_for_a_username_only_basic_block() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setBasicUsername("u");                // no password — nothing is emitted
+        assertThat(new PrometheusRemoteWriterStorage(c).effectiveAuthDescription())
+                .startsWith("none");
+    }
+
+    @Test
+    void effective_auth_line_appends_the_tenant_suffix() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setBearerToken("tok");
+        c.setTenantOrgId("team-a");
+        assertThat(new PrometheusRemoteWriterStorage(c).effectiveAuthLine())
+                .startsWith("bearer")
+                .endsWith("; tenant.org-id set");
+    }
+
+    @Test
+    void effective_auth_line_omits_the_tenant_suffix_when_unset() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setBearerToken("tok");
+        assertThat(new PrometheusRemoteWriterStorage(c).effectiveAuthLine())
+                .doesNotContain("tenant.org-id set");
+    }
+
+    @Test
+    void start_actually_emits_the_authentication_line() {
+        // Asserting effectiveAuthDescription() alone would let a refactor that
+        // drops logEffectiveAuth() from start() ship with a green suite. The
+        // counter lives beside the LOG.info, so it proves the call happened.
+        PrometheusRemoteWriterStorage.resetAuthLineCountForTesting();
+        assertThat(PrometheusRemoteWriterStorage.getAuthLineCountForTesting()).isZero();
+
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setBearerToken("tok");
+        PrometheusRemoteWriterStorage s = new PrometheusRemoteWriterStorage(c);
+        try {
+            s.start();
+            assertThat(PrometheusRemoteWriterStorage.getAuthLineCountForTesting()).isEqualTo(1);
+        } finally {
+            s.stop();
+        }
+    }
+
+    @Test
+    void a_config_rejected_by_validate_never_reaches_the_authentication_line() {
+        // start() bails before logEffectiveAuth() when validate() throws, so an
+        // inert plugin must not log an authentication mode it will never use.
+        PrometheusRemoteWriterStorage.resetAuthLineCountForTesting();
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setAuthorizationCredentials("tok");   // type missing — validate() throws
+        PrometheusRemoteWriterStorage s = new PrometheusRemoteWriterStorage(c);
+        try {
+            s.start();
+            assertThat(PrometheusRemoteWriterStorage.getAuthLineCountForTesting()).isZero();
+        } finally {
+            s.stop();
+        }
+    }
+
     // ---------- wire.protocol-version=2 startup WARN ------------------------
 
     @Test

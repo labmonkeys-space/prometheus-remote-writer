@@ -115,6 +115,109 @@ class RemoteWriteHttpClientTest {
     }
 
     @Test
+    void custom_authorization_scheme_header_is_attached() throws Exception {
+        server.enqueue(new MockResponse().setResponseCode(204));
+        PrometheusRemoteWriterConfig c = cfg(server);
+        c.setAuthorizationType("Token");
+        c.setAuthorizationCredentials("abc123");
+        client = newClient(c);
+
+        client.write(PAYLOAD);
+
+        assertThat(server.takeRequest().getHeader("Authorization")).isEqualTo("Token abc123");
+    }
+
+    @Test
+    void custom_authorization_scheme_preserves_casing_and_trims_padding() throws Exception {
+        server.enqueue(new MockResponse().setResponseCode(204));
+        PrometheusRemoteWriterConfig c = cfg(server);
+        c.setAuthorizationType("  ApiKey  ");
+        c.setAuthorizationCredentials("abc123");
+        client = newClient(c);
+
+        client.write(PAYLOAD);
+
+        // Casing verbatim, exactly one space, no leftover padding.
+        assertThat(server.takeRequest().getHeader("Authorization")).isEqualTo("ApiKey abc123");
+    }
+
+    @Test
+    void credentials_only_config_emits_no_auth_header() throws Exception {
+        // There is no Bearer default: an absent type is a validation error, so
+        // the emitter must send nothing rather than guess a scheme. Built
+        // directly because validate() rejects this config.
+        server.enqueue(new MockResponse().setResponseCode(204));
+        PrometheusRemoteWriterConfig c = cfg(server);
+        c.setAuthorizationCredentials("abc123");
+        client = new RemoteWriteHttpClient(c);
+
+        client.write(PAYLOAD);
+
+        assertThat(server.takeRequest().getHeader("Authorization")).isNull();
+    }
+
+    @Test
+    void username_only_config_emits_no_auth_header() throws Exception {
+        // Sibling of type_only_config_emits_no_auth_header. Without the
+        // complete-block gate this sends base64 of "u:null" as a credential.
+        server.enqueue(new MockResponse().setResponseCode(204));
+        PrometheusRemoteWriterConfig c = cfg(server);
+        c.setBasicUsername("u");
+        client = new RemoteWriteHttpClient(c);
+
+        client.write(PAYLOAD);
+
+        assertThat(server.takeRequest().getHeader("Authorization")).isNull();
+    }
+
+    @Test
+    void basic_wins_over_authorization_when_both_are_set_unvalidated() throws Exception {
+        // validate() rejects this combination, but the else-if precedence is
+        // still observable through the unvalidated constructor. Pin it so a
+        // reordering of the chain is a test failure rather than a surprise.
+        server.enqueue(new MockResponse().setResponseCode(204));
+        PrometheusRemoteWriterConfig c = cfg(server);
+        c.setBasicUsername("alice");
+        c.setBasicPassword("s3cret");
+        c.setAuthorizationType("Token");
+        c.setAuthorizationCredentials("abc123");
+        client = new RemoteWriteHttpClient(c);
+
+        client.write(PAYLOAD);
+
+        assertThat(server.takeRequest().getHeader("Authorization")).startsWith("Basic ");
+    }
+
+    @Test
+    void explicit_bearer_type_emits_the_same_header_as_bearer_token() throws Exception {
+        server.enqueue(new MockResponse().setResponseCode(204));
+        PrometheusRemoteWriterConfig c = cfg(server);
+        c.setAuthorizationType("Bearer");
+        c.setAuthorizationCredentials("tok-abc");
+        client = newClient(c);
+
+        client.write(PAYLOAD);
+
+        // Byte-for-byte what auth.bearer.token = tok-abc produces.
+        assertThat(server.takeRequest().getHeader("Authorization")).isEqualTo("Bearer tok-abc");
+    }
+
+    @Test
+    void type_only_config_emits_no_auth_header() throws Exception {
+        // validate() rejects a type-only block, so this constructs the client
+        // directly to assert the emitter's own guard — without it the request
+        // would carry the literal "Token null".
+        server.enqueue(new MockResponse().setResponseCode(204));
+        PrometheusRemoteWriterConfig c = cfg(server);
+        c.setAuthorizationType("Token");
+        client = new RemoteWriteHttpClient(c);
+
+        client.write(PAYLOAD);
+
+        assertThat(server.takeRequest().getHeader("Authorization")).isNull();
+    }
+
+    @Test
     void no_auth_header_when_none_configured() throws Exception {
         server.enqueue(new MockResponse().setResponseCode(204));
         client = newClient(cfg(server));
