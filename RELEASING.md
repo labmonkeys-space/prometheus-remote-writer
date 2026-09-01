@@ -91,6 +91,8 @@ Before tagging, confirm:
 - [ ] `CHANGELOG.md` has a `## [X.Y.Z]` section for the target version with
       the changes since the previous release. Move `[Unreleased]` content
       into the new version section if needed.
+- [ ] Optionally, `docs/release-notes/vX.Y.Z.md` holds curated release notes.
+      See "Release notes" below for when this is worth writing.
 - [ ] The `<version>` in `pom.xml` matches the tag (without the `v` prefix).
       For `v0.4.4` the version is `0.4.4`; once shipped, bump the pom to
       the next `-SNAPSHOT` on `main`.
@@ -161,7 +163,8 @@ Pushing the tag triggers `.github/workflows/release.yml`:
 - Fetches the maintainer's public keys from `github.com/<RELEASE_MAINTAINER>.gpg`.
 - Verifies the pushed tag's GPG signature; **fails the workflow if the tag is unsigned or signed by a key not on the maintainer's profile**.
 - Builds the KAR via `make kar`; generates the SBOM via `make sbom`.
-- Extracts the `## [0.4.4]` section from `CHANGELOG.md` as the release body.
+- Resolves the release body (see "Release notes" below): `docs/release-notes/v0.4.4.md`
+  if it exists, otherwise the `## [0.4.4]` section of `CHANGELOG.md`.
 - Produces SLSA Build Provenance attestations (one for the KAR, one for the SBOM) via Sigstore.
 - Creates a GitHub Release named `v0.4.4` with the KAR and SBOM attached as assets.
 
@@ -183,6 +186,29 @@ git push origin main
 ```
 
 Announce the release (release-notes URL from the GitHub Releases page).
+
+## Release notes
+
+The release workflow resolves the GitHub Release body in this order:
+
+1. `docs/release-notes/vX.Y.Z.md`, used verbatim if it exists and is non-empty.
+2. The `## [X.Y.Z]` section of `CHANGELOG.md`, extracted up to the next `## [` heading.
+3. GitHub's auto-generated notes, if neither is available.
+
+Write a curated file for any release with breaking changes or more than a handful of entries.
+The CHANGELOG carries full design rationale, which is right for the repo and far too much for a release page: the v0.5.0 CHANGELOG section is 16 KB, and the curated note covering the same release is 6 KB.
+
+`docs/release-notes/v0.5.0.md` is the worked example. The shape:
+
+- **Highlights**: up to five bullets, each leading with operator impact rather than implementation. Configuration snippets belong here. Design rationale does not.
+- **Breaking changes**: one subsection each, every one stating its migration. Quote changed log or error strings verbatim so runbooks can be diffed against them.
+- **Fixes**: one line each.
+- **Known limits**: what this release still does not do, so the question is answered before it is asked.
+- **Artifacts**: what is attached, and the `gh attestation verify` command.
+
+Omit CI, chore and dependency noise entirely. Link the CHANGELOG at the tag for readers who want the rationale.
+
+GitHub renders every newline in a release body as a line break, so write one line per paragraph or bullet and never hard-wrap.
 
 ## Re-running a release
 
