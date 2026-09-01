@@ -7,6 +7,27 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **SBOM HTML report attached to every release.** Releases now carry
+  `prometheus-remote-writer-<version>-sbom.html` alongside the existing
+  CycloneDX JSON. It is a self-contained page rendered from the same SBOM by
+  [blitsbom](https://github.com/no42-org/blitsbom), so components and licences
+  can be read in a browser without installing tooling and without network
+  access at view time. It carries a build-provenance attestation like the
+  other release assets, so the one file a human is most likely to open is not
+  the only one whose origin cannot be checked.
+
+### Changed
+
+- **Release notes are curated rather than a CHANGELOG dump.** `release.yml`
+  now prefers `docs/release-notes/<tag>.md` when it exists and falls back to
+  the `## [X.Y.Z]` CHANGELOG section otherwise, so releases without a curated
+  file are unaffected. The CHANGELOG keeps the full design rationale, which is
+  the right depth here and too much for a release page. The release tag is now
+  validated against `vMAJOR.MINOR.PATCH[-prerelease]`, since it reaches a
+  filesystem path.
+
 ## [0.5.0] — 2026-09-01
 
 ### Fixed
