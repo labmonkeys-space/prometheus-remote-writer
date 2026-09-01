@@ -53,6 +53,134 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Docs**: Grafana quickstart (zero-config PromQL against the native
   schema), Migration section (legacy plugin + v0.4→v0.5), and a
   label-name-explosion troubleshooting entry.
+- **Arbitrary HTTP headers via `http.headers.*` (issue
+  [#53](https://github.com/labmonkeys-space/prometheus-remote-writer/issues/53)).**
+  Operators can now attach a configurable set of HTTP headers to every
+  outbound request — both the write client and the read client receive
+  the same set, in a single configuration namespace. This unlocks
+  header-based authentication schemes the plugin's existing auth surface
+  (Basic, Bearer, `X-Scope-OrgID`) does not reach: Cloudflare Access
+  service tokens, vendor API keys, per-tenant routing headers, internal
+  API-gateway tokens, and per-instance `User-Agent` overrides for
+  audit-log distinguishability.
+
+  Syntax is one property per header — no delimited-string parsing:
+
+  ```
+  http.headers.cf-access-client-id     = 9a4f8c3a2e...
+  http.headers.cf-access-client-secret = 7c8eb18f...
+  ```
+
+  Each property whose key starts with `http.headers.` is attached as an
+  outbound header. The suffix after the prefix is the header name; the
+  property value is attached verbatim. Operator casing is preserved on
+  the request builder, but note: HTTP/2 mandates lowercase header names
+  on the wire (RFC 7540 §8.1.2), and OkHttp negotiates HTTP/2 by default
+  with backends that support it. Operators who care about wire-side
+  header casing (rare) must verify their backend negotiates HTTP/1.1, or
+  configure their TLS profile accordingly. The namespace is prefix-scanned via Aries
+  Blueprint's `<cm:managed-properties>` and lives in a separate config
+  bean (`HttpHeadersConfig`) — the existing `BlueprintWiringTest`
+  scalar-binding contract for `PrometheusRemoteWriterConfig` is
+  unchanged.
+
+  *Symmetric application.* The same `http.headers.*` set is attached to
+  outbound write requests AND to the read calls used by `findMetrics()`
+  and `getTimeseries()`. Zero-Trust gateways (Cloudflare Access, GCP
+  IAP, mTLS proxies) gate both endpoints with the same credentials, and
+  a write-only implementation would have silently 403'd on dashboard
+  queries — a hard bug to spot in production.
+
+  *Reserved-name validation.* Wire-format invariants, transport headers
+  OkHttp manages, and headers already owned by another configuration key
+  are hard-rejected with a name-only error message (secret hygiene):
+  `Content-Type`, `Content-Encoding`, `Content-Length`,
+  `X-Prometheus-Remote-Write-Version`, `Transfer-Encoding`, `Host`,
+  `Connection`, `Upgrade`, `Accept-Encoding`, `TE`, `Expect`,
+  `Www-Authenticate` (protocol and transport invariants);
+  `Authorization` and `Proxy-Authorization` (point the operator at
+  `auth.basic.*` / `auth.bearer.token`); `X-Scope-OrgID` (points at
+  `tenant.org-id`). `User-Agent` is allowed and overrides the plugin
+  default. `Accept-Encoding` earns its place because OkHttp performs
+  transparent gzip only for the header it added itself — an operator
+  value would leave the read client parsing compressed bytes as JSON.
+
+  *Configuration delivery.* The property set arrives through Blueprint's
+  `<cm:cm-properties>`, resolved before the beans that consume it are
+  instantiated. The plugin refuses to start if that delivery never happens,
+  so a wiring fault surfaces as a loud startup error rather than as requests
+  quietly missing their headers. The reasoning behind the mechanism is in
+  `blueprint.xml` and the `HttpHeadersConfig` javadoc.
+
+  *Undelivered configuration is treated as a fault, not as "no headers".*
+  An empty header set means the operator configured none; it must never be
+  the symptom of a wiring failure. The plugin now tracks whether the
+  configuration reached the bean at all and refuses to start when it did
+  not, naming the fault as a wiring problem rather than a configuration
+  mistake.
+
+  *Invalid configuration leaves the plugin inert, not unauthenticated.*
+  A rejected header set logs an `ERROR` and the storage declines to
+  activate, so SPI calls are refused rather than sent without the
+  headers the operator asked for — a typo'd gateway token can never
+  silently become an unauthenticated write. The plugin does not throw
+  at activation: that would mark the Blueprint container permanently
+  failed, and the `update-strategy="reload"` placeholder could not
+  revive it. Correcting the `.cfg` and saving brings the plugin up on
+  the next reload, which is the same posture `start()` already takes
+  for an invalid `write.url`.
+
+  *Other validation rules.* Header names must match the RFC 7230 token
+  grammar (`1*tchar` — letters, digits, and ``!#$%&'*+-.^_`|~``);
+  whitespace, control characters, and separator characters are
+  rejected. Header values must be non-empty after trim, free of CR and
+  LF (CRLF-injection guard), and within printable ASCII + HT. Error
+  messages echo header names only — never values — even when the value
+  triggered the rejection.
+
+  *Startup confirmation.* When `http.headers.*` is non-empty, the
+  plugin emits one `INFO` log line at activation listing the detected
+  header names with `(value redacted)` placeholders, so operators can
+  spot a property-name typo (e.g., `http.header.foo` missing the `s`)
+  without round-tripping through a backend 401.
+
+  *Parallel-plugin safety / zero regression surface.* This feature is
+  opt-in. With `http.headers.*` unset (the default state), the plugin's
+  outbound wire shape is bit-for-bit identical to v0.4.x — same managed
+  headers, same auth-derived headers, no application-level additions.
+  Existing deployments need no coordinated upgrade; the v0.4.x
+  configuration surface is unchanged.
+
+  *Known limitations.* Header values are cleartext, there are no dynamic
+  auth providers, no multi-value headers, and custom `Authorization:`
+  schemes stay hard-rejected. Details:
+
+  - **Header values are cleartext in
+    `etc/org.opennms.plugins.tss.prometheusremotewriter.cfg`.** Parity with the
+    existing `auth.basic.password` and `auth.bearer.token` keys. The
+    plugin does not currently expand `${env:NAME}` in configuration
+    values — neither Aries Blueprint's `<cm:property-placeholder>` nor
+    Felix FileInstall (in OpenNMS Horizon's default Karaf configuration)
+    performs the substitution. Workarounds for secret injection today:
+    restrict filesystem permissions on the config file, render the file
+    from a Kubernetes `Secret`, or use deploy-time templating
+    (`envsubst`, init container). Plugin-wide `${env:NAME}` resolution is
+    tracked as a follow-up at
+    [#55](https://github.com/labmonkeys-space/prometheus-remote-writer/issues/55).
+  - **No dynamic auth providers.** Static header attachment does not
+    cover AWS SigV4 request signing, GCP Identity Token refresh, or
+    OAuth client-credentials-grant refresh. Those require behavior
+    beyond what this change ships; a future pluggable-auth SPI design
+    would be the right home.
+  - **No multi-value headers.** One value per header name; the
+    prefix-scanned namespace cannot represent a repeated header
+    (Accept-style). File a follow-up with a concrete need if encountered.
+  - **Custom `Authorization:` schemes are hard-rejected.** Operators
+    needing `Authorization: HMAC <signature>` or similar should track
+    [#56](https://github.com/labmonkeys-space/prometheus-remote-writer/issues/56)
+    for a dedicated auth knob with explicit scheme
+    semantics — the existing `auth.bearer.token` covers RFC 6750-style
+    bearer auth only.
 
 ## [0.4.5] — 2026-08-31
 

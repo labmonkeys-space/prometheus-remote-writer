@@ -137,6 +137,45 @@
     </bean>
 
     <!--
+        Operator-supplied custom HTTP headers — prefix-scanned namespace
+        http.headers.<name> = <value>. Sibling to the scalar config bean
+        above; out of the BlueprintWiringTest 1:1 setter-binding contract by
+        design, because the cardinality of the namespace is operator-driven.
+
+        The bean filters the full property dictionary at the PID by the
+        http.headers. prefix, validates, and exposes an immutable
+        Map<String,String> via headers().
+
+        Delivery is via <cm:cm-properties>, NOT <cm:managed-properties> and
+        not a ManagedService registration. Both alternatives were tried
+        against the e2e `headers` gate and both left the plugin sending
+        requests with no operator headers:
+
+          - update-strategy="component-managed" invokes the update-method on
+            a configuration CHANGE only, so a plugin starting with
+            http.headers.* already in the .cfg received nothing.
+          - a ManagedService registration is delivered by Configuration
+            Admin only AFTER the service is registered, which Blueprint does
+            after it has already run init-method="start" on the storage bean
+            below — the clients are built from an empty header set and the
+            late update never reaches them.
+
+        <cm:cm-properties> is an injectable dependency: Blueprint resolves
+        the whole PID dictionary BEFORE instantiating the beans that consume
+        it, so the header set is populated by the time start() constructs
+        the HTTP clients. That ordering is the entire point.
+    -->
+    <cm:cm-properties id="pluginProperties"
+                      persistent-id="org.opennms.plugins.tss.prometheusremotewriter"
+                      update="true"/>
+
+    <bean id="httpHeadersConfig"
+          class="org.opennms.plugins.prometheus.remotewriter.config.HttpHeadersConfig"
+          init-method="init">
+        <argument ref="pluginProperties"/>
+    </bean>
+
+    <!--
         The TimeSeriesStorage service. OpenNMS discovers it through the
         integration-api service registry and uses it as the active TSS when
         org.opennms.timeseries.strategy=integration.
@@ -146,6 +185,7 @@
           init-method="start"
           destroy-method="stop">
         <argument ref="config"/>
+        <argument ref="httpHeadersConfig"/>
     </bean>
 
     <!--

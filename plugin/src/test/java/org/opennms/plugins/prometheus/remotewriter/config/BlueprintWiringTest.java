@@ -356,4 +356,104 @@ class BlueprintWiringTest {
                 .as("the concrete-class registration must NOT be exported")
                 .isFalse();
     }
+
+    /**
+     * The {@code httpHeadersConfig} bean is prefix-scanned rather than
+     * scalar-bound, so the three parity tests above — all scoped to
+     * {@code <bean id="config">} — say nothing about it. Without this test a
+     * typo in {@code update-method}, or a renamed {@code updated()}, is a
+     * runtime-only failure: the headers never arrive and the plugin sends
+     * requests without them. That is the same silent-no-op shape this class
+     * was written to prevent for {@code labels.copy}.
+     */
+    @Test
+    void http_headers_bean_is_fed_by_cm_properties_at_the_plugin_pid() throws Exception {
+        Document doc = loadBlueprint();
+        Element bean = findBeanById(doc, "httpHeadersConfig");
+        Class<?> beanClass = Class.forName(bean.getAttribute("class"));
+
+        // Delivery MUST NOT go back to <cm:managed-properties>. Aries invokes
+        // that update-method on a configuration CHANGE only, so a plugin
+        // starting with http.headers.* already in the .cfg never receives
+        // them and sends every request bare. The e2e headers gate caught
+        // exactly that; this pins it so it cannot regress silently.
+        assertThat(bean.getElementsByTagNameNS("*", "managed-properties").getLength())
+                .as("httpHeadersConfig must NOT use <cm:managed-properties>: component-managed "
+                    + "fires on config CHANGE only, so initial activation delivers nothing")
+                .isZero();
+
+        // The injected argument must be a <cm:cm-properties> on the same PID
+        // as the placeholder, or the bean is handed nothing.
+        String pid = ((Element) doc.getElementsByTagNameNS("*", "property-placeholder").item(0))
+                .getAttribute("persistent-id");
+        NodeList cmProps = doc.getElementsByTagNameNS("*", "cm-properties");
+        assertThat(cmProps.getLength())
+                .as("blueprint.xml must declare a <cm:cm-properties> for the header bean")
+                .isEqualTo(1);
+        Element props = (Element) cmProps.item(0);
+        assertThat(props.getAttribute("persistent-id"))
+                .as("cm-properties must read the same PID as the property-placeholder")
+                .isEqualTo(pid);
+
+        NodeList args = bean.getElementsByTagNameNS("*", "argument");
+        assertThat(args.getLength())
+                .as("httpHeadersConfig must take exactly the injected properties")
+                .isEqualTo(1);
+        assertThat(((Element) args.item(0)).getAttribute("ref"))
+                .isEqualTo(props.getAttribute("id"));
+
+        // init-method must name a real no-arg method, and a matching
+        // constructor must exist, or Blueprint fails at container start.
+        String initMethod = bean.getAttribute("init-method");
+        assertThat(initMethod).isNotBlank();
+        assertThat(java.util.Arrays.stream(beanClass.getMethods())
+                        .anyMatch(m -> m.getName().equals(initMethod) && m.getParameterCount() == 0))
+                .as("init-method=\"%s\" must name a public no-arg method on %s",
+                        initMethod, beanClass.getName())
+                .isTrue();
+        // Map, not merely "something Properties fits into" — Object would
+        // satisfy isAssignableFrom too and pin nothing.
+        assertThat(java.util.Arrays.stream(beanClass.getConstructors())
+                        .anyMatch(c -> c.getParameterCount() == 1
+                                && c.getParameterTypes()[0] == Map.class))
+                .as("%s needs a single-Map-arg constructor for the injected properties",
+                        beanClass.getName())
+                .isTrue();
+
+        // Every recovery claim the plugin makes — the start() error message,
+        // the docs, the CHANGELOG — rests on the placeholder rebuilding the
+        // container on a .cfg save. Dropping this one attribute would make an
+        // invalid header set permanently fatal with the whole suite green.
+        Element placeholder = (Element) doc
+                .getElementsByTagNameNS("*", "property-placeholder").item(0);
+        assertThat(placeholder.getAttribute("update-strategy"))
+                .as("the placeholder must reload the container on a .cfg change, or a "
+                    + "corrected configuration can never revive an inert plugin")
+                .isEqualTo("reload");
+        assertThat(props.getAttribute("update"))
+                .as("cm-properties must track configuration updates")
+                .isEqualTo("true");
+    }
+
+    /**
+     * The storage bean must receive the headers bean as its second constructor
+     * argument. Dropping the {@code <argument ref>} silently selects the
+     * one-arg test constructor, which substitutes an empty header set — the
+     * feature then no-ops for every operator with the whole suite green.
+     */
+    @Test
+    void storage_bean_receives_config_and_http_headers_in_constructor_order() throws Exception {
+        Document doc = loadBlueprint();
+        Element storage = findBeanById(doc, "prometheusRemoteWriterStorage");
+
+        java.util.List<String> refs = new java.util.ArrayList<>();
+        NodeList args = storage.getElementsByTagNameNS("*", "argument");
+        for (int i = 0; i < args.getLength(); i++) {
+            refs.add(((Element) args.item(i)).getAttribute("ref"));
+        }
+        assertThat(refs)
+                .as("blueprint.xml must pass both the scalar config and the prefix-scanned "
+                    + "header config, in the order the two-arg constructor declares them")
+                .containsExactly("config", "httpHeadersConfig");
+    }
 }

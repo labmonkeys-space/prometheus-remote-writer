@@ -32,6 +32,7 @@ import org.opennms.integration.api.v1.timeseries.TagMatcher;
 import org.opennms.integration.api.v1.timeseries.TimeSeriesData;
 import org.opennms.integration.api.v1.timeseries.TimeSeriesFetchRequest;
 import org.opennms.integration.api.v1.timeseries.immutables.ImmutableTimeSeriesData;
+import org.opennms.plugins.prometheus.remotewriter.config.HttpHeadersConfig;
 import org.opennms.plugins.prometheus.remotewriter.config.PrometheusRemoteWriterConfig;
 import org.opennms.plugins.prometheus.remotewriter.config.PrometheusRemoteWriterConfig.DiscoveryStrategy;
 import org.opennms.plugins.prometheus.remotewriter.http.TlsConfig;
@@ -70,18 +71,28 @@ public final class PrometheusReadClient {
 
     private final OkHttpClient http;
     private final PrometheusRemoteWriterConfig config;
+    private final HttpHeadersConfig httpHeadersConfig;
     private final MtypeFallback mtypeFallback;
     private final PluginMetrics metrics;
 
     /** Test-friendly constructor — no metrics sink, so the synthesis counter
      *  and the find_metrics_* counters are not driven. Production code uses
-     *  the two-arg constructor. */
+     *  the three-arg constructor. */
     public PrometheusReadClient(PrometheusRemoteWriterConfig config) {
-        this(config, null);
+        this(config, null, HttpHeadersConfig.empty());
     }
 
+    /** Test-friendly constructor that supplies metrics but no custom HTTP
+     *  headers; production code uses the three-arg constructor. */
     public PrometheusReadClient(PrometheusRemoteWriterConfig config, PluginMetrics metrics) {
+        this(config, metrics, HttpHeadersConfig.empty());
+    }
+
+    public PrometheusReadClient(PrometheusRemoteWriterConfig config,
+                                PluginMetrics metrics,
+                                HttpHeadersConfig httpHeadersConfig) {
         this.config = Objects.requireNonNull(config);
+        this.httpHeadersConfig = Objects.requireNonNull(httpHeadersConfig, "httpHeadersConfig");
         OkHttpClient.Builder b = new OkHttpClient.Builder()
                 .connectTimeout(config.getHttpConnectTimeoutMs(), TimeUnit.MILLISECONDS)
                 .readTimeout(config.getHttpReadTimeoutMs(),       TimeUnit.MILLISECONDS)
@@ -406,6 +417,17 @@ public final class PrometheusReadClient {
         }
         if (config.hasTenant()) {
             rb.addHeader("X-Scope-OrgID", config.getTenantOrgId());
+        }
+        // Operator-supplied custom headers — applied AFTER managed headers.
+        // Symmetric with RemoteWriteHttpClient; HttpHeadersConfig validation
+        // has already excluded reserved names. User-Agent override uses .header() so
+        // a duplicate replaces the default; other headers use .addHeader().
+        for (Map.Entry<String, String> h : httpHeadersConfig.headers().entrySet()) {
+            if ("User-Agent".equalsIgnoreCase(h.getKey())) {
+                rb.header(h.getKey(), h.getValue());
+            } else {
+                rb.addHeader(h.getKey(), h.getValue());
+            }
         }
 
         try (Response resp = http.newCall(rb.build()).execute()) {

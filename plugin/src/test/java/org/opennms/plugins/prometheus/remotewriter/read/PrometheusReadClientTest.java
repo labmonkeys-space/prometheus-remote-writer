@@ -13,6 +13,7 @@ import java.io.IOException;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 
 import okhttp3.mockwebserver.MockResponse;
 import okhttp3.mockwebserver.MockWebServer;
@@ -27,6 +28,7 @@ import org.opennms.integration.api.v1.timeseries.TimeSeriesData;
 import org.opennms.integration.api.v1.timeseries.TimeSeriesFetchRequest;
 import org.opennms.integration.api.v1.timeseries.immutables.ImmutableMetric;
 import org.opennms.integration.api.v1.timeseries.immutables.ImmutableTagMatcher;
+import org.opennms.plugins.prometheus.remotewriter.config.HttpHeadersConfig;
 import org.opennms.plugins.prometheus.remotewriter.config.PrometheusRemoteWriterConfig;
 
 class PrometheusReadClientTest {
@@ -540,6 +542,80 @@ class PrometheusReadClientTest {
                             org.opennms.integration.api.v1.timeseries.MetaTagNames.mtype);
                     assertThat(t.getValue()).isEqualTo("gauge");
                 });
+    }
+
+    // ---------- custom http.headers.* on read path -------------------------
+
+    @Test
+    void custom_headers_reach_find_metrics_endpoint() throws Exception {
+        server.enqueue(new MockResponse()
+                .setResponseCode(200)
+                .setBody("{\"status\":\"success\",\"data\":["
+                       + "{\"__name__\":\"ifHCInOctets\",\"node\":\"1:1\"}"
+                       + "]}"));
+        PrometheusReadClient cust = customHeadersClient(Map.of(
+            "http.headers.cf-access-client-id",     "abc123",
+            "http.headers.cf-access-client-secret", "def456"));
+        try {
+            cust.findMetrics(List.of(eq("name", "ifHCInOctets")));
+            RecordedRequest req = server.takeRequest();
+            assertThat(req.getHeader("cf-access-client-id")).isEqualTo("abc123");
+            assertThat(req.getHeader("cf-access-client-secret")).isEqualTo("def456");
+        } finally {
+            cust.shutdown();
+        }
+    }
+
+    @Test
+    void custom_headers_coexist_with_basic_auth_on_read_path() throws Exception {
+        server.enqueue(new MockResponse()
+                .setResponseCode(200)
+                .setBody("{\"status\":\"success\",\"data\":[]}"));
+        PrometheusRemoteWriterConfig c = new PrometheusRemoteWriterConfig();
+        c.setWriteUrl(server.url("/api/v1/push").toString());
+        c.setReadUrl(server.url("").toString().replaceAll("/$", ""));
+        c.setBasicUsername("alice");
+        c.setBasicPassword("s3cret");
+        c.validate();
+        HttpHeadersConfig h = new HttpHeadersConfig();
+        h.applyProperties(Map.of("http.headers.x-custom-tenant", "team-alpha"));
+        PrometheusReadClient cust = new PrometheusReadClient(c, null, h);
+        try {
+            cust.findMetrics(List.of(eq("name", "irrelevant")));
+            RecordedRequest req = server.takeRequest();
+            assertThat(req.getHeader("Authorization")).startsWith("Basic ");
+            assertThat(req.getHeader("x-custom-tenant")).isEqualTo("team-alpha");
+        } finally {
+            cust.shutdown();
+        }
+    }
+
+    @Test
+    void empty_http_headers_preserves_v0_4_x_read_shape() throws Exception {
+        // No custom headers — the default test client (constructed in @BeforeEach
+        // via the single-arg constructor) already uses HttpHeadersConfig.empty().
+        // Assert that no extra application headers leak through.
+        server.enqueue(new MockResponse()
+                .setResponseCode(200)
+                .setBody("{\"status\":\"success\",\"data\":[]}"));
+        client.findMetrics(List.of(eq("name", "irrelevant")));
+
+        RecordedRequest req = server.takeRequest();
+        assertThat(req.getHeader("Authorization")).isNull();
+        assertThat(req.getHeader("X-Scope-OrgID")).isNull();
+        // No stray operator-injected headers
+        assertThat(req.getHeader("cf-access-client-id")).isNull();
+        assertThat(req.getHeader("x-custom-tenant")).isNull();
+    }
+
+    private PrometheusReadClient customHeadersClient(Map<String, String> props) {
+        PrometheusRemoteWriterConfig c = new PrometheusRemoteWriterConfig();
+        c.setWriteUrl(server.url("/api/v1/push").toString());
+        c.setReadUrl(server.url("").toString().replaceAll("/$", ""));
+        c.validate();
+        HttpHeadersConfig h = new HttpHeadersConfig();
+        h.applyProperties(java.util.Collections.unmodifiableMap(props));
+        return new PrometheusReadClient(c, null, h);
     }
 
     // ---------- helpers ----------------------------------------------------

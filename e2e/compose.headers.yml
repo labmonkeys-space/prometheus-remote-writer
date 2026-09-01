@@ -1,0 +1,104 @@
+# E2E sandbox — custom HTTP headers (http.headers.*) behind an auth gate.
+#
+# Usage:
+#   make -C .. kar                          # build the KAR once
+#   docker compose -f compose.headers.yml up -d
+#   docker compose -f compose.headers.yml down -v
+#
+# UI endpoints:
+#   http://localhost:8980   OpenNMS (admin/admin)
+#   http://localhost:9091   Prometheus (direct, bypasses the gate)
+#   http://localhost:8081   the auth gate itself
+#
+# This is the Prometheus stack with an nginx gate in front of the backend.
+# The plugin's write.url and read.url point at the gate, which rejects any
+# request that does not carry X-Smoke-Token — supplied only through
+# http.headers.* in headers.cfg. Samples therefore land if and only if the
+# custom header reached the wire, which is what makes this a real gate for
+# the feature rather than a log-scrape.
+#
+# The harness queries Prometheus directly on 9091 so its assertions read
+# ground truth rather than going back through the component under test.
+#
+# Prometheus is published on 9091 and the gate on 8081 to keep them clear of
+# compose.prometheus.yml. This stack still CANNOT run at the same time as the
+# others: core (8980, 8101) and grafana (3000) are inherited from
+# compose.base.yml and keep their default host ports. Bring one stack up at a
+# time, as `make smoke` does.
+
+name: prometheus-remote-writer-e2e-headers
+
+services:
+
+  postgres:
+    extends:
+      file: compose.base.yml
+      service: postgres
+
+  core:
+    extends:
+      file: compose.base.yml
+      service: core
+    depends_on:
+      postgres:
+        condition: service_healthy
+      authgate:
+        condition: service_healthy
+    volumes:
+      - ./opennms/headers.cfg:/opt/opennms-etc-overlay/org.opennms.plugins.tss.prometheusremotewriter.cfg:ro
+
+  grafana:
+    extends:
+      file: compose.base.yml
+      service: grafana
+    volumes:
+      - ./grafana/datasources/prometheus.yml:/etc/grafana/provisioning/datasources/datasource.yml:ro
+
+  authgate:
+    image: nginx:1.29-alpine
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    ports:
+      - "8081:8080"
+    volumes:
+      - ./authgate/nginx.conf:/etc/nginx/nginx.conf:ro
+    healthcheck:
+      # 127.0.0.1, not localhost: busybox wget prefers ::1 and the server
+      # block below binds IPv4 only, so "localhost" gets connection refused
+      # and core would wait on a gate that is actually serving fine.
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/gate-health"]
+      interval: 5s
+      timeout:  3s
+      retries:  20
+
+  # NOT an `extends` of compose.prometheus.yml's service, unlike the three
+  # above. Compose appends rather than replaces `ports` under extends, so an
+  # inherited service would publish 9090 as well as 9091 and collide with the
+  # very stack this one is kept separate from. Keep this definition in sync
+  # with compose.prometheus.yml by hand — image tag, command flags, config
+  # mount and healthcheck.
+  prometheus:
+    image: prom/prometheus:v3.14.0
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.enable-remote-write-receiver"
+      - "--web.console.libraries=/usr/share/prometheus/console_libraries"
+      - "--web.console.templates=/usr/share/prometheus/consoles"
+    ports:
+      - "9091:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9090/-/ready"]
+      interval: 5s
+      timeout:  3s
+      retries:  20
+
+volumes:
+  postgres-data:
+  opennms-data:
+  grafana-data:
+  prometheus-data:
