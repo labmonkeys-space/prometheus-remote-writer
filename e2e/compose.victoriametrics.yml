@@ -39,7 +39,7 @@ services:
       - ./grafana/datasources/victoriametrics.yml:/etc/grafana/provisioning/datasources/datasource.yml:ro
 
   victoriametrics:
-    image: victoriametrics/victoria-metrics:v1.150.0
+    image: victoriametrics/victoria-metrics:v1.151.0
     command:
       - "-storageDataPath=/vm-data"
       - "-retentionPeriod=7d"
