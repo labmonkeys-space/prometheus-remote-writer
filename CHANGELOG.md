@@ -91,15 +91,30 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   a write-only implementation would have silently 403'd on dashboard
   queries — a hard bug to spot in production.
 
-  *Reserved-name validation (fail-fast at bean activation).* Wire-format
-  invariants and headers already managed by other configuration keys
+  *Reserved-name validation.* Wire-format invariants, transport headers
+  OkHttp manages, and headers already owned by another configuration key
   are hard-rejected with a name-only error message (secret hygiene):
   `Content-Type`, `Content-Encoding`, `Content-Length`,
   `X-Prometheus-Remote-Write-Version`, `Transfer-Encoding`, `Host`,
-  `Connection`, `Upgrade` (protocol invariants); `Authorization`
-  (points the operator at `auth.basic.*` / `auth.bearer.token`);
-  `X-Scope-OrgID` (points at `tenant.org-id`). `User-Agent` is allowed
-  and overrides the plugin default.
+  `Connection`, `Upgrade`, `Accept-Encoding`, `TE`, `Expect`,
+  `Www-Authenticate` (protocol and transport invariants);
+  `Authorization` and `Proxy-Authorization` (point the operator at
+  `auth.basic.*` / `auth.bearer.token`); `X-Scope-OrgID` (points at
+  `tenant.org-id`). `User-Agent` is allowed and overrides the plugin
+  default. `Accept-Encoding` earns its place because OkHttp performs
+  transparent gzip only for the header it added itself — an operator
+  value would leave the read client parsing compressed bytes as JSON.
+
+  *Invalid configuration leaves the plugin inert, not unauthenticated.*
+  A rejected header set logs an `ERROR` and the storage declines to
+  activate, so SPI calls are refused rather than sent without the
+  headers the operator asked for — a typo'd gateway token can never
+  silently become an unauthenticated write. The plugin does not throw
+  at activation: that would mark the Blueprint container permanently
+  failed, and the `update-strategy="reload"` placeholder could not
+  revive it. Correcting the `.cfg` and saving brings the plugin up on
+  the next reload, which is the same posture `start()` already takes
+  for an invalid `write.url`.
 
   *Other validation rules.* Header names must match the RFC 7230 token
   grammar (`1*tchar` — letters, digits, and ``!#$%&'*+-.^_`|~``);
@@ -122,34 +137,36 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Existing deployments need no coordinated upgrade; the v0.4.x
   configuration surface is unchanged.
 
-### Known limitations
+  *Known limitations.* Header values are cleartext, there are no dynamic
+  auth providers, no multi-value headers, and custom `Authorization:`
+  schemes stay hard-rejected. Details:
 
-- **Header values are cleartext in
-  `etc/org.opennms.plugins.tss.prometheusremotewriter.cfg`.** Parity with the
-  existing `auth.basic.password` and `auth.bearer.token` keys. The
-  plugin does not currently expand `${env:NAME}` in configuration
-  values — neither Aries Blueprint's `<cm:property-placeholder>` nor
-  Felix FileInstall (in OpenNMS Horizon's default Karaf configuration)
-  performs the substitution. Workarounds for secret injection today:
-  restrict filesystem permissions on the config file, render the file
-  from a Kubernetes `Secret`, or use deploy-time templating
-  (`envsubst`, init container). Plugin-wide `${env:NAME}` resolution is
-  tracked as a follow-up at
-  [#55](https://github.com/labmonkeys-space/prometheus-remote-writer/issues/55).
-- **No dynamic auth providers.** Static header attachment does not
-  cover AWS SigV4 request signing, GCP Identity Token refresh, or
-  OAuth client-credentials-grant refresh. Those require behavior
-  beyond what this change ships; a future pluggable-auth SPI design
-  would be the right home.
-- **No multi-value headers.** One value per header name; the
-  prefix-scanned namespace cannot represent a repeated header
-  (Accept-style). File a follow-up with a concrete need if encountered.
-- **Custom `Authorization:` schemes are hard-rejected.** Operators
-  needing `Authorization: HMAC <signature>` or similar should track
-  [#56](https://github.com/labmonkeys-space/prometheus-remote-writer/issues/56)
-  for a dedicated auth knob with explicit scheme
-  semantics — the existing `auth.bearer.token` covers RFC 6750-style
-  bearer auth only.
+  - **Header values are cleartext in
+    `etc/org.opennms.plugins.tss.prometheusremotewriter.cfg`.** Parity with the
+    existing `auth.basic.password` and `auth.bearer.token` keys. The
+    plugin does not currently expand `${env:NAME}` in configuration
+    values — neither Aries Blueprint's `<cm:property-placeholder>` nor
+    Felix FileInstall (in OpenNMS Horizon's default Karaf configuration)
+    performs the substitution. Workarounds for secret injection today:
+    restrict filesystem permissions on the config file, render the file
+    from a Kubernetes `Secret`, or use deploy-time templating
+    (`envsubst`, init container). Plugin-wide `${env:NAME}` resolution is
+    tracked as a follow-up at
+    [#55](https://github.com/labmonkeys-space/prometheus-remote-writer/issues/55).
+  - **No dynamic auth providers.** Static header attachment does not
+    cover AWS SigV4 request signing, GCP Identity Token refresh, or
+    OAuth client-credentials-grant refresh. Those require behavior
+    beyond what this change ships; a future pluggable-auth SPI design
+    would be the right home.
+  - **No multi-value headers.** One value per header name; the
+    prefix-scanned namespace cannot represent a repeated header
+    (Accept-style). File a follow-up with a concrete need if encountered.
+  - **Custom `Authorization:` schemes are hard-rejected.** Operators
+    needing `Authorization: HMAC <signature>` or similar should track
+    [#56](https://github.com/labmonkeys-space/prometheus-remote-writer/issues/56)
+    for a dedicated auth knob with explicit scheme
+    semantics — the existing `auth.bearer.token` covers RFC 6750-style
+    bearer auth only.
 
 ## [0.4.5] — 2026-08-31
 

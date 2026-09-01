@@ -12,6 +12,7 @@ import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -72,7 +73,7 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
      *  diff logging. Stored as the immutable map returned by
      *  {@link HttpHeadersConfig#headers()} so we compare value-shapes, not
      *  the (single, stateful) bean instance. */
-    private static final AtomicReference<java.util.Map<String, String>> LAST_HEADERS =
+    private static final AtomicReference<Map<String, String>> LAST_HEADERS =
             new AtomicReference<>();
 
     /**
@@ -176,6 +177,26 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
                    + "waiting for ConfigAdmin to deliver real properties. "
                    + "If this persists, check etc/org.opennms.plugins.tss.prometheusremotewriter.cfg.",
                     bad.getMessage());
+            return;
+        }
+
+        // Same posture as the core-config check above, for the same reason.
+        // HttpHeadersConfig is a component-managed bean, so its validation
+        // exception lands on a ConfigAdmin dispatch thread and cannot abort
+        // activation on its own. Declining to activate here is what makes an
+        // invalid header set inert rather than silently unauthenticated: a
+        // typo'd gateway token must not degrade into requests that leave
+        // without it. We log and leave active == null (SPI calls are rejected
+        // in that state) rather than throwing, because a throw marks the
+        // Blueprint container permanently failed and the placeholder reload
+        // could not revive it from a corrected .cfg.
+        String headersError = httpHeadersConfig.validationError();
+        if (headersError != null) {
+            LOG.error("prometheus-remote-writer not started — invalid "
+                    + "http.headers.* configuration: {}. The plugin will "
+                    + "activate on the next save of "
+                    + "etc/org.opennms.plugins.tss.prometheusremotewriter.cfg "
+                    + "once the entry is corrected.", headersError);
             return;
         }
 
@@ -311,7 +332,7 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
         // anchors must be cleared in lockstep — if only LAST_ACTIVE is
         // reset, the next reload would diff headers against a stale
         // snapshot from before the stop, producing spurious (set) ->
-        // (unset) lines (R2-P1).
+        // (unset) lines.
         LAST_ACTIVE.set(null);
         LAST_HEADERS.set(null);
     }
@@ -589,9 +610,9 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
         // "after" passed to diff are the same map reference. The bean's
         // headers field is volatile and a concurrent Aries-driven
         // updated() between two reads could otherwise produce a diff that
-        // doesn't agree with what we stored as the new anchor (R2-P2).
-        java.util.Map<String, String> currentHeaders = httpHeadersConfig.headers();
-        java.util.Map<String, String> previousHeaders = LAST_HEADERS.getAndSet(currentHeaders);
+        // doesn't agree with what we stored as the new anchor.
+        Map<String, String> currentHeaders = httpHeadersConfig.headers();
+        Map<String, String> previousHeaders = LAST_HEADERS.getAndSet(currentHeaders);
         if (previous == null) {
             LOG.info("prometheus-remote-writer activated (write.url={}, read.url={})",
                      config.getWriteUrl(), config.getReadUrl());
@@ -600,7 +621,7 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
         // Two diff sources: scalar config (PrometheusRemoteWriterConfig.diff)
         // plus prefix-scanned headers (HttpHeadersConfig.diff). Both emit
         // the same line format; we concatenate for a single per-reload log.
-        List<String> changes = new java.util.ArrayList<>(config.diff(previous));
+        List<String> changes = new ArrayList<>(config.diff(previous));
         changes.addAll(HttpHeadersConfig.diff(previousHeaders, currentHeaders));
         if (changes.isEmpty()) {
             LOG.info("prometheus-remote-writer reloaded; configuration unchanged");

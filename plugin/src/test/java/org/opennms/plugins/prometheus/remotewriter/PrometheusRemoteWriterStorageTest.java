@@ -15,6 +15,7 @@ import java.io.IOException;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
 import okhttp3.mockwebserver.MockResponse;
@@ -28,6 +29,7 @@ import org.opennms.integration.api.v1.timeseries.Aggregation;
 import org.opennms.integration.api.v1.timeseries.StorageException;
 import org.opennms.integration.api.v1.timeseries.immutables.ImmutableMetric;
 import org.opennms.integration.api.v1.timeseries.immutables.ImmutableSample;
+import org.opennms.plugins.prometheus.remotewriter.config.HttpHeadersConfig;
 import org.opennms.plugins.prometheus.remotewriter.config.PrometheusRemoteWriterConfig;
 import org.opennms.plugins.prometheus.remotewriter.metrics.PluginMetrics;
 
@@ -316,6 +318,92 @@ class PrometheusRemoteWriterStorageTest {
                 s.stop();
             }
             assertThat(server.getRequestCount()).isEqualTo(1);
+        }
+    }
+
+    /**
+     * Pins the Blueprint-shaped wiring: headers configured on the bean must
+     * survive the whole composition and reach the wire. Every other test here
+     * uses the one-arg constructor, which substitutes
+     * {@code HttpHeadersConfig.empty()} — so without this test, dropping
+     * {@code httpHeadersConfig} from {@code startQueueMode()} (or from the
+     * Blueprint {@code <argument ref>}) leaves the suite green while the
+     * feature silently no-ops in production.
+     */
+    @Test
+    void configured_http_headers_reach_the_write_endpoint_through_storage() throws Exception {
+        try (MockWebServer server = new MockWebServer()) {
+            server.start();
+            server.enqueue(new MockResponse().setResponseCode(204));
+
+            PrometheusRemoteWriterConfig c = new PrometheusRemoteWriterConfig();
+            c.setWriteUrl(server.url("/api/v1/push").toString());
+            c.setReadUrl(server.url("/prometheus").toString());
+            c.setBatchSize(10);
+            c.setFlushIntervalMs(50);
+            c.setShutdownGracePeriodMs(1_000);
+
+            HttpHeadersConfig h = HttpHeadersConfig.empty();
+            h.updated(Map.of("http.headers.cf-access-client-id", "abc123"));
+
+            PrometheusRemoteWriterStorage s = new PrometheusRemoteWriterStorage(c, h);
+            s.start();
+            try {
+                s.store(List.of(
+                        ImmutableSample.builder()
+                                .metric(ImmutableMetric.builder()
+                                        .intrinsicTag("name", "ifHCInOctets")
+                                        .intrinsicTag("resourceId", "node[1].interfaceSnmp[eth0]")
+                                        .externalTag("nodeId", "1")
+                                        .build())
+                                .time(Instant.ofEpochMilli(1_000_000L))
+                                .value(42.0)
+                                .build()));
+
+                PluginMetrics m = s.getMetrics();
+                await().atMost(Duration.ofSeconds(2))
+                       .until(() -> m.snapshot().get(PluginMetrics.SAMPLES_WRITTEN).longValue() == 1L);
+            } finally {
+                s.stop();
+            }
+            assertThat(server.takeRequest().getHeader("cf-access-client-id"))
+                .isEqualTo("abc123");
+        }
+    }
+
+    /**
+     * The resolved round-3 decision: an invalid {@code http.headers.*} entry
+     * must make the plugin inert rather than silently unauthenticated. The
+     * storage declines to activate, so SPI calls are rejected instead of
+     * going out without the headers the operator configured.
+     */
+    @Test
+    void invalid_http_headers_leave_the_storage_inert() {
+        PrometheusRemoteWriterConfig c = new PrometheusRemoteWriterConfig();
+        c.setWriteUrl("http://localhost:9090/api/v1/push");
+        c.setReadUrl("http://localhost:9090/prometheus");
+
+        HttpHeadersConfig h = HttpHeadersConfig.empty();
+        // Authorization is reserved: updated() records the error and rethrows.
+        assertThatThrownBy(() -> h.updated(Map.of("http.headers.Authorization", "HMAC sig")))
+            .isInstanceOf(IllegalStateException.class);
+        assertThat(h.validationError()).contains("Authorization");
+
+        PrometheusRemoteWriterStorage s = new PrometheusRemoteWriterStorage(c, h);
+        s.start();
+        try {
+            assertThatThrownBy(() -> s.store(List.of(
+                    ImmutableSample.builder()
+                            .metric(ImmutableMetric.builder()
+                                    .intrinsicTag("name", "ifHCInOctets")
+                                    .intrinsicTag("resourceId", "node[1].interfaceSnmp[eth0]")
+                                    .build())
+                            .time(Instant.ofEpochMilli(1_000_000L))
+                            .value(42.0)
+                            .build())))
+                .isInstanceOf(StorageException.class);
+        } finally {
+            s.stop();
         }
     }
 

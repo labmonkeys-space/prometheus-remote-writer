@@ -237,7 +237,7 @@ public final class RemoteWriteHttpClient {
             b.addHeader("X-Scope-OrgID", config.getTenantOrgId());
         }
         // Operator-supplied custom headers — applied AFTER managed headers.
-        // HttpHeadersConfig.validate() has already excluded reserved names,
+        // HttpHeadersConfig.updated() has already excluded reserved names,
         // so no conflict can arise here. User-Agent is the one allowed
         // override; OkHttp's addHeader is additive and Request.Builder
         // semantics on a duplicate header overwrites the earlier value

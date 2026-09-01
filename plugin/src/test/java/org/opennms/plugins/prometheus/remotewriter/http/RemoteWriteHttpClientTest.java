@@ -311,6 +311,8 @@ class RemoteWriteHttpClientTest {
             .startsWith("application/x-protobuf;proto=io.prometheus.write.v2.Request");
         assertThat(req.getHeader("Content-Encoding")).isEqualTo("snappy");
         assertThat(req.getHeader("X-Prometheus-Remote-Write-Version")).isEqualTo("2.0.0");
+        assertThat(req.getHeader("User-Agent"))
+            .startsWith("org.opennms.plugins.prometheus-remote-writer/");
         assertThat(req.getHeader("Authorization")).isNull();
         assertThat(req.getHeader("X-Scope-OrgID")).isNull();
         java.util.Set<String> seen = new java.util.HashSet<>(req.getHeaders().names());

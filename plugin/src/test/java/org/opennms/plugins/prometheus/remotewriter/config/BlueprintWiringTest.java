@@ -356,4 +356,67 @@ class BlueprintWiringTest {
                 .as("the concrete-class registration must NOT be exported")
                 .isFalse();
     }
+
+    /**
+     * The {@code httpHeadersConfig} bean is prefix-scanned rather than
+     * scalar-bound, so the three parity tests above — all scoped to
+     * {@code <bean id="config">} — say nothing about it. Without this test a
+     * typo in {@code update-method}, or a renamed {@code updated()}, is a
+     * runtime-only failure: the headers never arrive and the plugin sends
+     * requests without them. That is the same silent-no-op shape this class
+     * was written to prevent for {@code labels.copy}.
+     */
+    @Test
+    void http_headers_bean_is_wired_to_a_real_update_method_at_the_plugin_pid() throws Exception {
+        Document doc = loadBlueprint();
+        Element bean = findBeanById(doc, "httpHeadersConfig");
+
+        Class<?> beanClass = Class.forName(bean.getAttribute("class"));
+
+        NodeList managed = bean.getElementsByTagNameNS("*", "managed-properties");
+        assertThat(managed.getLength())
+                .as("httpHeadersConfig must declare exactly one <cm:managed-properties>")
+                .isEqualTo(1);
+        Element mp = (Element) managed.item(0);
+
+        // Same PID as the scalar placeholder, or the bean silently never
+        // receives the operator's http.headers.* properties.
+        Element placeholder = (Element) doc
+                .getElementsByTagNameNS("*", "property-placeholder").item(0);
+        assertThat(mp.getAttribute("persistent-id"))
+                .as("the headers bean must listen on the same PID as the property-placeholder")
+                .isEqualTo(placeholder.getAttribute("persistent-id"));
+
+        String updateMethod = mp.getAttribute("update-method");
+        assertThat(updateMethod).isNotBlank();
+        assertThat(java.util.Arrays.stream(beanClass.getMethods())
+                        .anyMatch(m -> m.getName().equals(updateMethod)
+                                && m.getParameterCount() == 1
+                                && m.getParameterTypes()[0] == Map.class))
+                .as("update-method=\"%s\" must name a public single-Map-arg method on %s",
+                        updateMethod, beanClass.getName())
+                .isTrue();
+    }
+
+    /**
+     * The storage bean must receive the headers bean as its second constructor
+     * argument. Dropping the {@code <argument ref>} silently selects the
+     * one-arg test constructor, which substitutes an empty header set — the
+     * feature then no-ops for every operator with the whole suite green.
+     */
+    @Test
+    void storage_bean_receives_config_and_http_headers_in_constructor_order() throws Exception {
+        Document doc = loadBlueprint();
+        Element storage = findBeanById(doc, "prometheusRemoteWriterStorage");
+
+        java.util.List<String> refs = new java.util.ArrayList<>();
+        NodeList args = storage.getElementsByTagNameNS("*", "argument");
+        for (int i = 0; i < args.getLength(); i++) {
+            refs.add(((Element) args.item(i)).getAttribute("ref"));
+        }
+        assertThat(refs)
+                .as("blueprint.xml must pass both the scalar config and the prefix-scanned "
+                    + "header config, in the order the two-arg constructor declares them")
+                .containsExactly("config", "httpHeadersConfig");
+    }
 }

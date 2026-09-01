@@ -7,7 +7,9 @@
 package org.opennms.plugins.prometheus.remotewriter.config;
 
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -67,10 +69,23 @@ public final class HttpHeadersConfig {
             "transfer-encoding",
             "host",
             "connection",
-            "upgrade"
+            "upgrade",
+            // Transport headers OkHttp manages implicitly. Accept-Encoding is
+            // the load-bearing one: OkHttp only performs transparent gzip
+            // decompression when it added the header itself, so an operator
+            // value silently disables it and PrometheusReadClient then parses
+            // gzip bytes as JSON (and the response cap counts compressed
+            // bytes). TE and Expect are hop-by-hop transport negotiation;
+            // Www-Authenticate is a response header with no meaning on a
+            // request. Prometheus reserves all of these too.
+            "accept-encoding",
+            "te",
+            "expect",
+            "www-authenticate"
     );
     private static final Set<String> RESERVED_MANAGED = Set.of(
             "authorization",
+            "proxy-authorization",
             "x-scope-orgid"
     );
 
@@ -93,25 +108,42 @@ public final class HttpHeadersConfig {
     private volatile Map<String, String> headers = Collections.emptyMap();
 
     /**
+     * Message from the most recent failed validation, or {@code null} when the
+     * current configuration is valid. Read by
+     * {@code PrometheusRemoteWriterStorage.start()} so an invalid header set
+     * makes the plugin inert instead of silently unauthenticated. Volatile for
+     * the same reason as {@link #headers}.
+     */
+    private volatile String validationError;
+
+    /**
      * Aries Blueprint callback invoked at bean activation and on every
      * {@code .cfg} change. Receives the full property dictionary at the
      * plugin's PID; we filter, parse, and validate the {@code http.headers.*}
      * subset.
      *
-     * <p>Two failure shapes, two retention rules:
+     * <p>Two failure shapes:
      * <ul>
      *   <li>{@code properties == null} — ConfigAdmin signals "no configuration
      *       set". The {@link #headers} snapshot is RESET to empty; clients
-     *       attach no custom headers on the next request.</li>
-     *   <li>Validation throws {@link IllegalStateException} — the exception
-     *       propagates back through Aries (surfaces in the Karaf log with a
-     *       name-only diagnostic; values are never echoed). The previous
-     *       validated {@link #headers} snapshot is RETAINED because the
-     *       assignment to {@link #headers} happens only after
-     *       {@code extractAndValidate} returns normally; clients continue
-     *       to attach the last-known-good header set, which is preferable
-     *       to forcing them onto the empty default mid-flight.</li>
+     *       attach no custom headers on the next request. A non-empty to
+     *       empty transition is logged, because it silently moves a
+     *       gateway-authenticated deployment to unauthenticated.</li>
+     *   <li>Validation throws {@link IllegalStateException} — the message is
+     *       first recorded in {@link #validationError()} and logged at ERROR
+     *       (name-only diagnostic; values are never echoed), then rethrown so
+     *       Aries also surfaces it. {@code PrometheusRemoteWriterStorage.start()}
+     *       consults {@link #validationError()} and refuses to activate, so a
+     *       bad header set makes the plugin inert rather than silently
+     *       unauthenticated.</li>
      * </ul>
+     *
+     * <p>The {@link #headers} field is left untouched on a validation failure,
+     * but do not read that as production-visible retention: the sibling
+     * {@code <cm:property-placeholder update-strategy="reload">} on the same
+     * PID tears down and re-creates the whole container on every {@code .cfg}
+     * change, so a rebuilt instance always starts from the empty default. The
+     * retention is observable only within one bean lifetime.
      *
      * <p>The method is {@code synchronized} as a defense in depth — the
      * OSGi ConfigAdmin specification serialises {@code updated()} calls per
@@ -123,10 +155,33 @@ public final class HttpHeadersConfig {
      */
     public synchronized void updated(Map<String, ?> properties) {
         if (properties == null) {
+            if (!this.headers.isEmpty()) {
+                LOG.info("http.headers.* configuration removed — the {} custom "
+                       + "header(s) previously attached to outbound write and "
+                       + "read requests will no longer be sent",
+                        this.headers.size());
+            }
             this.headers = Collections.emptyMap();
+            this.validationError = null;
             return;
         }
-        Map<String, String> parsed = extractAndValidate(properties);
+        Map<String, String> parsed;
+        try {
+            parsed = extractAndValidate(properties);
+        } catch (IllegalStateException bad) {
+            // Record before rethrowing: with update-strategy="component-managed"
+            // the throw only reaches Aries' ConfigAdmin dispatch thread, where
+            // it cannot abort bean creation. PrometheusRemoteWriterStorage
+            // reads validationError() and declines to activate instead, which
+            // mirrors how start() already handles an invalid core config —
+            // inert but revivable by a corrected .cfg, rather than a
+            // permanently failed container.
+            this.validationError = bad.getMessage();
+            LOG.error("Invalid http.headers.* configuration — the plugin will "
+                    + "not serve until it is corrected: {}", bad.getMessage());
+            throw bad;
+        }
+        this.validationError = null;
         Map<String, String> immutable = Collections.unmodifiableMap(parsed);
         // Suppress the activation log on no-op reloads — any .cfg change
         // re-fires updated() on this bean (we share the PID with the scalar
@@ -146,6 +201,21 @@ public final class HttpHeadersConfig {
      */
     public Map<String, String> headers() {
         return headers;
+    }
+
+    /**
+     * Message from the most recent failed {@code http.headers.*} validation,
+     * or {@code null} when the current configuration is valid.
+     *
+     * <p>Exists because {@code update-strategy="component-managed"} delivers
+     * configuration on a ConfigAdmin dispatch thread, where a thrown exception
+     * is logged and discarded rather than aborting bean activation. The
+     * storage bean polls this at {@code start()} and declines to activate when
+     * it is non-null, so a rejected header set never degrades into "started,
+     * but sending unauthenticated requests".
+     */
+    public String validationError() {
+        return validationError;
     }
 
     /**
@@ -241,7 +311,7 @@ public final class HttpHeadersConfig {
         // duplicates (`http.headers.X-Foo` AND `http.headers.x-foo`) — both
         // would otherwise pass the case-sensitive map.put and reach the wire
         // as two distinct lines, with backend behavior undefined.
-        Set<String> seenLower = new java.util.HashSet<>();
+        Set<String> seenLower = new HashSet<>();
         for (Map.Entry<String, ?> e : properties.entrySet()) {
             String key = e.getKey();
             if (key == null || !key.startsWith(PREFIX)) continue;
@@ -259,6 +329,18 @@ public final class HttpHeadersConfig {
             }
 
             Object rawValue = e.getValue();
+            // ConfigAdmin values are typed Object. A .cfg edit always yields a
+            // String, but a programmatically-populated configuration can carry
+            // an array or a Collection, whose toString() would be attached as
+            // a header value verbatim (e.g. "[Ljava.lang.String;@1a2b").
+            // Reject those rather than putting a JVM identity hash on the wire.
+            if (rawValue != null
+                    && (rawValue.getClass().isArray() || rawValue instanceof Collection)) {
+                throw new IllegalStateException(
+                    "http.headers entry '" + headerName + "' has a multi-valued "
+                    + "configuration value — header values must be a single "
+                    + "string; configure one value per header name");
+            }
             String value = rawValue == null ? "" : rawValue.toString();
             String trimmed = trimAscii(value);
             validateValue(headerName, trimmed);
@@ -310,6 +392,9 @@ public final class HttpHeadersConfig {
                 case "authorization" ->
                     "use auth.basic.username + auth.basic.password, or "
                     + "auth.bearer.token, instead";
+                case "proxy-authorization" ->
+                    "the plugin does not proxy-authenticate; configure the "
+                    + "proxy credentials on the proxy itself";
                 case "x-scope-orgid" ->
                     "use tenant.org-id instead";
                 default ->

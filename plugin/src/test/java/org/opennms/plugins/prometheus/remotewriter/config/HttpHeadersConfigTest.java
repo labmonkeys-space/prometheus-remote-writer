@@ -8,6 +8,7 @@ package org.opennms.plugins.prometheus.remotewriter.config;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.entry;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -45,6 +46,55 @@ class HttpHeadersConfigTest {
         assertThat(cfg.headers()).hasSize(1);
         cfg.updated(null);
         assertThat(cfg.headers()).isEmpty();
+        // Clearing the configuration is not a validation failure — the plugin
+        // must still start, just without custom headers.
+        assertThat(cfg.validationError()).isNull();
+    }
+
+    // ---- validity accessor ---------------------------------------------
+
+    @Test
+    void validation_failure_is_recorded_for_the_storage_bean_to_read() {
+        HttpHeadersConfig cfg = new HttpHeadersConfig();
+        assertThat(cfg.validationError()).isNull();
+
+        assertThatThrownBy(() ->
+            cfg.updated(Map.of("http.headers.Content-Type", "text/plain")))
+            .isInstanceOf(IllegalStateException.class);
+
+        // Recorded before the rethrow: with update-strategy="component-managed"
+        // the exception only reaches a ConfigAdmin dispatch thread, so the
+        // storage bean has no other way to learn the config was rejected.
+        assertThat(cfg.validationError())
+            .isNotNull()
+            .contains("Content-Type");
+    }
+
+    @Test
+    void a_subsequent_valid_update_clears_the_recorded_error() {
+        HttpHeadersConfig cfg = new HttpHeadersConfig();
+        assertThatThrownBy(() ->
+            cfg.updated(Map.of("http.headers.Host", "evil.example.com")))
+            .isInstanceOf(IllegalStateException.class);
+        assertThat(cfg.validationError()).isNotNull();
+
+        cfg.updated(Map.of("http.headers.x-tenant", "alpha"));
+
+        assertThat(cfg.validationError()).isNull();
+        assertThat(cfg.headers()).containsExactly(entry("x-tenant", "alpha"));
+    }
+
+    @Test
+    void multi_valued_configuration_values_are_rejected() {
+        HttpHeadersConfig cfg = new HttpHeadersConfig();
+        Map<String, Object> props = new LinkedHashMap<>();
+        // ConfigAdmin values are Object-typed; an array would otherwise reach
+        // the wire as "[Ljava.lang.String;@1a2b".
+        props.put("http.headers.x-tenant", new String[] {"alpha", "beta"});
+        assertThatThrownBy(() -> cfg.updated(props))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("x-tenant")
+            .hasMessageContaining("single");
     }
 
     @Test
@@ -67,7 +117,12 @@ class HttpHeadersConfigTest {
     @ValueSource(strings = {
             "Content-Type", "Content-Encoding", "Content-Length",
             "X-Prometheus-Remote-Write-Version",
-            "Transfer-Encoding", "Host", "Connection", "Upgrade"
+            "Transfer-Encoding", "Host", "Connection", "Upgrade",
+            // Transport headers OkHttp manages implicitly. Accept-Encoding is
+            // the one with teeth: an operator value disables OkHttp's
+            // transparent gzip, leaving the read client to parse compressed
+            // bytes as JSON.
+            "Accept-Encoding", "TE", "Expect", "Www-Authenticate"
     })
     void reserved_protocol_headers_are_hard_rejected(String reservedName) {
         HttpHeadersConfig cfg = new HttpHeadersConfig();
@@ -209,7 +264,7 @@ class HttpHeadersConfigTest {
     @Test
     void non_printable_byte_in_value_is_rejected() {
         HttpHeadersConfig cfg = new HttpHeadersConfig();
-        String hostile = "okbell";              // BEL 0x07
+        String hostile = "ok\u0007bell";              // BEL 0x07
         assertThatThrownBy(() ->
             cfg.updated(Map.of("http.headers.x-tenant", hostile)))
             .isInstanceOf(IllegalStateException.class)
@@ -219,7 +274,7 @@ class HttpHeadersConfigTest {
     @Test
     void high_ascii_byte_in_value_is_rejected() {
         HttpHeadersConfig cfg = new HttpHeadersConfig();
-        String hostile = "ok nbsp";              // NBSP 0xA0
+        String hostile = "ok\u00a0nbsp";              // NBSP 0xA0
         assertThatThrownBy(() ->
             cfg.updated(Map.of("http.headers.x-tenant", hostile)))
             .isInstanceOf(IllegalStateException.class)
@@ -278,7 +333,7 @@ class HttpHeadersConfigTest {
 
         // Non-printable (value contains the sentinel)
         assertThatThrownBy(() ->
-            cfg.updated(Map.of("http.headers.x-tenant", sentinel + "")))
+            cfg.updated(Map.of("http.headers.x-tenant", sentinel + "\u0001")))
             .extracting(Throwable::getMessage)
             .satisfies(m -> assertThat(m).doesNotContain(sentinel));
     }
@@ -365,7 +420,7 @@ class HttpHeadersConfigTest {
     @Test
     void nul_byte_in_header_value_is_rejected() {
         HttpHeadersConfig cfg = new HttpHeadersConfig();
-        String hostile = "good bad";
+        String hostile = "good\u0000bad";
         assertThatThrownBy(() ->
             cfg.updated(java.util.Map.of("http.headers.x-tenant", hostile)))
             .isInstanceOf(IllegalStateException.class)

@@ -109,8 +109,9 @@ endpoint will accept both directions transparently.
 
 === Reserved header names
 
-The following header names are reserved and the plugin refuses to start if
-any appear under `http.headers.*` (case-insensitive comparison):
+The following header names are reserved. If any appears under
+`http.headers.*` (case-insensitive comparison) the plugin refuses to serve
+until the entry is removed:
 
 [cols="2,3",options="header"]
 |===
@@ -121,7 +122,11 @@ any appear under `http.headers.*` (case-insensitive comparison):
 | `Content-Length`                     | Recomputed by OkHttp from the body.
 | `X-Prometheus-Remote-Write-Version`  | Set per `wire.protocol-version`.
 | `Transfer-Encoding`, `Host`, `Connection`, `Upgrade` | Managed by the HTTP/HTTP2 layer.
+| `Accept-Encoding`                    | Managed by OkHttp. Setting it disables transparent gzip, so read responses arrive compressed and fail to parse.
+| `TE`, `Expect`                       | Hop-by-hop transport negotiation.
+| `Www-Authenticate`                   | A response header; meaningless on a request.
 | `Authorization`                      | Managed by `auth.basic.*` / `auth.bearer.token`. Use those instead.
+| `Proxy-Authorization`                | The plugin does not proxy-authenticate; configure credentials on the proxy.
 | `X-Scope-OrgID`                      | Managed by `tenant.org-id`. Use that instead.
 |===
 
@@ -136,9 +141,15 @@ http.headers.User-Agent = onms-edge-site-7/1.0
 
 === Validation
 
-Validation runs at bean activation; invalid configuration fails to start
-the plugin with a name-only diagnostic in the Karaf log (the offending
-*value* is never echoed — secret hygiene).
+Validation runs at bean activation. Invalid configuration leaves the plugin
+inert — it logs a name-only `ERROR` in the Karaf log (the offending *value*
+is never echoed, for secret hygiene) and serves no requests, so a typo'd
+gateway token can never degrade into requests that leave without it.
+
+Correcting `{cfg-file}` and saving revives the plugin on the next
+configuration reload; no bundle restart is required. The plugin deliberately
+does not throw here, because a throw would mark the Blueprint container
+permanently failed and a corrected file could not recover it.
 
 * Header names must match the RFC 7230 token grammar: letters, digits, and
   `!#$%&'*+-.^_\`|~` only. No whitespace; no `:`, `(`, `)`, `,`, `/`, `<`,
@@ -189,12 +200,12 @@ cleartext. Use one of:
 +
 [source,shell]
 ----
-envsubst < cortex.cfg.template > /opennms/etc/{cfg-file}
+envsubst < remote-writer.cfg.template > /opennms/{cfg-file}
 ----
 +
 [source,properties]
 ----
-# cortex.cfg.template — $CLIENT_ID and $CLIENT_SECRET expanded at deploy time
+# remote-writer.cfg.template — $CLIENT_ID and $CLIENT_SECRET expanded at deploy time
 http.headers.cf-access-client-id     = $CLIENT_ID
 http.headers.cf-access-client-secret = $CLIENT_SECRET
 ----
@@ -210,8 +221,8 @@ Plugin-wide `${env:NAME}` resolution is tracked as a separate enhancement.
   static header attachment; a future enhancement.
 * **Multi-value headers** (same name, repeated, e.g. Accept-style). One
   value per header name.
-* **Custom `Authorization:` schemes** — hard-rejected; file an
-  enhancement request with a real scheme spec if needed.
+* **Custom `Authorization:` schemes** — hard-rejected; tracked as a
+  dedicated auth knob with explicit scheme semantics.
 * **Split write/read header sets** — single key drives both clients. Real
   Zero-Trust deployments (Cloudflare Access, GCP IAP) gate both
   endpoints with the same credentials, so this is the right shape today.
