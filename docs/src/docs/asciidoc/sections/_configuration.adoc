@@ -27,14 +27,21 @@ bundle restart).
 NOTE: The plugin refuses to start if both `auth.basic.*` and
 `auth.bearer.token` are configured.
 
+[#keeping-secrets-out-of-the-cfg]
 == Keeping secrets out of the configuration file
 
 You do not have to write secrets into `{cfg-file}`. Karaf resolves two
 placeholder forms in configuration values before the plugin ever sees them,
-and both are available on a stock OpenNMS Horizon with no container
-reconfiguration.
+and both are available with no container reconfiguration. Verified on OpenNMS
+Horizon 36.0.3 (Karaf 4.4.x).
 
-**Environment variables — `${env:NAME}`.**
+The two forms are different mechanisms, which is why their syntax differs.
+`${env:NAME}` is substituted when Karaf reads the `.cfg` file, before any key
+means anything to the plugin. `$[secret:name]` is resolved by a Config Admin
+plugin when the configuration is delivered. Both cover the keys in this file;
+only the first is guaranteed to cover every key of every bundle.
+
+=== Environment variables: `${env:NAME}`
 
 [source,properties]
 ----
@@ -47,29 +54,70 @@ Resolution happens when Karaf reads the `.cfg`, before any key means anything
 to the plugin, so it applies to *every* configuration key and works anywhere
 in a value, not just as the whole value.
 
-**Secret files — `$[secret:name]`.**
+=== Secret files: `$[secret:name]`
 
 [source,properties]
 ----
 auth.bearer.token = $[secret:prom-token]
 ----
 
-reads `etc/prom-token` (the directory Karaf points `secretsdir` at) and uses its content as the value. This is the
-form to reach for when secrets arrive as files, which is what a Kubernetes
-`Secret` volume mount, the Secrets Store CSI driver, and HashiCorp Vault
-Agent all produce. It also keeps the secret behind filesystem permissions
-rather than in the process environment.
+This reads the file `prom-token` from the directory Karaf points
+`secretsdir` at, which ships pre-set to `etc/`, and uses its content as the
+value. Reach for this form when your secrets arrive as files, which is the
+shape a Kubernetes `Secret` volume mount, the Secrets Store CSI driver and
+HashiCorp Vault Agent all produce. It keeps the secret behind filesystem
+permissions rather than in the process environment.
 
-CAUTION: The file's content is used *verbatim*, including a trailing newline.
-A newline in a header value is rejected by the CRLF guard, so write secret
-files without one (`printf '%s' "$TOKEN" > prom-token`).
+NOTE: The file must land in the directory `secretsdir` names. Mounting a
+Kubernetes `Secret` there has not been verified by this project, and note the
+upstream caveat that a `subPath` mount — the usual way to place a single file
+at a fixed path — does not receive Secret updates. Neither placeholder form
+re-reads its source while the plugin runs: `${env:NAME}` is fixed for the life
+of the process, and a changed secret file is picked up on the next
+configuration reload, not immediately.
 
-**When a reference does not resolve.** Karaf resolves an unset `${env:NAME}`
-to an *empty string* — it does not pass the literal through. The plugin's
-validation then rejects the empty value, names the offending key, and refuses
-to serve until the configuration is corrected. The failure is loud rather than
-silent, but the diagnostic says "empty value": if you see that on a key you
-believe you set, check the variable name first.
+CAUTION: The file's content is used as-is, including a trailing newline. For
+`http.headers.*` values that newline is rejected at activation by the CR/LF
+guard; other keys strip surrounding whitespace, so it is dropped harmlessly.
+Writing the file without one is the safe habit either way
+(`printf '%s' "$TOKEN" > prom-token`). A missing or empty secret file yields
+an empty value, which then behaves per the table below.
+
+=== When a reference does not resolve
+
+Karaf resolves an unset `${env:NAME}` to an *empty string*. It does not pass
+the literal through, so a misspelled variable never reaches the backend as a
+nonsense credential. What happens next depends on the key, and the difference
+matters:
+
+[cols="2,3",options="header"]
+|===
+| Key | Behaviour when the resolved value is empty
+
+| `write.url`, `read.url`
+| The plugin refuses to start, naming the key.
+
+| `http.headers.*`
+| The plugin refuses to serve, naming the header. The diagnostic says "empty
+  value" — if you see that on a header you believe you set, check the variable
+  name first.
+
+| `auth.basic.username` / `auth.basic.password`
+| If one of the pair is set and the other resolves empty, the plugin refuses
+  to start. If *both* resolve empty, Basic auth is simply off.
+
+| `auth.bearer.token`, `tenant.org-id`
+| **Silent.** An empty value is indistinguishable from "not configured", so
+  the plugin starts and sends no credential.
+|===
+
+WARNING: For `auth.bearer.token` and `tenant.org-id` the plugin cannot detect
+a typo'd variable name. Karaf resolves the reference to an empty value before
+the plugin sees the configuration, and blank already means "disabled" for
+these keys, so the two cases are identical by the time any validation could
+run. The plugin logs its effective authentication at startup
+(`prometheus-remote-writer authentication: ...`); check that line reads what
+you expect after changing an `${env:}` reference.
 
 [NOTE]
 ====
@@ -79,7 +127,8 @@ placeholder form above, restrict filesystem permissions on `{cfg-file}`
 
 [source,shell]
 ----
-envsubst < remote-writer.cfg.template > /opt/opennms/{cfg-file}
+envsubst < remote-writer.cfg.template > \
+  /opt/opennms/etc/org.opennms.plugins.tss.prometheusremotewriter.cfg
 ----
 
 [source,properties]
@@ -91,6 +140,12 @@ http.headers.cf-access-client-secret = $CLIENT_SECRET
 
 Note that deploy-time templating writes the resolved secret to disk, whereas
 `${env:NAME}` and `$[secret:name]` leave only a reference there.
+
+WARNING: That distinction is lost if you edit this PID from the Karaf shell.
+`config:edit` / `property-set` / `config:update` writes the *resolved*
+dictionary back to `{cfg-file}`, replacing your placeholder with the expanded
+secret in cleartext. `config:list` will also display the resolved value. Edit
+the file directly when you are using either placeholder form.
 ====
 
 == Wire format
@@ -255,7 +310,6 @@ INFO HttpHeadersConfig - Custom HTTP headers attached: cf-access-client-id (valu
 A property-name typo (e.g., `http.header.foo` missing the `s`) shows up
 here as a missing entry; check the log immediately after activation.
 
-[#keeping-secrets-out-of-the-cfg]
 === What is explicitly out of scope
 
 * **Plugin-side environment-variable interpolation** — unnecessary: Karaf

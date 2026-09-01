@@ -12,6 +12,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.entry;
 
 import java.util.LinkedHashMap;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Properties;
 
@@ -304,13 +305,16 @@ class HttpHeadersConfigTest {
     }
 
     /**
-     * The empty-value diagnostic is the one an operator hits when a Karaf
-     * {@code ${env:NAME}} reference names an unset variable — Karaf resolves
-     * that to an empty string rather than passing the literal through, so
-     * "empty value" is the symptom of a typo'd variable name. An earlier
-     * version of this message asserted the opposite, that values "must be
-     * literal cleartext", which would talk an operator out of the mechanism
-     * that actually works. Pinned so it cannot regress.
+     * The empty-value diagnostic is what an operator hits when a Karaf
+     * {@code ${env:NAME}} reference names an unset variable, because Karaf
+     * resolves that to an empty string. An earlier version of this message
+     * asserted the opposite — that values "must be literal cleartext" — which
+     * pointed operators away from the mechanism that works.
+     *
+     * <p>Asserts the durable content (the key name and both placeholder
+     * forms) rather than the sentence, so rewording stays free, and guards
+     * the regression by shape rather than by two frozen literals, so a
+     * reworded return of the same misinformation still fails.
      */
     @Test
     void empty_value_message_points_at_the_container_mechanism() {
@@ -318,12 +322,16 @@ class HttpHeadersConfigTest {
         assertThatThrownBy(() ->
             cfg.applyProperties(Map.of("http.headers.x-tenant", "")))
             .isInstanceOf(IllegalStateException.class)
-            .hasMessageContaining("${env:NAME}")
-            .hasMessageContaining("set in the plugin's environment")
-            .satisfies(e -> assertThat(e.getMessage())
-                .as("must not tell operators that literal cleartext is required")
+            .hasMessageContaining("x-tenant")
+            .hasMessageContaining("empty value")
+            .hasMessageContaining("${env:")
+            .hasMessageContaining("$[secret:")
+            .satisfies(e -> assertThat(e.getMessage().toLowerCase(Locale.ROOT))
+                .as("must not tell operators the container cannot interpolate, "
+                    + "however the claim is worded")
+                .doesNotMatch("(?s).*\\b(not|cannot|can't|does not|doesn't)\\b[^.]*\\bexpand\\b.*")
                 .doesNotContain("literal cleartext")
-                .doesNotContain("does not currently expand"));
+                .doesNotContain("must be literal"));
     }
 
     @Test

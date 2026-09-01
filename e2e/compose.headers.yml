@@ -44,6 +44,10 @@ services:
         condition: service_healthy
       authgate:
         condition: service_healthy
+    environment:
+      # The token exists ONLY here. headers.cfg holds a ${env:SMOKE_TOKEN}
+      # reference, so a passing run proves Karaf resolved it.
+      SMOKE_TOKEN: s3cr3t-smoke
     volumes:
       - ./opennms/headers.cfg:/opt/opennms-etc-overlay/org.opennms.plugins.tss.prometheusremotewriter.cfg:ro
 

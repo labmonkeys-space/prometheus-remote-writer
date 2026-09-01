@@ -220,12 +220,47 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
 
         warnIfInstanceIdUnset();
         warnIfWireV2();
+        logEffectiveAuth();
 
         if (config.isWalEnabled()) {
             startWalMode();
         } else {
             startQueueMode();
         }
+    }
+
+    /**
+     * State the authentication the plugin will actually use, once, at startup.
+     *
+     * <p>This exists because the plugin cannot detect the failure it guards
+     * against. Karaf resolves an unset {@code ${env:NAME}} to an empty string
+     * before Configuration Admin sees it, so by the time any of this code
+     * runs, {@code auth.bearer.token = ${env:TYPO}} and a deliberately blank
+     * {@code auth.bearer.token =} are byte-identical. Blank also means
+     * "disabled" in the shipped reference configuration, so neither a
+     * validation failure nor a warning could tell the two apart without
+     * firing on every deployment that simply does not use authentication.
+     *
+     * <p>What is left is to make the outcome visible: an operator who
+     * expected bearer auth and reads "authentication: none" has the answer in
+     * front of them. Logged at INFO because no-auth is a legitimate
+     * configuration, not a fault.
+     */
+    private void logEffectiveAuth() {
+        final String mode;
+        if (config.hasBasicAuth()) {
+            mode = "basic (auth.basic.username + auth.basic.password)";
+        } else if (config.hasBearerAuth()) {
+            mode = "bearer (auth.bearer.token)";
+        } else {
+            mode = "none — no Authorization header will be sent. If you "
+                 + "configured auth.bearer.token or auth.basic.* with an "
+                 + "${env:NAME} reference, check that the variable is set: "
+                 + "Karaf resolves an unset reference to an empty value, "
+                 + "which is indistinguishable from leaving the key blank";
+        }
+        LOG.info("prometheus-remote-writer authentication: {}{}", mode,
+                config.hasTenant() ? "; tenant.org-id set" : "");
     }
 
     private void startQueueMode() {

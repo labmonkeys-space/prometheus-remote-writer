@@ -12,14 +12,23 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Misleading diagnostic told operators secrets must be cleartext** (#55).
   The empty-value error under `http.headers.*` asserted that "the plugin does
   not currently expand `${env:NAME}` in configuration values; the value must
-  be literal cleartext". The first half is true of the plugin and false of the
-  system: Karaf resolves `${env:NAME}` in every configuration value, and
-  `$[secret:name]` reads a value from a file, both on a stock OpenNMS Horizon
-  with no container changes. An unset reference resolves to an empty string,
-  which is exactly what produced this message — so the diagnostic was pointing
-  operators away from the mechanism that would have fixed their problem. The
-  message now names the likely cause, and the configuration reference gains a
-  section covering both forms.
+  be literal cleartext". True of the plugin, false of the system: Karaf
+  resolves `${env:NAME}` in every configuration value and `$[secret:name]`
+  reads a value from a file, both verified on Horizon 36.0.3 with no container
+  changes. Since an unset reference resolves to an empty value, that error is
+  exactly how an operator reaches this message, so it pointed away from the fix.
+  The message now names both forms; the configuration reference gains a
+  "Keeping secrets out of the configuration file" section; the shipped
+  reference `.cfg` documents them once at the top; and the `headers` e2e
+  backend now feeds its token through `${env:SMOKE_TOKEN}`, so the behaviour
+  is a CI gate rather than a claim in prose.
+
+  One limit the same work established: for `auth.bearer.token` and
+  `tenant.org-id` an empty resolved value is indistinguishable from
+  "disabled", so a typo'd variable name degrades silently to no credential.
+  Karaf destroys the reference before the plugin sees the configuration, so no
+  validation can separate the two. The plugin now logs its effective
+  authentication at startup instead, making the outcome visible.
 
 - **`opennms:prometheus-writer-stats` never registered** (#113).
   Karaf 4's command extender only inspects bundles carrying the `Karaf-Commands` manifest header and only registers `@Service`-annotated classes; the plugin's blueprint-published `Action` service satisfied neither gate, so the documented command reported "Command not found" on every deployment.
@@ -173,7 +182,10 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     plugin does not currently expand `${env:NAME}` in configuration
     values — neither Aries Blueprint's `<cm:property-placeholder>` nor
     Felix FileInstall (in OpenNMS Horizon's default Karaf configuration)
-    performs the substitution. Workarounds for secret injection today:
+    performs the substitution. **[Superseded: the Felix FileInstall half
+    of this is wrong. Karaf resolves `${env:NAME}` in every configuration
+    value, and `$[secret:name]` reads a value from a file; both verified
+    on Horizon 36.0.3. See the Unreleased entry and #55.]** Workarounds for secret injection today:
     restrict filesystem permissions on the config file, render the file
     from a Kubernetes `Secret`, or use deploy-time templating
     (`envsubst`, init container). Plugin-wide `${env:NAME}` resolution is
