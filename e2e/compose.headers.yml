@@ -59,7 +59,7 @@ services:
       - ./grafana/datasources/prometheus.yml:/etc/grafana/provisioning/datasources/datasource.yml:ro
 
   authgate:
-    image: nginx:1.29-alpine
+    image: nginx:1.31-alpine
     depends_on:
       prometheus:
         condition: service_healthy
