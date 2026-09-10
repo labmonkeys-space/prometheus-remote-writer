@@ -237,7 +237,7 @@ jobs:
         # commit, rather than falling back to the mutable main-tip
         # :report-rc image.
         id: sbom-html
-        uses: no42-org/blitsbom@2340603607fe7154085ec12301d8056da2918ac1  # v0.8.1
+        uses: no42-org/blitsbom@0ddd4fd19cc563e3e1c1e27f7be2ffc7225dca65  # v0.8.2
         with:
           sbom: ${{ steps.sbom.outputs.path }}
           output: prometheus-remote-writer-${{ steps.resolve.outputs.version }}-sbom.html
