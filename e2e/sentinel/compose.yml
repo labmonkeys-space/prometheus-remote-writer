@@ -6,6 +6,10 @@
 # container — the deployment surface that this OpenSpec change
 # (`add-sentinel-deployment-spike`) is verifying.
 #
+# The opennms/horizon, opennms/minion and opennms/sentinel tags must stay in
+# lockstep with each other and with ../compose.base.yml; Dependabot proposes
+# them together.
+#
 # This file deliberately does NOT extend ../compose.base.yml — that base is
 # tuned for a single-core sandbox without the IPC fabric Sentinel needs.
 # Once the spike confirms the working hypotheses, the existing e2e/ flat
@@ -99,7 +103,7 @@ services:
       retries:  20
 
   core:
-    image: opennms/horizon:latest
+    image: opennms/horizon:36.0.3
     command: ["-s"]
     stop_grace_period: 2s
     depends_on:
@@ -127,7 +131,7 @@ services:
       start_period: 30s
 
   minion:
-    image: opennms/minion:latest
+    image: opennms/minion:36.0.3
     command: ["-f"]
     depends_on:
       kafka:
@@ -145,7 +149,7 @@ services:
       start_period: 30s
 
   sentinel:
-    image: opennms/sentinel:latest
+    image: opennms/sentinel:36.0.3
     command: ["-f"]
     depends_on:
       postgres:

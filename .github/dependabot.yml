@@ -21,18 +21,34 @@ updates:
           - github/codeql-action*
 
   - package-ecosystem: docker-compose
-    directory: /e2e
+    # Dependabot does not recurse, so every directory holding a compose file
+    # is listed. `directories` (plural) is the key that takes a list.
+    directories:
+      - /e2e
+      - /e2e/sentinel
     schedule:
       interval: weekly
     # Give upstreams a week to yank a bad or compromised release before
     # Dependabot proposes it (zizmor dependabot-cooldown).
     cooldown:
       default-days: 7
+      # The OpenNMS images are the dependency this plugin exists to integrate
+      # with, and they land in a test harness rather than a shipped artifact.
+      # The full e2e/smoke suite gates the bump, so a waiting period buys
+      # nothing that CI does not already buy. `exclude` beats `include`.
+      exclude:
+        - opennms/*
     commit-message:
       prefix: build
     labels:
       - dependencies
       - docker
+    groups:
+      # core, minion and sentinel must run the same version; split PRs stand
+      # up a mismatched topology that fails the sentinel smoke.
+      opennms:
+        patterns:
+          - opennms/*
 
   - package-ecosystem: maven
     directory: /
