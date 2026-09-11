@@ -14,7 +14,6 @@ import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
 import org.junit.jupiter.api.Test;
-import org.opennms.integration.api.v1.timeseries.StorageException;
 import org.opennms.plugins.prometheus.remotewriter.wire.MappedSample;
 
 class SampleQueueTest {
@@ -26,31 +25,30 @@ class SampleQueueTest {
     }
 
     @Test
-    void enqueue_under_capacity_succeeds_and_depth_reflects_it() throws Exception {
+    void try_enqueue_under_capacity_succeeds_and_depth_reflects_it() {
         SampleQueue q = new SampleQueue(3);
-        q.enqueue(sample(1));
-        q.enqueue(sample(2));
+        q.tryEnqueue(sample(1));
+        q.tryEnqueue(sample(2));
 
         assertThat(q.depth()).isEqualTo(2);
         assertThat(q.getSamplesEnqueued()).isEqualTo(2);
     }
 
     @Test
-    void enqueue_on_full_queue_throws_storage_exception() throws Exception {
+    void try_enqueue_on_full_queue_returns_false_without_throwing() {
         SampleQueue q = new SampleQueue(2);
-        q.enqueue(sample(1));
-        q.enqueue(sample(2));
+        assertThat(q.tryEnqueue(sample(1))).isTrue();
+        assertThat(q.tryEnqueue(sample(2))).isTrue();
 
-        assertThatThrownBy(() -> q.enqueue(sample(3)))
-                .isInstanceOf(StorageException.class)
-                .hasMessageContaining("queue full");
+        assertThat(q.tryEnqueue(sample(3))).isFalse();
         assertThat(q.depth()).isEqualTo(2);
+        assertThat(q.getSamplesEnqueued()).isEqualTo(2);
     }
 
     @Test
     void poll_batch_drains_up_to_max_batch() throws Exception {
         SampleQueue q = new SampleQueue(10);
-        for (int i = 0; i < 5; i++) q.enqueue(sample(i));
+        for (int i = 0; i < 5; i++) q.tryEnqueue(sample(i));
 
         List<MappedSample> batch = q.pollBatch(3, 10, TimeUnit.MILLISECONDS);
 
@@ -70,17 +68,16 @@ class SampleQueueTest {
     }
 
     @Test
-    void enqueue_null_sample_throws_storage_exception() {
+    void try_enqueue_null_sample_throws_npe() {
         SampleQueue q = new SampleQueue(3);
-        assertThatThrownBy(() -> q.enqueue(null))
-                .isInstanceOf(StorageException.class)
-                .hasMessageContaining("null");
+        assertThatThrownBy(() -> q.tryEnqueue(null))
+                .isInstanceOf(NullPointerException.class);
     }
 
     @Test
     void drain_empties_the_queue_up_to_max() throws Exception {
         SampleQueue q = new SampleQueue(10);
-        for (int i = 0; i < 5; i++) q.enqueue(sample(i));
+        for (int i = 0; i < 5; i++) q.tryEnqueue(sample(i));
 
         List<MappedSample> batch = q.drain(10);
 

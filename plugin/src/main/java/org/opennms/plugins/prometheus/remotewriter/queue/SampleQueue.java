@@ -7,23 +7,22 @@
 package org.opennms.plugins.prometheus.remotewriter.queue;
 
 import java.util.List;
+import java.util.Objects;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
-import org.opennms.integration.api.v1.timeseries.StorageException;
 import org.opennms.plugins.prometheus.remotewriter.wire.MappedSample;
 
 /**
  * Bounded in-memory queue of {@link MappedSample}s awaiting flush.
  *
- * <p>{@link #enqueue(MappedSample)} never blocks. If the queue has no capacity,
- * the method throws {@link StorageException}. The caller's {@code store()}
- * loop counts the refused sample together with the rest of its call in
- * {@link Shards#countDroppedQueueFull(long)}, because only the caller knows
- * how many samples the failure took down with it (issue #154). This is the
- * v0.1 backpressure contract: the plugin pushes the signal back to OpenNMS
- * rather than silently absorbing overruns.
+ * <p>{@link #tryEnqueue(MappedSample)} never blocks and returns {@code false}
+ * when the queue has no capacity. The caller's {@code store()} loop counts
+ * refusals in {@link Shards#countDroppedQueueFull(long)} and throws one
+ * {@code StorageException} per call (issues #154, #156). This is the v0.1
+ * backpressure contract: the plugin pushes the signal back to OpenNMS rather
+ * than silently absorbing overruns.
  *
  * <p>This class backs the {@code wal.enabled=false} path. When the operator
  * enables the WAL ({@code wal.enabled=true}), the {@link WalFlusher} replaces
@@ -46,23 +45,16 @@ public final class SampleQueue {
     }
 
     /**
-     * Enqueue a sample for later flush. Throws when the queue is full — the
-     * caller (OpenNMS {@code store()}) sees the failure and can react.
+     * Offer a sample for later flush. Never blocks; returns {@code false}
+     * when the queue is full. The {@code store()} loop counts refusals and
+     * throws once per call, so no exception is built per refused sample
+     * (issue #156).
      */
-    public void enqueue(MappedSample sample) throws StorageException {
-        if (sample == null) {
-            // ArrayBlockingQueue.offer(null) NPEs; fail the same way every
-            // other boundary fails — with a StorageException the caller can
-            // react to.
-            throw new StorageException("sample must not be null");
-        }
-        if (!queue.offer(sample)) {
-            throw new StorageException(
-                "prometheus-remote-writer queue full (depth=" + queue.size()
-                    + ", capacity=" + (queue.size() + queue.remainingCapacity())
-                    + "); dropping sample");
-        }
+    public boolean tryEnqueue(MappedSample sample) {
+        Objects.requireNonNull(sample, "sample");
+        if (!queue.offer(sample)) return false;
         samplesEnqueued.incrementAndGet();
+        return true;
     }
 
     /**
@@ -94,6 +86,7 @@ public final class SampleQueue {
 
     public int depth()    { return queue.size(); }
     public int capacity() { return queue.size() + queue.remainingCapacity(); }
+    public int remainingCapacity() { return queue.remainingCapacity(); }
 
     public long getSamplesEnqueued()         { return samplesEnqueued.get(); }
     public long getSamplesDequeued()         { return samplesDequeued.get(); }

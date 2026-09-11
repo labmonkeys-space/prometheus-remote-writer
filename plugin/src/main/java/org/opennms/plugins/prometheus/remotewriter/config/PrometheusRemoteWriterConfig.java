@@ -62,6 +62,26 @@ public class PrometheusRemoteWriterConfig {
     public enum IfSpeedMode { NORMALIZED, RAW }
 
     /**
+     * What {@code store()} does when a shard's queue is full (queue mode
+     * only). {@code PARTIAL}: attempt every sample, count the refused ones,
+     * throw once. Right for a caller that drops the call on exception, such
+     * as Horizon's default ring-buffer writer. {@code ALL_OR_NOTHING}:
+     * enqueue nothing and throw if any shard lacks room for its share of the
+     * call. Right for a caller that retries the whole call until accepted,
+     * such as Horizon's offheap writer, which would otherwise re-send the
+     * accepted samples on every retry. {@code AUTO}: pick from Horizon's
+     * {@code org.opennms.timeseries.config.buffer_type} system property at
+     * activation (see {@link #resolvedStorePolicy()}).
+     */
+    public enum StorePolicy { PARTIAL, ALL_OR_NOTHING, AUTO }
+
+    /** System property Horizon's timeseries layer reads its buffer type from
+     *  ({@code opennms.properties}); {@code RINGBUFFER} by default, {@code OFFHEAP}
+     *  for the retrying writer. Not set on Sentinel, where the value lives in
+     *  ConfigAdmin, so {@code AUTO} resolves to {@code PARTIAL} there. */
+    public static final String OPENNMS_BUFFER_TYPE_PROPERTY = "org.opennms.timeseries.config.buffer_type";
+
+    /**
      * Surveillance-categories label emission mode. {@code PER_CATEGORY}
      * (default) splits the OpenNMS-supplied {@code categories} source tag
      * on {@code ,} and emits one {@code onms_cat_<sanitized-name>="true"}
@@ -227,6 +247,9 @@ public class PrometheusRemoteWriterConfig {
     private String labelsCopy;
     private String metricPrefix;
     private IfSpeedMode ifSpeedMode = IfSpeedMode.NORMALIZED;
+
+    /** {@code queue.store-policy}; see {@link StorePolicy}. */
+    private StorePolicy storePolicy = StorePolicy.AUTO;
     private CategoriesMode categoriesMode = CategoriesMode.PER_CATEGORY;
     private LabelProfile labelProfile = LabelProfile.NATIVE;
     private AttrMode attrMode = AttrMode.OFF;
@@ -996,6 +1019,7 @@ public class PrometheusRemoteWriterConfig {
         diffInt(out, "http.max-connections",      other.httpMaxConnections,    httpMaxConnections);
         diffLong(out, "shutdown.grace-period-ms", other.shutdownGracePeriodMs, shutdownGracePeriodMs);
         diffInt(out, "writer.shards",             other.writerShards,          writerShards);
+        diffStr(out, "queue.store-policy",        other.storePolicy.name(),    storePolicy.name());
         diffLong(out, "max-series-lookback-seconds", other.maxSeriesLookbackSeconds, maxSeriesLookbackSeconds);
         diffStr(out, "read.discovery-strategy",   other.discoveryStrategy.name(),   discoveryStrategy.name());
         diffInt(out, "read.discovery-batch-size", other.discoveryBatchSize,         discoveryBatchSize);
@@ -1167,6 +1191,39 @@ public class PrometheusRemoteWriterConfig {
     // setWireProtocolVersion(int).
     public void setIfSpeedMode(IfSpeedMode v) {
         ifSpeedMode = v == null ? IfSpeedMode.NORMALIZED : v;
+    }
+
+    public void setStorePolicy(String v) {
+        if (isBlank(v)) {
+            storePolicy = StorePolicy.AUTO;
+            return;
+        }
+        String normalized = v.trim().toUpperCase(java.util.Locale.ROOT).replace('-', '_');
+        try {
+            storePolicy = StorePolicy.valueOf(normalized);
+        } catch (IllegalArgumentException e) {
+            throw new IllegalStateException(
+                "queue.store-policy must be 'partial', 'all-or-nothing' or 'auto', got: " + v);
+        }
+    }
+
+    public void setStorePolicy(StorePolicy v) {
+        storePolicy = v == null ? StorePolicy.AUTO : v;
+    }
+
+    /**
+     * The policy {@code store()} runs under: the configured value, or for
+     * {@code AUTO} the one matching OpenNMS's writer as published in
+     * {@link #OPENNMS_BUFFER_TYPE_PROPERTY}. {@code OFFHEAP} (any case) means
+     * the retrying writer and selects {@code ALL_OR_NOTHING}; anything else,
+     * including unset, selects {@code PARTIAL}.
+     */
+    public StorePolicy resolvedStorePolicy() {
+        if (storePolicy != StorePolicy.AUTO) return storePolicy;
+        String bufferType = System.getProperty(OPENNMS_BUFFER_TYPE_PROPERTY);
+        return bufferType != null && bufferType.trim().equalsIgnoreCase("OFFHEAP")
+                ? StorePolicy.ALL_OR_NOTHING
+                : StorePolicy.PARTIAL;
     }
 
     public void setCategoriesMode(String v) {
@@ -1364,6 +1421,7 @@ public class PrometheusRemoteWriterConfig {
     public String  getLabelsCopy()            { return labelsCopy; }
     public String  getMetricPrefix()          { return metricPrefix; }
     public IfSpeedMode getIfSpeedMode()       { return ifSpeedMode; }
+    public StorePolicy getStorePolicy()       { return storePolicy; }
     public CategoriesMode getCategoriesMode() { return categoriesMode; }
     public LabelProfile getLabelProfile()     { return labelProfile; }
     public AttrMode getAttrMode()             { return attrMode; }

@@ -13,7 +13,6 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.Objects;
 import java.util.function.Function;
 
-import org.opennms.integration.api.v1.timeseries.StorageException;
 import org.opennms.plugins.prometheus.remotewriter.http.RemoteWriteHttpClient;
 import org.opennms.plugins.prometheus.remotewriter.metrics.PluginMetrics;
 import org.opennms.plugins.prometheus.remotewriter.wire.MappedSample;
@@ -33,9 +32,10 @@ import org.opennms.plugins.prometheus.remotewriter.wire.RemoteWriteRequestBuilde
  *
  * <p>Deliberately N independent queues rather than one shared queue with N
  * consumers: competing consumers could have two in-flight batches carrying
- * the same series, which breaks per-series ordering. Per-shard overflow
- * throws {@link StorageException} exactly like the classic full queue —
- * spilling to a sibling shard would likewise break ordering.
+ * the same series, which breaks per-series ordering. A full shard refuses
+ * the sample ({@link #tryEnqueue} returns {@code false}) exactly like the
+ * classic full queue; spilling to a sibling shard would likewise break
+ * ordering.
  */
 public final class Shards {
 
@@ -81,19 +81,26 @@ public final class Shards {
      * {@code TimeSeries} entries by (map equality on the sorted label set),
      * which keeps "one series, one shard, one in-flight request" airtight.
      */
-    static int shardFor(Map<String, String> labels, int shardCount) {
+    public static int shardFor(Map<String, String> labels, int shardCount) {
         if (shardCount == 1) return 0;
         return Math.floorMod(labels.hashCode(), shardCount);
     }
 
-    public void enqueue(MappedSample sample) throws StorageException {
-        queues[shardFor(sample.labels(), queues.length)].enqueue(sample);
+    /** Route {@code sample} to its shard and offer it; see {@link SampleQueue#tryEnqueue}. */
+    public boolean tryEnqueue(MappedSample sample) {
+        return queues[shardOf(sample)].tryEnqueue(sample);
     }
 
+    public int shardOf(MappedSample sample) {
+        return shardFor(sample.labels(), queues.length);
+    }
+
+    public int remainingCapacity(int shard) { return queues[shard].remainingCapacity(); }
+
     /** Count {@code n} samples refused because a shard's queue was full.
-     *  One counter for the whole pipeline: the samples of a failed
-     *  {@code store()} call were never routed, so per-shard attribution
-     *  would be a guess, and only the total is exported. */
+     *  One counter for the whole pipeline because only the total is
+     *  exported; the caller knows the refusing shard if per-shard drop
+     *  gauges are ever wanted. */
     public void countDroppedQueueFull(long n) {
         if (n > 0) samplesDroppedQueueFull.addAndGet(n);
     }

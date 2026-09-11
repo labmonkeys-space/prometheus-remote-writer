@@ -75,9 +75,9 @@ class FlusherTest {
         // batch. Enqueueing after start() races the flusher: on a busy
         // runner, pollBatch can unblock on sample 1 before 2 and 3 land,
         // producing two batches.
-        queue.enqueue(sample(1));
-        queue.enqueue(sample(2));
-        queue.enqueue(sample(3));
+        queue.tryEnqueue(sample(1));
+        queue.tryEnqueue(sample(2));
+        queue.tryEnqueue(sample(3));
 
         flusher.start();
 
@@ -93,7 +93,7 @@ class FlusherTest {
         flusher = new Flusher(queue, http, 5, 50, metrics);
         flusher.start();
 
-        for (int i = 0; i < 10; i++) queue.enqueue(sample(i));
+        for (int i = 0; i < 10; i++) queue.tryEnqueue(sample(i));
 
         // 10 samples / batch=5 = 2 HTTP calls.
         await().atMost(Duration.ofSeconds(2))
@@ -106,7 +106,7 @@ class FlusherTest {
         flusher = new Flusher(queue, http, 100, 10_000, metrics); // long interval → relies on shutdown drain
         flusher.start();
 
-        queue.enqueue(sample(1));
+        queue.tryEnqueue(sample(1));
         // Don't wait — call stop immediately. The run-loop may or may not have
         // picked the sample up yet; the residual-drain path in run() must
         // still flush it.

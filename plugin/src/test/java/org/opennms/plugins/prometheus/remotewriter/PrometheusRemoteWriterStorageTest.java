@@ -748,11 +748,11 @@ class PrometheusRemoteWriterStorageTest {
 
     @org.junit.jupiter.params.ParameterizedTest(name = "capacity {0}: {1} dropped, depth {2}")
     @org.junit.jupiter.params.provider.CsvSource({
-            "1, 4, 1",   // queue already full: all four samples of the call are refused
-            "2, 3, 2",   // one slot free: first enqueued, the other three are lost
+            "1, 4, 1, refused 4 of 4",   // queue already full: all four samples of the call are refused
+            "2, 3, 2, refused 3 of 4",   // one slot free: first enqueued, the other three are lost
     })
     void multi_sample_store_against_full_queue_counts_every_lost_sample(
-            int capacity, long expectedDropped, long expectedDepth) throws Exception {
+            int capacity, long expectedDropped, long expectedDepth, String expectedMessage) throws Exception {
         // Issue #154: the counter must mean samples, not failed store() calls.
         try (MockWebServer server = new MockWebServer()) {
             server.start();
@@ -767,7 +767,8 @@ class PrometheusRemoteWriterStorageTest {
 
                 assertThatThrownBy(() -> s.store(List.of(sample("c"), sample("d"), sample("e"), sample("f"))))
                         .isInstanceOf(StorageException.class)
-                        .hasMessageContaining("queue full");
+                        .hasMessageContaining("queue full")
+                        .hasMessageContaining(expectedMessage);
 
                 PluginMetrics m = s.getMetrics();
                 assertThat(m.snapshot().get(PluginMetrics.SAMPLES_DROPPED_QUEUE_FULL).longValue())
@@ -778,6 +779,147 @@ class PrometheusRemoteWriterStorageTest {
                 s.stop();
             }
         }
+    }
+
+    // ---------- #156: partial acceptance across shards --------------------
+
+    @Test
+    void full_shard_does_not_block_sample_bound_for_sibling_shard() throws Exception {
+        try (MockWebServer server = new MockWebServer()) {
+            PrometheusRemoteWriterConfig c = twoShardConfig(server, 2, "partial");
+            PrometheusRemoteWriterStorage s = started(c);
+            try {
+                TwoShardSamples t = parkBothFlushers(s, c, server);
+                s.store(List.of(t.shard0()));                     // shard 0 now full (capacity 1)
+                long before = dropped(s);
+
+                assertThatThrownBy(() -> s.store(List.of(t.shard0(), t.shard1())))
+                        .isInstanceOf(StorageException.class)
+                        .hasMessageContaining("refused 1 of 2");
+
+                assertThat(depth(s)).isEqualTo(2);                // shard 0: 1, shard 1: 1
+                assertThat(dropped(s) - before).isEqualTo(1L);
+            } finally {
+                s.stop();
+            }
+        }
+    }
+
+    @Test
+    void refusal_in_the_middle_of_a_call_does_not_stop_later_samples() throws Exception {
+        try (MockWebServer server = new MockWebServer()) {
+            PrometheusRemoteWriterConfig c = twoShardConfig(server, 4, "partial");
+            PrometheusRemoteWriterStorage s = started(c);
+            try {
+                TwoShardSamples t = parkBothFlushers(s, c, server);
+                s.store(List.of(t.shard0(), t.shard0()));         // shard 0 full (capacity 2)
+                long before = dropped(s);
+
+                assertThatThrownBy(() -> s.store(List.of(t.shard1(), t.shard0(), t.shard1())))
+                        .isInstanceOf(StorageException.class)
+                        .hasMessageContaining("refused 1 of 3");
+
+                assertThat(depth(s)).isEqualTo(4);                // shard 0: 2, shard 1: 2
+                assertThat(dropped(s) - before).isEqualTo(1L);
+            } finally {
+                s.stop();
+            }
+        }
+    }
+
+    @Test
+    void all_or_nothing_refuses_the_whole_call_when_one_shard_is_short() throws Exception {
+        try (MockWebServer server = new MockWebServer()) {
+            PrometheusRemoteWriterConfig c = twoShardConfig(server, 2, "all-or-nothing");
+            PrometheusRemoteWriterStorage s = started(c);
+            try {
+                TwoShardSamples t = parkBothFlushers(s, c, server);
+                s.store(List.of(t.shard0()));                     // shard 0 full
+                long before = dropped(s);
+
+                assertThatThrownBy(() -> s.store(List.of(t.shard0(), t.shard1())))
+                        .isInstanceOf(StorageException.class)
+                        .hasMessageContaining("refused 2 of 2");
+
+                assertThat(depth(s)).isEqualTo(1);                // nothing enqueued
+                assertThat(dropped(s) - before).isEqualTo(2L);
+            } finally {
+                s.stop();
+            }
+        }
+    }
+
+    @Test
+    void all_or_nothing_accepts_a_call_that_fits() throws Exception {
+        try (MockWebServer server = new MockWebServer()) {
+            PrometheusRemoteWriterConfig c = twoShardConfig(server, 4, "all-or-nothing");
+            PrometheusRemoteWriterStorage s = started(c);
+            try {
+                TwoShardSamples t = parkBothFlushers(s, c, server);
+                s.store(List.of(t.shard0(), t.shard1()));
+                assertThat(depth(s)).isEqualTo(2);
+                assertThat(dropped(s)).isZero();
+            } finally {
+                s.stop();
+            }
+        }
+    }
+
+    private record TwoShardSamples(org.opennms.integration.api.v1.timeseries.Sample shard0,
+                                   org.opennms.integration.api.v1.timeseries.Sample shard1) {}
+
+    /** Two shards, {@code capacity} total, batch size 1, flushers stall on
+     *  their first write. Both NO_RESPONSE answers are queued up front. */
+    private static PrometheusRemoteWriterConfig twoShardConfig(MockWebServer server, int capacity, String policy)
+            throws Exception {
+        server.start();
+        server.enqueue(new okhttp3.mockwebserver.MockResponse()
+                .setSocketPolicy(okhttp3.mockwebserver.SocketPolicy.NO_RESPONSE));
+        server.enqueue(new okhttp3.mockwebserver.MockResponse()
+                .setSocketPolicy(okhttp3.mockwebserver.SocketPolicy.NO_RESPONSE));
+        PrometheusRemoteWriterConfig c = stalledFlusherConfig(server, capacity);
+        c.setWriterShards(2);
+        c.setStorePolicy(policy);
+        return c;
+    }
+
+    private static PrometheusRemoteWriterStorage started(PrometheusRemoteWriterConfig c) {
+        PrometheusRemoteWriterStorage s = new PrometheusRemoteWriterStorage(c);
+        s.start();
+        return s;
+    }
+
+    /** Find one sample per shard, store each so both flushers take theirs
+     *  and park inside NO_RESPONSE, then return fresh samples on the same
+     *  two shards for the test body to use. */
+    private static TwoShardSamples parkBothFlushers(PrometheusRemoteWriterStorage s,
+                                                    PrometheusRemoteWriterConfig c,
+                                                    MockWebServer server) throws Exception {
+        org.opennms.plugins.prometheus.remotewriter.mapper.LabelMapper lm =
+                new org.opennms.plugins.prometheus.remotewriter.mapper.LabelMapper(c, new PluginMetrics());
+        org.opennms.integration.api.v1.timeseries.Sample s0 = null, s1 = null;
+        for (int i = 0; i < 64 && (s0 == null || s1 == null); i++) {
+            org.opennms.integration.api.v1.timeseries.Sample x = sample("p" + i, "probe_" + i);
+            int shard = org.opennms.plugins.prometheus.remotewriter.queue.Shards.shardFor(lm.map(x).labels(), 2);
+            if (shard == 0 && s0 == null) s0 = x;
+            if (shard == 1 && s1 == null) s1 = x;
+        }
+        assertThat(s0).as("no sample routed to shard 0").isNotNull();
+        assertThat(s1).as("no sample routed to shard 1").isNotNull();
+        s.store(List.of(s0));
+        s.store(List.of(s1));
+        assertThat(server.takeRequest(5, TimeUnit.SECONDS)).as("flusher 0 never parked").isNotNull();
+        assertThat(server.takeRequest(5, TimeUnit.SECONDS)).as("flusher 1 never parked").isNotNull();
+        assertThat(depth(s)).as("both flushers should have drained their sample").isZero();
+        return new TwoShardSamples(s0, s1);
+    }
+
+    private static long dropped(PrometheusRemoteWriterStorage s) {
+        return s.getMetrics().snapshot().get(PluginMetrics.SAMPLES_DROPPED_QUEUE_FULL).longValue();
+    }
+
+    private static long depth(PrometheusRemoteWriterStorage s) {
+        return s.getMetrics().snapshot().get(PluginMetrics.QUEUE_DEPTH).longValue();
     }
 
     /** Store one sample and wait until the flusher has taken it and is
@@ -795,6 +937,7 @@ class PrometheusRemoteWriterStorageTest {
         c.setWriteUrl(server.url("/api/v1/push").toString());
         c.setReadUrl(server.url("/prometheus").toString());
         c.setQueueCapacity(queueCapacity);
+        c.setStorePolicy("partial"); // pin: AUTO would read a JVM-global property another test may set
         c.setBatchSize(1);
         c.setFlushIntervalMs(50);
         c.setHttpReadTimeoutMs(60_000);
@@ -807,9 +950,15 @@ class PrometheusRemoteWriterStorageTest {
     }
 
     private static org.opennms.integration.api.v1.timeseries.Sample sample(String id) {
+        return sample(id, "t");
+    }
+
+    /** Distinct metric names map to distinct label sets, which is what the
+     *  two-shard tests need to find samples on both shards. */
+    private static org.opennms.integration.api.v1.timeseries.Sample sample(String id, String metricName) {
         return ImmutableSample.builder()
                 .metric(ImmutableMetric.builder()
-                        .intrinsicTag("name", "t")
+                        .intrinsicTag("name", metricName)
                         .intrinsicTag("resourceId", "node[1].nodeSnmp[]")
                         .externalTag("id", id)
                         .build())

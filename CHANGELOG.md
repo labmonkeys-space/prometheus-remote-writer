@@ -7,13 +7,24 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **A full shard no longer discards samples bound for shards with room** (#156).
+  `store()` in queue mode now attempts every sample of the call, counts the refused ones, and throws once at the end with `refused R of N sample(s)` in the message.
+  Before, the first refused sample ended the call and every later sample was lost, including samples routed to shards that had capacity, which defeated `writer.shards` under the load it exists for.
+  A call can therefore be partially accepted and still throw.
+- **New key `queue.store-policy`** with `partial`, `all-or-nothing` and `auto` (default).
+  `auto` reads Horizon's `org.opennms.timeseries.config.buffer_type` system property: the offheap writer, which retries a whole call until it is accepted, gets `all-or-nothing` so it never re-sends samples the plugin already took; the default ring-buffer writer gets `partial`.
+  On Sentinel that setting lives in ConfigAdmin, so `auto` resolves to `partial`; offheap deployments there set the key explicitly.
+  The resolved policy is logged at activation.
+
 ### Fixed
 
 - **`samples_dropped_queue_full_total` now counts every sample a refused `store()` call carried** (#154).
   It used to count one per rejected call.
   `SampleQueue.enqueue` counted the sample it refused and threw, and `storeToQueue` let that end the loop, so every later sample in the same call was lost without being counted.
   Under sustained overload OpenNMS hands the plugin about four samples per call, so the counter read about a quarter of the real loss.
-  `storeToQueue` now counts the refused sample and the untried remainder before rethrowing, the same accounting the WAL path already did.
+  `storeToQueue` now counts every refused sample of the call before throwing (see the #156 entry above for how the call is attempted).
   With Horizon's default ring-buffer writer, which does not retry, the counter is the number of samples lost; the offheap writer retries the whole call and its retries are counted again.
   Sites that were already overloaded will see the counter rise after upgrading; alert rules on `rate(...) > 0` fire as before.
 

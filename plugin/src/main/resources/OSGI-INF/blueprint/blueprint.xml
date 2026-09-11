@@ -36,6 +36,7 @@
             <cm:property name="tls.insecure-skip-verify"  value="false"/>
             <!-- Write pipeline -->
             <cm:property name="queue.capacity"            value="10000"/>
+            <cm:property name="queue.store-policy"        value="auto"/>
             <cm:property name="batch.size"                value="1000"/>
             <cm:property name="flush.interval-ms"         value="1000"/>
             <cm:property name="retry.max-attempts"        value="5"/>
@@ -102,6 +103,7 @@
         <property name="tlsCaFile"               value="${tls.ca-file}"/>
         <property name="tlsInsecureSkipVerify"   value="${tls.insecure-skip-verify}"/>
         <property name="queueCapacity"           value="${queue.capacity}"/>
+        <property name="storePolicy"             value="${queue.store-policy}"/>
         <property name="batchSize"               value="${batch.size}"/>
         <property name="flushIntervalMs"         value="${flush.interval-ms}"/>
         <property name="retryMaxAttempts"        value="${retry.max-attempts}"/>
