@@ -76,6 +76,9 @@ jobs:
       - name: Verify the integration-api floor agrees across pom, feature and bundle
         run: make verify-compat
 
+      - name: Verify docs listing blocks resolve their attributes
+        run: make verify-docs-attrs
+
   workflow-lint:
     # Lints the workflows themselves: unpinned actions, script injection,
     # bad expressions, invalid schema. Cheap, and enforces the pinning and
