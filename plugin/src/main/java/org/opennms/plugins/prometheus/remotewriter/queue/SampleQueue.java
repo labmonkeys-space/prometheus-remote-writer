@@ -92,6 +92,17 @@ public final class SampleQueue {
         return batch;
     }
 
+    /**
+     * Add {@code n} to the queue-full drop counter without touching the
+     * queue. Used by the {@code store()} loop after {@link #enqueue} threw,
+     * to account for the samples of the same call that were never attempted
+     * (see issue #154). {@link #enqueue} has already counted the sample
+     * that failed.
+     */
+    public void countDroppedQueueFull(long n) {
+        if (n > 0) samplesDroppedQueueFull.addAndGet(n);
+    }
+
     public int depth()    { return queue.size(); }
     public int capacity() { return queue.size() + queue.remainingCapacity(); }
 

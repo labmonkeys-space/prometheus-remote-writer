@@ -88,6 +88,12 @@ public final class Shards {
         queues[shardFor(sample.labels(), queues.length)].enqueue(sample);
     }
 
+    /** Attribute {@code n} additional queue-full drops to the shard that
+     *  would have taken {@code rejected}. See {@link SampleQueue#countDroppedQueueFull}. */
+    public void countDroppedQueueFull(MappedSample rejected, long n) {
+        queues[shardFor(rejected.labels(), queues.length)].countDroppedQueueFull(n);
+    }
+
     public void start() {
         for (Flusher f : flushers) {
             f.start();
