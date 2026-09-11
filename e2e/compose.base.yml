@@ -60,7 +60,7 @@ services:
     # Held at 36.0.3: 36.0.4 ships opennms-integration-api 2.0.1, which the
     # KAR's exact-version feature requirement [2.0.0,2.0.0] cannot resolve.
     # See karaf-features/src/main/resources/features.xml.
-    image: opennms/horizon:36.0.3
+    image: opennms/horizon:36.0.4
     command: ["-s"]
     # Karaf's orderly bundle shutdown routinely hits the full default
     # 10s SIGTERM grace before SIGKILL. For this sandbox the data in
