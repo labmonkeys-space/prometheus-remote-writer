@@ -7,6 +7,44 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **The KAR now requires a Java 21 runtime** (#149). The plugin compiles to
+  Java 21 bytecode, so its bundle declares `osgi.ee=JavaSE;version=21` and
+  will not resolve on an older JVM. This strands nobody inside the supported
+  range: OpenNMS Horizon 36.0.4, the floor since v0.6.0, runs OpenJDK 21.
+
+  The target had been held at 17 to match the Horizon **35** container, whose
+  JVM was 17. Raising the support floor retired that constraint, and a pin
+  whose stated reason has expired is one nobody can reason about safely.
+
+- Corrected every row of the published Compatibility table (#149). It stated
+  Horizon 35+, Temurin/OpenJDK 17, Karaf 4.4.11 and
+  `opennms-integration-api` v2.0. Horizon 36.0.4 actually ships OpenJDK 21
+  (a Red Hat build, not Temurin) and Karaf 4.4.9, and the feature requires
+  the range `[2.0.1,3.0.0)`. Each row is now a property of the oldest
+  supported container, with the probe recorded beside it.
+
+### Fixed
+
+- A Maven property could silently redefine a published compatibility figure
+  (#149). asciidoctor-maven-plugin exposes Maven properties as AsciiDoc
+  attributes with dots converted to dashes, and those outrank `:attr:`
+  declarations in the document. `<karaf.version>4.4.11</karaf.version>` was
+  therefore shadowing `:karaf-version: 4.4.x`, and the docs published a
+  **build-time dependency version as a runtime requirement** — one *newer*
+  than the supported container provides. The attributes are renamed out of
+  the Maven property namespace so the collision is impossible.
+
+### Removed
+
+- The `org.osgi.framework` and `org.osgi.service.cm` `Import-Package`
+  overrides (#149). Both were pinned for Horizon 35's Felix 6.0.5; Horizon
+  36.0.4 ships Felix 7.0.5 exporting `org.osgi.framework` 1.10 and
+  configadmin 1.9.26 exporting `org.osgi.service.cm` 1.6.0, so bnd's computed
+  ranges resolve unaided. The `org.slf4j` override is kept — the container
+  really does ship `slf4j-api-1.7.36`.
+
 ## [0.6.0] — 2026-09-11
 
 ### Changed

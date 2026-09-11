@@ -6,9 +6,31 @@
 :project-repo-url:       https://github.com/labmonkeys-space/prometheus-remote-writer
 :project-pages-url:      https://labmonkeys-space.github.io/prometheus-remote-writer/
 
-:horizon-min-version:    35
-:karaf-version:          4.4.x
-:java-target-version:    17
+// Compatibility figures. These are RUNTIME facts observed in the oldest
+// supported OpenNMS Horizon container — never build-time dependency
+// versions, which answer a different question and are free to differ.
+//
+// The `runtime-` prefix is deliberate. asciidoctor-maven-plugin exposes
+// Maven project properties as attributes with dots converted to dashes, and
+// those OUTRANK `:attr:` declarations here. A `:karaf-version:` attribute
+// was therefore silently replaced by the `karaf.version` build property
+// (4.4.11) and the docs published a Karaf version NEWER than the supported
+// container actually ships (4.4.9). Keep these names outside any plausible
+// Maven property namespace.
+//
+// Re-observe all four at every support-floor bump, against the image in
+// e2e/compose.base.yml:
+//
+//   IMG=opennms/horizon:36.0.4
+//   docker run [-]-rm [-]-entrypoint sh $IMG -c 'java -version'
+//   docker run [-]-rm [-]-entrypoint sh $IMG -c 'cat /opt/opennms/karaf-version.txt'
+//
+// The integration-api range is not observed but declared: it is the feature
+// range in karaf-features/src/main/resources/features.xml.
+:runtime-horizon-min:    36.0.4
+:runtime-jvm:            21
+:runtime-karaf:          4.4.9
+:runtime-oia-range:      [2.0.1,3.0.0)
 
 :cfg-pid:                org.opennms.plugins.tss.prometheusremotewriter
 :cfg-file:               etc/org.opennms.plugins.tss.prometheusremotewriter.cfg
