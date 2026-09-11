@@ -16,12 +16,15 @@ Prometheus data source — no OpenNMS REST round-trip at query time.
 
 ## Compatibility
 
-| Component             | Required                       |
-|-----------------------|--------------------------------|
-| OpenNMS Horizon Core  | 36.0.4+                          |
-| JVM                   | Temurin / OpenJDK 17             |
-| Apache Karaf          | 4.4.x                            |
-| Integration API       | `opennms-integration-api` 2.0.1+ |
+| Component             | Required                                |
+|-----------------------|-----------------------------------------|
+| OpenNMS Horizon Core  | 36.0.4+                                 |
+| JVM                   | OpenJDK 21                              |
+| Apache Karaf          | 4.4.9                                   |
+| Integration API       | `opennms-integration-api` `[2.0.1,3.0.0)` |
+
+Every row is a property of the OpenNMS Horizon 36.0.4 container, not of this
+project's build — the two can differ.
 
 > **Horizon 35.x–36.0.3 are no longer supported.** They ship
 > `opennms-integration-api` 2.0.0, which this plugin's Karaf feature no

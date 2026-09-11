@@ -76,13 +76,19 @@
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
         <!--
-            Target Java 17 to match the OpenNMS Horizon 35 container JVM
-            (Temurin 17). Compiling to 21 makes bnd emit an
-            osgi.ee=JavaSE;version=21 requirement in the bundle manifest,
-            which the 17-VM framework can't satisfy and the feature fails
-            to resolve at install time.
+            The compile target follows the JVM of the OLDEST SUPPORTED
+            Horizon, not habit. bnd derives an osgi.ee=JavaSE;version=N
+            requirement from it, and a container whose JVM is older than N
+            fails to resolve the feature at install time.
+
+            Horizon 36.0.4, the current floor, runs OpenJDK 21. Verify with
+            `java -version` inside the opennms/horizon:36.0.4 image; it
+            reports openjdk 21.0.12.1 (Red_Hat-21.0.12.1.1-1).
+
+            This was 17 while Horizon 35 was supported, and 35 did run a
+            17 VM. Re-derive this whenever the supported floor moves.
         -->
-        <maven.compiler.release>17</maven.compiler.release>
+        <maven.compiler.release>21</maven.compiler.release>
 
         <!-- Dependency versions -->
         <opennms-integration-api.version>2.0.1</opennms-integration-api.version>

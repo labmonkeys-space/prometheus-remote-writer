@@ -196,18 +196,20 @@
                         <Export-Package />
                         <Import-Package>
                             <!--
-                                Override bnd-computed version ranges for packages
-                                that are compiled against a newer API than the
-                                target runtime ships. OpenNMS Horizon 35
-                                bundles Karaf 4.3.x + Felix framework 6.0.5 =
-                                OSGi R6 = org.osgi.framework;version=1.9,
-                                but we compile against osgi.core:8.0.0 which
-                                exports framework;version=1.10. Without an
-                                explicit range, bnd writes "[1.10,2)" and the
-                                bundle fails to resolve at install time.
+                                A hand-written range here is kept ONLY while the
+                                runtime fact that requires it still holds. An
+                                inert override with an expired reason is worse
+                                than none: the next reader reasons from it.
+
+                                org.osgi.framework and org.osgi.service.cm were
+                                pinned for Horizon 35 (Felix 6.0.5 = OSGi R6 =
+                                framework 1.9) while the build compiled against
+                                osgi.core 8.0.0. Horizon 36.0.4 ships Felix
+                                7.0.5 exporting framework 1.10 and configadmin
+                                1.9.26 exporting cm 1.6.0, so bnd's computed
+                                ranges resolve unaided and both overrides were
+                                removed.
                             -->
-                            org.osgi.framework;version="[1.8,2)",
-                            org.osgi.service.cm;version="[1.5,2)",
                             <!--
                                 Pin the Integration API floor explicitly.
                                 bnd computes [2.0,3) from the compiled-against
@@ -225,10 +227,14 @@
                             org.apache.karaf.shell.api.action;version="[4.3,5)",
                             org.apache.karaf.shell.api.action.lifecycle;version="[4.3,5)",
                             <!--
-                                slf4j: Karaf 4.3.x ships 1.7.x; we compile
-                                against 2.0.13. The 1.7→2.0 boundary is
-                                API-compatible for our usage (Logger /
-                                LoggerFactory / MDC), so accept either.
+                                slf4j: STILL LOAD-BEARING, unlike the OSGi
+                                ranges above. Horizon 36.0.4 ships
+                                lib/slf4j-api-1.7.36.jar while we compile
+                                against 2.x, so without this bnd writes a
+                                2.x floor the container cannot satisfy. The
+                                1.7→2.0 boundary is API-compatible for our
+                                usage (Logger / LoggerFactory / MDC), so
+                                accept either.
                             -->
                             org.slf4j;version="[1.7,3)",
                             org.slf4j.event;version="[1.7,3)";resolution:=optional,
