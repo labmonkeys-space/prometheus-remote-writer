@@ -724,26 +724,10 @@ class PrometheusRemoteWriterStorageTest {
             server.enqueue(new okhttp3.mockwebserver.MockResponse()
                     .setSocketPolicy(okhttp3.mockwebserver.SocketPolicy.NO_RESPONSE));
 
-            PrometheusRemoteWriterConfig c = new PrometheusRemoteWriterConfig();
-            c.setWriteUrl(server.url("/api/v1/push").toString());
-            c.setReadUrl(server.url("/prometheus").toString());
-            c.setQueueCapacity(2);
-            c.setBatchSize(1);
-            c.setFlushIntervalMs(50);
-            c.setHttpReadTimeoutMs(60_000);
-            c.setHttpWriteTimeoutMs(60_000);
-            c.setRetryInitialBackoffMs(1);
-            c.setRetryMaxBackoffMs(2);
-            c.setRetryMaxAttempts(1);
-            c.setShutdownGracePeriodMs(100);
-
-            PrometheusRemoteWriterStorage s = new PrometheusRemoteWriterStorage(c);
+            PrometheusRemoteWriterStorage s = new PrometheusRemoteWriterStorage(stalledFlusherConfig(server, 2));
             s.start();
             try {
-                // First store: flusher picks it up immediately, hits NO_RESPONSE,
-                // hangs. Wait for the flusher to be parked in the HTTP call.
-                s.store(List.of(sample("a")));
-                server.takeRequest(5, TimeUnit.SECONDS);
+                parkFlusher(s, server);
 
                 // Now fill the queue to capacity.
                 s.store(List.of(sample("b")));
@@ -762,22 +746,23 @@ class PrometheusRemoteWriterStorageTest {
         }
     }
 
-    @Test
-    void multi_sample_store_against_full_queue_counts_every_sample_as_dropped() throws Exception {
+    @org.junit.jupiter.params.ParameterizedTest(name = "capacity {0}: {1} dropped, depth {2}")
+    @org.junit.jupiter.params.provider.CsvSource({
+            "1, 4, 1",   // queue already full: all four samples of the call are refused
+            "2, 3, 2",   // one slot free: first enqueued, the other three are lost
+    })
+    void multi_sample_store_against_full_queue_counts_every_lost_sample(
+            int capacity, long expectedDropped, long expectedDepth) throws Exception {
         // Issue #154: the counter must mean samples, not failed store() calls.
-        // Queue of capacity 1, already holding one sample the parked flusher
-        // has not drained; a 4-sample store() must leave the counter at 4.
         try (MockWebServer server = new MockWebServer()) {
             server.start();
             server.enqueue(new okhttp3.mockwebserver.MockResponse()
                     .setSocketPolicy(okhttp3.mockwebserver.SocketPolicy.NO_RESPONSE));
 
-            PrometheusRemoteWriterConfig c = stalledFlusherConfig(server, 1);
-            PrometheusRemoteWriterStorage s = new PrometheusRemoteWriterStorage(c);
+            PrometheusRemoteWriterStorage s = new PrometheusRemoteWriterStorage(stalledFlusherConfig(server, capacity));
             s.start();
             try {
-                s.store(List.of(sample("a")));
-                server.takeRequest(5, TimeUnit.SECONDS);
+                parkFlusher(s, server);
                 s.store(List.of(sample("b")));
 
                 assertThatThrownBy(() -> s.store(List.of(sample("c"), sample("d"), sample("e"), sample("f"))))
@@ -786,44 +771,21 @@ class PrometheusRemoteWriterStorageTest {
 
                 PluginMetrics m = s.getMetrics();
                 assertThat(m.snapshot().get(PluginMetrics.SAMPLES_DROPPED_QUEUE_FULL).longValue())
-                        .isEqualTo(4L);
+                        .isEqualTo(expectedDropped);
+                assertThat(m.snapshot().get(PluginMetrics.QUEUE_DEPTH).longValue())
+                        .isEqualTo(expectedDepth);
             } finally {
                 s.stop();
             }
         }
     }
 
-    @Test
-    void multi_sample_store_that_fills_the_queue_part_way_counts_the_remainder() throws Exception {
-        // Capacity 2 with one slot free: the first of four samples is
-        // enqueued, the second is refused, and the two never attempted are
-        // still lost. Counter must read 3; depth must read 2.
-        try (MockWebServer server = new MockWebServer()) {
-            server.start();
-            server.enqueue(new okhttp3.mockwebserver.MockResponse()
-                    .setSocketPolicy(okhttp3.mockwebserver.SocketPolicy.NO_RESPONSE));
-
-            PrometheusRemoteWriterConfig c = stalledFlusherConfig(server, 2);
-            PrometheusRemoteWriterStorage s = new PrometheusRemoteWriterStorage(c);
-            s.start();
-            try {
-                s.store(List.of(sample("a")));
-                server.takeRequest(5, TimeUnit.SECONDS);
-                s.store(List.of(sample("b")));
-
-                assertThatThrownBy(() -> s.store(List.of(sample("c"), sample("d"), sample("e"), sample("f"))))
-                        .isInstanceOf(StorageException.class)
-                        .hasMessageContaining("queue full");
-
-                PluginMetrics m = s.getMetrics();
-                assertThat(m.snapshot().get(PluginMetrics.SAMPLES_DROPPED_QUEUE_FULL).longValue())
-                        .isEqualTo(3L);
-                assertThat(m.snapshot().get(PluginMetrics.QUEUE_DEPTH).longValue())
-                        .isEqualTo(2L);
-            } finally {
-                s.stop();
-            }
-        }
+    /** Store one sample and wait until the flusher has taken it and is
+     *  parked inside the NO_RESPONSE write. Fails loudly instead of letting
+     *  a slow runner turn into a confusing off-by-one on the counter. */
+    private static void parkFlusher(PrometheusRemoteWriterStorage s, MockWebServer server) throws Exception {
+        s.store(List.of(sample("a")));
+        assertThat(server.takeRequest(5, TimeUnit.SECONDS)).as("flusher never parked").isNotNull();
     }
 
     /** Config whose flusher parks forever on its first write (NO_RESPONSE

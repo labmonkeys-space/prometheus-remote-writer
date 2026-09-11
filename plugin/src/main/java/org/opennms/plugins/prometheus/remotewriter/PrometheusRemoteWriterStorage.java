@@ -506,16 +506,16 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
             try {
                 a.shards().enqueue(mapped);
             } catch (StorageException full) {
-                // OpenNMS treats the exception as final for the whole call,
-                // so every later sample in this list is lost too. Count them
-                // so samples_dropped_queue_full_total means samples, not
-                // failed store() calls (issue #154). SampleQueue.enqueue has
-                // already counted sample i itself, hence `- i - 1`; the WAL
-                // path below uses `- i` because WalWriter does not count the
-                // failing frame. Samples the mapper would have skipped are
+                // Count the refused sample and every later one in this call,
+                // the same `samples.size() - i` storeToWal uses, so the
+                // counter means samples per refused store() attempt, not
+                // failed calls (issue #154). Horizon's default ring-buffer
+                // writer does not retry, so for it this is samples lost; the
+                // offheap writer retries the whole list and its retries are
+                // counted again. Samples the mapper would have skipped are
                 // included: they were never mapped, so we cannot tell, and
                 // storeToWal makes the same choice.
-                a.shards().countDroppedQueueFull(mapped, samples.size() - i - 1);
+                a.shards().countDroppedQueueFull(samples.size() - i);
                 throw full;
             }
         }

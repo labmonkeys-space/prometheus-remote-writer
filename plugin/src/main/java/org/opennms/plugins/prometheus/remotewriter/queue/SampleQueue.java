@@ -18,10 +18,12 @@ import org.opennms.plugins.prometheus.remotewriter.wire.MappedSample;
  * Bounded in-memory queue of {@link MappedSample}s awaiting flush.
  *
  * <p>{@link #enqueue(MappedSample)} never blocks. If the queue has no capacity,
- * the method throws {@link StorageException} and the sample is reported as
- * dropped via {@link #getSamplesDroppedQueueFull()}. This is the v0.1
- * backpressure contract: the plugin pushes the signal back to OpenNMS rather
- * than silently absorbing overruns.
+ * the method throws {@link StorageException}. The caller's {@code store()}
+ * loop counts the refused sample together with the rest of its call in
+ * {@link Shards#countDroppedQueueFull(long)}, because only the caller knows
+ * how many samples the failure took down with it (issue #154). This is the
+ * v0.1 backpressure contract: the plugin pushes the signal back to OpenNMS
+ * rather than silently absorbing overruns.
  *
  * <p>This class backs the {@code wal.enabled=false} path. When the operator
  * enables the WAL ({@code wal.enabled=true}), the {@link WalFlusher} replaces
@@ -35,7 +37,6 @@ public final class SampleQueue {
     private final ArrayBlockingQueue<MappedSample> queue;
     private final AtomicLong samplesEnqueued        = new AtomicLong();
     private final AtomicLong samplesDequeued        = new AtomicLong();
-    private final AtomicLong samplesDroppedQueueFull = new AtomicLong();
 
     public SampleQueue(int capacity) {
         if (capacity < 1) {
@@ -56,7 +57,6 @@ public final class SampleQueue {
             throw new StorageException("sample must not be null");
         }
         if (!queue.offer(sample)) {
-            samplesDroppedQueueFull.incrementAndGet();
             throw new StorageException(
                 "prometheus-remote-writer queue full (depth=" + queue.size()
                     + ", capacity=" + (queue.size() + queue.remainingCapacity())
@@ -92,21 +92,9 @@ public final class SampleQueue {
         return batch;
     }
 
-    /**
-     * Add {@code n} to the queue-full drop counter without touching the
-     * queue. Used by the {@code store()} loop after {@link #enqueue} threw,
-     * to account for the samples of the same call that were never attempted
-     * (see issue #154). {@link #enqueue} has already counted the sample
-     * that failed.
-     */
-    public void countDroppedQueueFull(long n) {
-        if (n > 0) samplesDroppedQueueFull.addAndGet(n);
-    }
-
     public int depth()    { return queue.size(); }
     public int capacity() { return queue.size() + queue.remainingCapacity(); }
 
     public long getSamplesEnqueued()         { return samplesEnqueued.get(); }
     public long getSamplesDequeued()         { return samplesDequeued.get(); }
-    public long getSamplesDroppedQueueFull() { return samplesDroppedQueueFull.get(); }
 }

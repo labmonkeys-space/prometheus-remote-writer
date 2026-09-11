@@ -9,6 +9,7 @@ package org.opennms.plugins.prometheus.remotewriter.queue;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.Objects;
 import java.util.function.Function;
 
@@ -40,6 +41,7 @@ public final class Shards {
 
     private final SampleQueue[] queues;
     private final Flusher[] flushers;
+    private final AtomicLong samplesDroppedQueueFull = new AtomicLong();
 
     public Shards(int shardCount,
                   int totalQueueCapacity,
@@ -88,10 +90,12 @@ public final class Shards {
         queues[shardFor(sample.labels(), queues.length)].enqueue(sample);
     }
 
-    /** Attribute {@code n} additional queue-full drops to the shard that
-     *  would have taken {@code rejected}. See {@link SampleQueue#countDroppedQueueFull}. */
-    public void countDroppedQueueFull(MappedSample rejected, long n) {
-        queues[shardFor(rejected.labels(), queues.length)].countDroppedQueueFull(n);
+    /** Count {@code n} samples refused because a shard's queue was full.
+     *  One counter for the whole pipeline: the samples of a failed
+     *  {@code store()} call were never routed, so per-shard attribution
+     *  would be a guess, and only the total is exported. */
+    public void countDroppedQueueFull(long n) {
+        if (n > 0) samplesDroppedQueueFull.addAndGet(n);
     }
 
     public void start() {
@@ -127,11 +131,7 @@ public final class Shards {
         return sum;
     }
 
-    public long totalSamplesDroppedQueueFull() {
-        long sum = 0;
-        for (SampleQueue q : queues) sum += q.getSamplesDroppedQueueFull();
-        return sum;
-    }
+    public long totalSamplesDroppedQueueFull() { return samplesDroppedQueueFull.get(); }
 
     /**
      * Shard skew as a percentage: {@code max(depth) * 100 / mean(depth)}.
