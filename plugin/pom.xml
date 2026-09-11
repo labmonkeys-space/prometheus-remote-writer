@@ -208,7 +208,20 @@
                             -->
                             org.osgi.framework;version="[1.8,2)",
                             org.osgi.service.cm;version="[1.5,2)",
-                            org.opennms.integration.api.v1.timeseries.*,
+                            <!--
+                                Pin the Integration API floor explicitly.
+                                bnd computes [2.0,3) from the compiled-against
+                                version, which is WIDER than what we support:
+                                it would let this bundle wire against the
+                                2.0.0 shipped by Horizon 35.x-36.0.3 and fail
+                                later at runtime. Declaring the real floor
+                                turns that into an install-time resolution
+                                failure instead. Keep in sync with the
+                                feature range in karaf-features and with
+                                opennms-integration-api.version in the parent
+                                pom — `make verify-compat` enforces it.
+                            -->
+                            org.opennms.integration.api.v1.timeseries.*;version="[2.0.1,3)",
                             org.apache.karaf.shell.api.action;version="[4.3,5)",
                             org.apache.karaf.shell.api.action.lifecycle;version="[4.3,5)",
                             <!--

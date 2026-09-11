@@ -14,7 +14,7 @@ concurrency:
 
 jobs:
   smoke:
-    name: Smoke (${{ matrix.backend }})
+    name: Smoke (${{ matrix.backend }} / Horizon ${{ matrix.horizon }})
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     strategy:
@@ -32,6 +32,18 @@ jobs:
         # broken twice with the whole suite green — so this entry is the
         # regression barrier, not a nice-to-have.
         backend: [prometheus, mimir, victoriametrics, headers]
+        # Both ends of the supported opennms-integration-api range, proven
+        # rather than asserted. The floor is whatever the feature range in
+        # karaf-features demands; the ceiling end is the newest released
+        # Horizon.
+        #
+        # These are the SAME version today: the floor is OIA 2.0.1 and
+        # 36.0.4 is both the oldest Horizon shipping it and the newest
+        # released. The axis exists anyway so that widening it at the next
+        # Horizon release is a one-line change rather than a retrofit under
+        # time pressure. Add the newer version here, keep the oldest
+        # supported one.
+        horizon: ['36.0.4']
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -53,4 +65,4 @@ jobs:
             ${{ runner.os }}-m2-
 
       - name: Build KAR and run e2e smoke
-        run: make smoke BACKENDS=${{ matrix.backend }} MAVEN_FLAGS="-B --no-transfer-progress -U"
+        run: make smoke BACKENDS=${{ matrix.backend }} HORIZON_VERSION=${{ matrix.horizon }} MAVEN_FLAGS="-B --no-transfer-progress -U"

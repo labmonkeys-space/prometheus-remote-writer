@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/labmonkeys-space/prometheus-remote-writer/actions/workflows/ci.yml/badge.svg)](https://github.com/labmonkeys-space/prometheus-remote-writer/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[![OpenNMS Horizon](https://img.shields.io/badge/OpenNMS_Horizon-36.0.3-4c9141.svg)](https://github.com/OpenNMS/opennms/releases/tag/opennms-36.0.3-1)
+[![OpenNMS Horizon](https://img.shields.io/badge/OpenNMS_Horizon-36.0.4-4c9141.svg)](https://github.com/OpenNMS/opennms/releases/tag/opennms-36.0.4-1)
 
 An OpenNMS Horizon plugin that pushes performance data to any
 Prometheus-compatible Remote Write endpoint — Prometheus, Cortex, Grafana
@@ -18,10 +18,15 @@ Prometheus data source — no OpenNMS REST round-trip at query time.
 
 | Component             | Required                       |
 |-----------------------|--------------------------------|
-| OpenNMS Horizon Core  | 35+                            |
-| JVM                   | Temurin / OpenJDK 17           |
-| Apache Karaf          | 4.4.x                          |
-| Integration API       | `opennms-integration-api` 2.0  |
+| OpenNMS Horizon Core  | 36.0.4+                          |
+| JVM                   | Temurin / OpenJDK 17             |
+| Apache Karaf          | 4.4.x                            |
+| Integration API       | `opennms-integration-api` 2.0.1+ |
+
+> **Horizon 35.x–36.0.3 are no longer supported.** They ship
+> `opennms-integration-api` 2.0.0, which this plugin's Karaf feature no
+> longer resolves against. Use plugin **v0.5.1** on those versions, or
+> upgrade Horizon to 36.0.4 or newer.
 
 ## Install
 

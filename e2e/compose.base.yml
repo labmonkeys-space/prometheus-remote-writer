@@ -57,10 +57,12 @@ services:
     # This tag is the source of truth for the README "OpenNMS Horizon" badge;
     # `make verify-badge` fails if they disagree.
     #
-    # Held at 36.0.3: 36.0.4 ships opennms-integration-api 2.0.1, which the
-    # KAR's exact-version feature requirement [2.0.0,2.0.0] cannot resolve.
-    # See karaf-features/src/main/resources/features.xml.
-    image: opennms/horizon:36.0.3
+    # Keep it a LITERAL tag. Dependabot parses it to propose bumps and
+    # verify-horizon-badge.sh reads it as the source of truth; interpolating
+    # it (${HORIZON_VERSION:-...}) would silently disable both. The smoke
+    # matrix overrides the version with a generated layer instead — see the
+    # HORIZON_VERSION handling in the Makefile.
+    image: opennms/horizon:36.0.4
     command: ["-s"]
     # Karaf's orderly bundle shutdown routinely hits the full default
     # 10s SIGTERM grace before SIGKILL. For this sandbox the data in
