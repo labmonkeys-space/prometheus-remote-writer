@@ -763,6 +763,77 @@ class PrometheusRemoteWriterConfigTest {
             .isInstanceOf(IllegalStateException.class);
     }
 
+    // ---------- queue.store-policy ------------------------------------------
+
+    private static final String BUFFER_TYPE_PROPERTY = "org.opennms.timeseries.config.buffer_type";
+    private String savedBufferType;
+
+    @org.junit.jupiter.api.BeforeEach
+    void saveBufferTypeProperty() { savedBufferType = System.getProperty(BUFFER_TYPE_PROPERTY); }
+
+    @org.junit.jupiter.api.AfterEach
+    void restoreBufferTypeProperty() {
+        if (savedBufferType == null) System.clearProperty(BUFFER_TYPE_PROPERTY);
+        else System.setProperty(BUFFER_TYPE_PROPERTY, savedBufferType);
+    }
+
+    @Test
+    void store_policy_default_is_auto() {
+        assertThat(minimal().getStorePolicy()).isEqualTo(PrometheusRemoteWriterConfig.StorePolicy.AUTO);
+    }
+
+    @Test
+    void store_policy_accepts_all_spellings_case_insensitively() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setStorePolicy("partial");
+        assertThat(c.getStorePolicy()).isEqualTo(PrometheusRemoteWriterConfig.StorePolicy.PARTIAL);
+        c.setStorePolicy("All-Or-Nothing");
+        assertThat(c.getStorePolicy()).isEqualTo(PrometheusRemoteWriterConfig.StorePolicy.ALL_OR_NOTHING);
+        c.setStorePolicy("ALL_OR_NOTHING");
+        assertThat(c.getStorePolicy()).isEqualTo(PrometheusRemoteWriterConfig.StorePolicy.ALL_OR_NOTHING);
+        c.setStorePolicy("auto");
+        assertThat(c.getStorePolicy()).isEqualTo(PrometheusRemoteWriterConfig.StorePolicy.AUTO);
+        c.setStorePolicy("");
+        assertThat(c.getStorePolicy()).isEqualTo(PrometheusRemoteWriterConfig.StorePolicy.AUTO);
+    }
+
+    @Test
+    void store_policy_rejects_unknown_value() {
+        assertThatThrownBy(() -> minimal().setStorePolicy("best-effort"))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("queue.store-policy")
+            .hasMessageContaining("partial")
+            .hasMessageContaining("all-or-nothing")
+            .hasMessageContaining("auto")
+            .hasMessageContaining("best-effort");
+    }
+
+    @Test
+    void auto_resolves_to_all_or_nothing_for_the_offheap_writer() {
+        PrometheusRemoteWriterConfig c = minimal();
+        System.setProperty(BUFFER_TYPE_PROPERTY, "offheap");
+        assertThat(c.resolvedStorePolicy()).isEqualTo(PrometheusRemoteWriterConfig.StorePolicy.ALL_OR_NOTHING);
+        System.setProperty(BUFFER_TYPE_PROPERTY, "OFFHEAP");
+        assertThat(c.resolvedStorePolicy()).isEqualTo(PrometheusRemoteWriterConfig.StorePolicy.ALL_OR_NOTHING);
+    }
+
+    @Test
+    void auto_resolves_to_partial_for_ring_buffer_or_unset() {
+        PrometheusRemoteWriterConfig c = minimal();
+        System.setProperty(BUFFER_TYPE_PROPERTY, "RINGBUFFER");
+        assertThat(c.resolvedStorePolicy()).isEqualTo(PrometheusRemoteWriterConfig.StorePolicy.PARTIAL);
+        System.clearProperty(BUFFER_TYPE_PROPERTY);
+        assertThat(c.resolvedStorePolicy()).isEqualTo(PrometheusRemoteWriterConfig.StorePolicy.PARTIAL);
+    }
+
+    @Test
+    void explicit_store_policy_ignores_the_system_property() {
+        PrometheusRemoteWriterConfig c = minimal();
+        System.setProperty(BUFFER_TYPE_PROPERTY, "OFFHEAP");
+        c.setStorePolicy("partial");
+        assertThat(c.resolvedStorePolicy()).isEqualTo(PrometheusRemoteWriterConfig.StorePolicy.PARTIAL);
+    }
+
     // ---------- labels.if-speed-mode ----------------------------------------
 
     @Test

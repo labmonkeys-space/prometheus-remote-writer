@@ -122,7 +122,8 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
             WalFlusher            walFlusher,     // WAL mode only
             Checkpoint            checkpoint,     // WAL mode only
             Path                  walDir,         // WAL mode only
-            PluginMetrics         metrics) {
+            PluginMetrics         metrics,
+            PrometheusRemoteWriterConfig.StorePolicy storePolicy) { // queue mode only
 
         boolean walEnabled() { return walWriter != null; }
     }
@@ -130,6 +131,13 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
     private final PrometheusRemoteWriterConfig config;
     private final HttpHeadersConfig httpHeadersConfig;
     private volatile Active active;
+
+    /** Serialises ALL_OR_NOTHING calls so the room check and the offers are
+     *  one step; without it two writer threads can both pass the check for
+     *  the same free slots and one of them ends up partially accepted, which
+     *  is the outcome that policy exists to prevent. Offers never block, so
+     *  the hold is short. PARTIAL does not take it. */
+    private final Object allOrNothingLock = new Object();
 
     private final AtomicLong deleteNoopTotal        = new AtomicLong();
     // nanoTime-based so NTP backsteps or container resume can't freeze the
@@ -329,9 +337,15 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
                     org.opennms.plugins.prometheus.remotewriter.wire.RemoteWriteRequestBuilders
                             .forVersion(config.getWireProtocolVersion()));
 
-            Active built = new Active(lm, sh, wc, rc, null, null, null, null, m);
+            PrometheusRemoteWriterConfig.StorePolicy policy = config.resolvedStorePolicy();
+            Active built = new Active(lm, sh, wc, rc, null, null, null, null, m, policy);
             registerGauges(built);
             logActivationOrDiff();
+            LOG.info("queue.store-policy={} ({})", policy.name().toLowerCase(java.util.Locale.ROOT).replace('_', '-'),
+                    config.getStorePolicy() == PrometheusRemoteWriterConfig.StorePolicy.AUTO
+                            ? "auto: " + PrometheusRemoteWriterConfig.OPENNMS_BUFFER_TYPE_PROPERTY + "="
+                              + System.getProperty(PrometheusRemoteWriterConfig.OPENNMS_BUFFER_TYPE_PROPERTY)
+                            : "configured");
             sh.start();
             active = built;
         } catch (RuntimeException e) {
@@ -350,6 +364,13 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
                     + "the WAL replaces the in-memory queue as source of truth. "
                     + "Size the WAL via wal.max-size-bytes instead.",
                     config.getQueueCapacity());
+        }
+        if (config.getStorePolicy() != PrometheusRemoteWriterConfig.StorePolicy.AUTO) {
+            LOG.warn("queue.store-policy={} is ignored when wal.enabled=true; "
+                    + "the WAL is one ordered log and a full WAL refuses every later "
+                    + "append, so a call that meets it is accepted up to that point and "
+                    + "then throws. A caller that retries whole calls re-sends that prefix.",
+                    config.getStorePolicy().name().toLowerCase(java.util.Locale.ROOT).replace('_', '-'));
         }
 
         PluginMetrics         m  = null;
@@ -383,7 +404,7 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
                             .forVersion(config.getWireProtocolVersion()));
 
             Active built = new Active(lm, null, wc, rc, ww, wf,
-                    recovered.checkpoint(), walDir, m);
+                    recovered.checkpoint(), walDir, m, null);
             registerGauges(built);
             logActivationOrDiff();
             LOG.info("prometheus-remote-writer WAL active (path={}, pending={} samples, "
@@ -500,25 +521,62 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
     }
 
     private void storeToQueue(Active a, List<Sample> samples) throws StorageException {
-        for (int i = 0; i < samples.size(); i++) {
-            MappedSample mapped = a.labelMapper().map(samples.get(i));
-            if (mapped == null) continue;
-            try {
-                a.shards().enqueue(mapped);
-            } catch (StorageException full) {
-                // Count the refused sample and every later one in this call,
-                // the same `samples.size() - i` storeToWal uses, so the
-                // counter means samples per refused store() attempt, not
-                // failed calls (issue #154). Horizon's default ring-buffer
-                // writer does not retry, so for it this is samples lost; the
-                // offheap writer retries the whole list and its retries are
-                // counted again. Samples the mapper would have skipped are
-                // included: they were never mapped, so we cannot tell, and
-                // storeToWal makes the same choice.
-                a.shards().countDroppedQueueFull(samples.size() - i);
-                throw full;
-            }
+        // Map first: the policy decisions below need the routed shard, and a
+        // sample the mapper skips is not offered to any shard.
+        List<MappedSample> mapped = new ArrayList<>(samples.size());
+        for (Sample s : samples) {
+            MappedSample m = a.labelMapper().map(s);
+            if (m != null) mapped.add(m);
         }
+        if (mapped.isEmpty()) return;
+
+        if (a.storePolicy() == PrometheusRemoteWriterConfig.StorePolicy.ALL_OR_NOTHING) {
+            // Refuse the whole call without enqueuing anything, so a caller
+            // that retries the whole call on exception (Horizon's offheap
+            // writer) never re-sends samples we already took. The lock makes
+            // check-then-offer atomic against other store() threads; the
+            // flusher only ever removes, which can only make room.
+            synchronized (allOrNothingLock) {
+                if (!everyShardHasRoomFor(a.shards(), mapped)) {
+                    a.shards().countDroppedQueueFull(mapped.size());
+                    throw queueFull(mapped.size(), mapped.size(), a.shards().shardCount());
+                }
+                enqueueAll(a, mapped);
+            }
+            return;
+        }
+        enqueueAll(a, mapped);
+    }
+
+    /** PARTIAL: attempt every sample so a full shard does not discard
+     *  samples bound for shards with room (#156). Unlike storeToWal, which
+     *  stops at the first refusal because a full WAL is full for every later
+     *  append, shards fill independently. One exception per call, not per
+     *  refused sample: under overload that is tens of thousands of stack
+     *  traces a second saved. */
+    private static void enqueueAll(Active a, List<MappedSample> mapped) throws StorageException {
+        int refused = 0;
+        for (MappedSample m : mapped) {
+            if (!a.shards().tryEnqueue(m)) refused++;
+        }
+        if (refused > 0) {
+            a.shards().countDroppedQueueFull(refused);
+            throw queueFull(refused, mapped.size(), a.shards().shardCount());
+        }
+    }
+
+    private static boolean everyShardHasRoomFor(Shards shards, List<MappedSample> mapped) {
+        int[] needed = new int[shards.shardCount()];
+        for (MappedSample m : mapped) needed[shards.shardOf(m)]++;
+        for (int shard = 0; shard < needed.length; shard++) {
+            if (needed[shard] > shards.remainingCapacity(shard)) return false;
+        }
+        return true;
+    }
+
+    private static StorageException queueFull(int refused, int offered, int shards) {
+        return new StorageException("prometheus-remote-writer queue full: refused " + refused + " of "
+                + offered + " sample(s) (writer.shards=" + shards + "); see samples_dropped_queue_full_total");
     }
 
     private void storeToWal(Active a, List<Sample> samples) throws StorageException {

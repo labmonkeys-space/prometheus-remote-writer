@@ -7,7 +7,6 @@
 package org.opennms.plugins.prometheus.remotewriter.queue;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.awaitility.Awaitility.await;
 
 import java.io.IOException;
@@ -25,7 +24,6 @@ import okhttp3.mockwebserver.RecordedRequest;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.opennms.integration.api.v1.timeseries.StorageException;
 import org.opennms.plugins.prometheus.remotewriter.config.PrometheusRemoteWriterConfig;
 import org.opennms.plugins.prometheus.remotewriter.http.RemoteWriteHttpClient;
 import org.opennms.plugins.prometheus.remotewriter.metrics.PluginMetrics;
@@ -110,7 +108,25 @@ class ShardsTest {
     }
 
     @Test
-    void shard_overflow_throws_without_touching_siblings() throws Exception {
+    void try_enqueue_reports_a_full_shard_without_throwing_and_siblings_still_accept() throws Exception {
+        shards = new Shards(2, 2, http, 1, 10_000, metrics, batch -> failBuild());
+        Map<String, String> shard0 = null;
+        Map<String, String> shard1 = null;
+        for (int i = 0; i < 64 && (shard0 == null || shard1 == null); i++) {
+            Map<String, String> labels = Map.of("__name__", "m", "node", "n" + i);
+            if (Shards.shardFor(labels, 2) == 0) shard0 = shard0 == null ? labels : shard0;
+            else                                 shard1 = shard1 == null ? labels : shard1;
+        }
+        assertThat(shards.tryEnqueue(new MappedSample(shard0, 1, 1.0))).isTrue();
+        assertThat(shards.tryEnqueue(new MappedSample(shard0, 2, 1.0))).isFalse();
+        assertThat(shards.remainingCapacity(0)).isZero();
+        assertThat(shards.remainingCapacity(1)).isEqualTo(1);
+        assertThat(shards.tryEnqueue(new MappedSample(shard1, 1, 1.0))).isTrue();
+        assertThat(shards.totalDepth()).isEqualTo(2);
+    }
+
+    @Test
+    void shard_overflow_is_refused_without_touching_siblings() throws Exception {
         // Two shards, tiny capacity, flushers never started — queues only.
         shards = new Shards(2, 4, http, 2, 10_000, metrics, batch -> failBuild());
         // Find two label sets landing on different shards.
@@ -125,13 +141,11 @@ class ShardsTest {
         assertThat(shard1).isNotNull();
 
         // Fill shard0 to its capacity (2 of the 4 total slots).
-        shards.enqueue(new MappedSample(shard0, 1, 1.0));
-        shards.enqueue(new MappedSample(shard0, 2, 1.0));
-        final Map<String, String> full = shard0;
-        assertThatThrownBy(() -> shards.enqueue(new MappedSample(full, 3, 1.0)))
-                .isInstanceOf(StorageException.class);
+        shards.tryEnqueue(new MappedSample(shard0, 1, 1.0));
+        shards.tryEnqueue(new MappedSample(shard0, 2, 1.0));
+        assertThat(shards.tryEnqueue(new MappedSample(shard0, 3, 1.0))).isFalse();
         // Sibling shard still accepts.
-        shards.enqueue(new MappedSample(shard1, 1, 1.0));
+        shards.tryEnqueue(new MappedSample(shard1, 1, 1.0));
         assertThat(shards.totalDepth()).isEqualTo(3);
     }
 
@@ -143,7 +157,7 @@ class ShardsTest {
         // Enqueue several samples of ONE series — all land on one shard.
         Map<String, String> series = Map.of("__name__", "m", "node", "n1");
         for (int t = 1; t <= 8; t++) {
-            shards.enqueue(new MappedSample(series, t, 1.0));
+            shards.tryEnqueue(new MappedSample(series, t, 1.0));
         }
         // max=8, mean=2 → 400%.
         assertThat(shards.skewPct()).isEqualTo(400);
@@ -182,8 +196,8 @@ class ShardsTest {
             if (Shards.shardFor(labels, 2) == 0) s0 = s0 == null ? labels : s0;
             else                                 s1 = s1 == null ? labels : s1;
         }
-        shards.enqueue(new MappedSample(s0, 1, 1.0));
-        shards.enqueue(new MappedSample(s1, 1, 1.0));
+        shards.tryEnqueue(new MappedSample(s0, 1, 1.0));
+        shards.tryEnqueue(new MappedSample(s1, 1, 1.0));
         shards.start();
 
         try {
@@ -210,7 +224,7 @@ class ShardsTest {
         shards = new Shards(2, 100, http, 10, 10_000, metrics,
                 org.opennms.plugins.prometheus.remotewriter.wire.RemoteWriteRequestBuilders.forVersion(1));
         for (int i = 0; i < 10; i++) {
-            shards.enqueue(new MappedSample(Map.of("__name__", "m", "node", "n" + i), i, 1.0));
+            shards.tryEnqueue(new MappedSample(Map.of("__name__", "m", "node", "n" + i), i, 1.0));
         }
         shards.start();
         shards.stop(5_000);
