@@ -56,6 +56,22 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+  badge-drift:
+    # The README "OpenNMS Horizon" badge names the version the e2e stack
+    # runs. Checking it here means a Dependabot bump that forgets the README
+    # goes red on the PR instead of drifting silently.
+    name: Check Horizon badge
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Verify README badge matches the e2e Horizon pin
+        run: make verify-badge
+
   workflow-lint:
     # Lints the workflows themselves: unpinned actions, script injection,
     # bad expressions, invalid schema. Cheap, and enforces the pinning and

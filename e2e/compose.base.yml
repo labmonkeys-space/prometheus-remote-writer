@@ -54,7 +54,12 @@ services:
       retries:  20
 
   core:
-    # Keep the README "OpenNMS Horizon" badge in sync when bumping this tag.
+    # This tag is the source of truth for the README "OpenNMS Horizon" badge;
+    # `make verify-badge` fails if they disagree.
+    #
+    # Held at 36.0.3: 36.0.4 ships opennms-integration-api 2.0.1, which the
+    # KAR's exact-version feature requirement [2.0.0,2.0.0] cannot resolve.
+    # See karaf-features/src/main/resources/features.xml.
     image: opennms/horizon:36.0.3
     command: ["-s"]
     # Karaf's orderly bundle shutdown routinely hits the full default

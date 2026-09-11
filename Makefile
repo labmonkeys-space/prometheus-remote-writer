@@ -63,7 +63,8 @@ BACKENDS               ?= $(SMOKE_DEFAULT_BACKENDS)
 .PHONY: help build test verify kar smoke \
         smoke-prometheus smoke-mimir smoke-victoriametrics smoke-sentinel \
         smoke-headers \
-        sentinel-poc sentinel-poc-down docs sbom clean test-class
+        sentinel-poc sentinel-poc-down docs sbom clean test-class \
+        verify-badge
 
 .DEFAULT_GOAL := help
 
@@ -347,6 +348,9 @@ docs: ## Render single-page HTML documentation to docs/target/generated-docs
 
 sbom: ## Generate CycloneDX 1.6 aggregate SBOM (target/bom.json) — opt-in, gated by the sbom Maven profile
 	$(MVN) $(MAVEN_FLAGS) -Psbom -DskipTests package
+
+verify-badge: ## Fail if the README OpenNMS Horizon badge drifts from the e2e compose pin
+	@./e2e/tools/verify-horizon-badge.sh
 
 clean: ## Remove all build artifacts
 	$(MVN) $(MAVEN_FLAGS) clean
