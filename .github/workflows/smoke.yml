@@ -66,3 +66,30 @@ jobs:
 
       - name: Build KAR and run e2e smoke
         run: make smoke BACKENDS=${{ matrix.backend }} HORIZON_VERSION=${{ matrix.horizon }} MAVEN_FLAGS="-B --no-transfer-progress -U"
+
+  smoke-complete:
+    # Stable aggregate context for the branch ruleset to require.
+    #
+    # The matrix job names embed the backend AND the Horizon version, so
+    # requiring them individually breaks the moment either axis changes: the
+    # required context simply stops reporting and the pull request is blocked
+    # forever with no failing check to point at. That is not hypothetical —
+    # adding the Horizon axis renamed three required contexts and blocked the
+    # very PR that added it.
+    #
+    # Requiring this job instead covers every matrix combination, including
+    # ones added later. It also closes a standing gap: `headers` was never in
+    # the required set, so the one gate that proves HTTP headers reach the
+    # wire was not blocking merges.
+    name: Smoke complete
+    if: always()
+    needs: smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check the smoke matrix result
+        env:
+          RESULT: ${{ needs.smoke.result }}
+        run: |
+          echo "smoke matrix result: $RESULT"
+          [ "$RESULT" = "success" ] || exit 1
