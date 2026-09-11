@@ -74,7 +74,7 @@ services:
   # feature pulls in opennms-elastic-client). Single-node, security off —
   # this is a sandbox.
   elasticsearch:
-    image: docker.elastic.co/elasticsearch/elasticsearch:7.17.28
+    image: docker.elastic.co/elasticsearch/elasticsearch:9.5.3
     environment:
       discovery.type: single-node
       xpack.security.enabled: "false"
