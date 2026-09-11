@@ -72,7 +72,7 @@ HORIZON_VERSION        ?=
         smoke-prometheus smoke-mimir smoke-victoriametrics smoke-sentinel \
         smoke-headers \
         sentinel-poc sentinel-poc-down docs sbom clean test-class \
-        verify-badge verify-compat
+        verify-badge verify-compat verify-docs-attrs
 
 .DEFAULT_GOAL := help
 
@@ -382,6 +382,9 @@ verify-badge: ## Fail if the README OpenNMS Horizon badge drifts from the e2e co
 
 verify-compat: ## Fail if the opennms-integration-api floor disagrees across pom, feature and bundle
 	@./e2e/tools/verify-compat-range.sh
+
+verify-docs-attrs: ## Fail if a docs listing block references attributes that will not resolve
+	@./e2e/tools/verify-docs-attributes.py
 
 clean: ## Remove all build artifacts
 	$(MVN) $(MAVEN_FLAGS) clean

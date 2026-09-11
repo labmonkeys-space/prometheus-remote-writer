@@ -29,10 +29,9 @@ failing later at runtime.
 The plugin ships as a Karaf KAR (`prometheus-remote-writer-kar-X.Y.Z.kar`).
 Drop it into Karaf's `deploy` directory and Karaf hot-installs it:
 
-[source,bash]
+[source,bash,subs="attributes+"]
 ----
-# Download the KAR from the GitHub Release matching your installed version.
-# Example for v0.3.0:
+# Downloads the KAR for the version of the documentation you are reading.
 curl -L -o /opt/opennms/deploy/prometheus-remote-writer.kar \
     {project-repo-url}/releases/download/v{revnumber}/{project-artifact}-kar-{revnumber}.kar
 ----
