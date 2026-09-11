@@ -500,10 +500,24 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
     }
 
     private void storeToQueue(Active a, List<Sample> samples) throws StorageException {
-        for (Sample s : samples) {
-            MappedSample mapped = a.labelMapper().map(s);
+        for (int i = 0; i < samples.size(); i++) {
+            MappedSample mapped = a.labelMapper().map(samples.get(i));
             if (mapped == null) continue;
-            a.shards().enqueue(mapped);
+            try {
+                a.shards().enqueue(mapped);
+            } catch (StorageException full) {
+                // Count the refused sample and every later one in this call,
+                // the same `samples.size() - i` storeToWal uses, so the
+                // counter means samples per refused store() attempt, not
+                // failed calls (issue #154). Horizon's default ring-buffer
+                // writer does not retry, so for it this is samples lost; the
+                // offheap writer retries the whole list and its retries are
+                // counted again. Samples the mapper would have skipped are
+                // included: they were never mapped, so we cannot tell, and
+                // storeToWal makes the same choice.
+                a.shards().countDroppedQueueFull(samples.size() - i);
+                throw full;
+            }
         }
     }
 

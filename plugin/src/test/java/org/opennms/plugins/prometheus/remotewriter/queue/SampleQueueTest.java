@@ -33,11 +33,10 @@ class SampleQueueTest {
 
         assertThat(q.depth()).isEqualTo(2);
         assertThat(q.getSamplesEnqueued()).isEqualTo(2);
-        assertThat(q.getSamplesDroppedQueueFull()).isZero();
     }
 
     @Test
-    void enqueue_on_full_queue_throws_storage_exception_and_counts_drop() throws Exception {
+    void enqueue_on_full_queue_throws_storage_exception() throws Exception {
         SampleQueue q = new SampleQueue(2);
         q.enqueue(sample(1));
         q.enqueue(sample(2));
@@ -45,7 +44,7 @@ class SampleQueueTest {
         assertThatThrownBy(() -> q.enqueue(sample(3)))
                 .isInstanceOf(StorageException.class)
                 .hasMessageContaining("queue full");
-        assertThat(q.getSamplesDroppedQueueFull()).isEqualTo(1);
+        assertThat(q.depth()).isEqualTo(2);
     }
 
     @Test

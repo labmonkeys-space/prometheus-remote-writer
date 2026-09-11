@@ -17,7 +17,7 @@ and prints them through the Karaf shell command
 | `samples_dropped_4xx_total`                | Samples in batches the endpoint rejected with 4xx.
 | `samples_dropped_5xx_total`                | Samples in batches that exhausted the 5xx retry budget.
 | `samples_dropped_transport_total`          | IOException / socket failures (distinct from 5xx so you can alert separately).
-| `samples_dropped_queue_full_total`         | Samples rejected because the in-memory queue (`wal.enabled=false`) was full.
+| `samples_dropped_queue_full_total`         | Samples refused because the in-memory queue (`wal.enabled=false`) was full. Counted in samples per refused `store()` attempt: the sample that met the full queue and every later sample in the same call. With Horizon's default ring-buffer writer, which does not retry, this is the number of samples lost. The offheap writer retries the whole call, so its retries are counted again. Earlier releases counted one per failed call.
 | `samples_dropped_wal_full_total`           | Samples rejected (or evicted under `drop-oldest`) because the WAL hit `wal.max-size-bytes`.
 | `samples_dropped_nonfinite_total`          | Samples whose value was `NaN`, `+Inf`, or `-Inf`.
 | `samples_dropped_duplicate_total`          | Same-timestamp same-series dedup (last-write-wins).

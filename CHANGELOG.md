@@ -7,6 +7,16 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`samples_dropped_queue_full_total` now counts every sample a refused `store()` call carried** (#154).
+  It used to count one per rejected call.
+  `SampleQueue.enqueue` counted the sample it refused and threw, and `storeToQueue` let that end the loop, so every later sample in the same call was lost without being counted.
+  Under sustained overload OpenNMS hands the plugin about four samples per call, so the counter read about a quarter of the real loss.
+  `storeToQueue` now counts the refused sample and the untried remainder before rethrowing, the same accounting the WAL path already did.
+  With Horizon's default ring-buffer writer, which does not retry, the counter is the number of samples lost; the offheap writer retries the whole call and its retries are counted again.
+  Sites that were already overloaded will see the counter rise after upgrading; alert rules on `rate(...) > 0` fire as before.
+
 ## [0.6.1] — 2026-09-11
 
 ### Changed
