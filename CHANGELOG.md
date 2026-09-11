@@ -7,6 +7,8 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.6.1] — 2026-09-11
+
 ### Changed
 
 - **The KAR now requires a Java 21 runtime** (#149). The plugin compiles to
@@ -1624,7 +1626,8 @@ Go sanitization rules.
 - Karaf feature `prometheus-remote-writer` shipping a pre-populated
   `etc/org.opennms.plugins.tss.prometheusremotewriter.cfg` on install.
 
-[Unreleased]: https://github.com/labmonkeys-space/prometheus-remote-writer/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/labmonkeys-space/prometheus-remote-writer/compare/v0.6.1...HEAD
+[0.6.1]: https://github.com/labmonkeys-space/prometheus-remote-writer/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/labmonkeys-space/prometheus-remote-writer/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/labmonkeys-space/prometheus-remote-writer/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/labmonkeys-space/prometheus-remote-writer/compare/v0.4.5...v0.5.0
