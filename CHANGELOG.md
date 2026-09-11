@@ -7,6 +7,70 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-09-11
+
+### Changed
+
+- **BREAKING: minimum supported OpenNMS Horizon is now 36.0.4** (#139, #147).
+  The Karaf feature required `opennms-integration-api` as a bare `2.0.0`.
+  Karaf reads a bare version as the exact range `[2.0.0,2.0.0]`, so the KAR
+  installed against exactly one API version and nothing else. Horizon 36.0.4
+  ships 2.0.1 and the feature stopped resolving entirely — every smoke backend
+  failed at KAR deployment. The requirement is now the range
+  `[2.0.1,3.0.0)`, so a future 2.0.2 or 2.1.0 works with no plugin release
+  and a 3.x API fails cleanly at install time rather than at runtime.
+
+  The floor is 2.0.1, the API this plugin is built and tested against. Horizon
+  35.0.x and 36.0.0–36.0.3 ship 2.0.0 and no longer resolve the feature. Users
+  on those versions should upgrade Horizon to 36.0.4+ or stay on plugin
+  v0.5.1. Installing this release on an unsupported Horizon fails visibly and
+  harmlessly: the feature does not resolve, `karaf.log` records the missing
+  requirement, and no samples are written.
+
+- The plugin bundle declares its own Integration API floor. `Import-Package`
+  for the timeseries packages is an explicit `[2.0.1,3)` rather than a range
+  computed from the compiled-against version. A bundle installed outside the
+  KAR now fails at install time on an unsupported API instead of wiring
+  successfully and failing later at runtime.
+
+### Added
+
+- `make verify-compat` fails the build when the `opennms-integration-api`
+  floor disagrees across the build property, the Karaf feature range and the
+  bundle's `Import-Package` (#147). Those three files are edited
+  independently — a dependency bump touches only the build property — and
+  that exact drift is what caused the 36.0.4 breakage.
+
+- `make verify-badge` fails the build when the README OpenNMS Horizon badge
+  drifts from the tag pinned in `e2e/compose.base.yml` (#140, #141). It checks
+  both copies of the version on the badge line: the shields.io text and the
+  release link.
+
+- The smoke suite runs as a matrix over an OpenNMS Horizon version axis, so
+  both ends of the declared compatibility range are proven rather than
+  asserted (#147). `make smoke` accepts `HORIZON_VERSION` to run against a
+  version other than the pinned one, applied as a generated compose override
+  so the pin in `compose.base.yml` stays a literal, Dependabot-visible tag.
+
+- A `Smoke complete` aggregate CI job that depends on the whole smoke matrix,
+  as a stable context for branch protection to require. Requiring the
+  per-backend job names directly breaks whenever a matrix axis changes.
+
+### Fixed
+
+- Both e2e stacks pin every OpenNMS image to an exact version and are covered
+  by Dependabot (#140, #141). The sentinel stack ran `opennms/horizon`,
+  `opennms/minion` and `opennms/sentinel` on `:latest`, tracked by nothing and
+  not reproducible; Dependabot does not recurse, so its directory was never in
+  scope. The `opennms/*` images are exempt from the update cooldown and
+  grouped into one pull request, so Core, Minion and Sentinel cannot drift
+  apart between merges.
+
+### Dependencies
+
+- Dependency updates across Maven plugins, protobuf, dropwizard-metrics and
+  the e2e container images (#130–#138, #143–#146).
+
 ## [0.5.1] — 2026-09-01
 
 ### Added
@@ -1522,7 +1586,8 @@ Go sanitization rules.
 - Karaf feature `prometheus-remote-writer` shipping a pre-populated
   `etc/org.opennms.plugins.tss.prometheusremotewriter.cfg` on install.
 
-[Unreleased]: https://github.com/labmonkeys-space/prometheus-remote-writer/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/labmonkeys-space/prometheus-remote-writer/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/labmonkeys-space/prometheus-remote-writer/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/labmonkeys-space/prometheus-remote-writer/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/labmonkeys-space/prometheus-remote-writer/compare/v0.4.5...v0.5.0
 [0.4.5]: https://github.com/labmonkeys-space/prometheus-remote-writer/compare/v0.4.4...v0.4.5
