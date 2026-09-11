@@ -226,7 +226,12 @@ class PrometheusRemoteWriterStorageTest {
         PrometheusRemoteWriterConfig c2 = minimal();
         c2.setBatchSize(500);
         PrometheusRemoteWriterStorage second = new PrometheusRemoteWriterStorage(c2);
-        assertThatCode(second::start).doesNotThrowAnyException();
+        try {
+            assertThatCode(second::start).doesNotThrowAnyException();
+        } finally {
+            second.stop();
+            first.stop();
+        }
     }
 
     private static PrometheusRemoteWriterConfig minimal() {
@@ -865,6 +870,120 @@ class PrometheusRemoteWriterStorageTest {
         }
     }
 
+    // ---------- #155: store() counters, high water, JMX ---------------------
+
+    @Test
+    void store_calls_and_offered_samples_are_counted_whatever_the_outcome() throws Exception {
+        try (MockWebServer server = new MockWebServer()) {
+            server.start();
+            server.enqueue(new okhttp3.mockwebserver.MockResponse()
+                    .setSocketPolicy(okhttp3.mockwebserver.SocketPolicy.NO_RESPONSE));
+            PrometheusRemoteWriterStorage s = new PrometheusRemoteWriterStorage(stalledFlusherConfig(server, 1));
+            s.start();
+            try {
+                parkFlusher(s, server);
+                long calls = metric(s, PluginMetrics.STORE_CALLS);
+                long failed = metric(s, PluginMetrics.STORE_CALLS_FAILED);
+                long offered = metric(s, PluginMetrics.STORE_SAMPLES_OFFERED);
+
+                s.store(List.of(sample("b")));
+                assertThatThrownBy(() -> s.store(List.of(sample("c"), sample("d"), sample("e"), sample("f"))))
+                        .isInstanceOf(StorageException.class);
+
+                assertThat(metric(s, PluginMetrics.STORE_CALLS) - calls).isEqualTo(2L);
+                assertThat(metric(s, PluginMetrics.STORE_CALLS_FAILED) - failed).isEqualTo(1L);
+                assertThat(metric(s, PluginMetrics.STORE_SAMPLES_OFFERED) - offered).isEqualTo(5L);
+            } finally {
+                s.stop();
+            }
+        }
+    }
+
+    @Test
+    void queue_depth_high_water_keeps_the_maximum_after_the_queue_drains() throws Exception {
+        try (MockWebServer server = new MockWebServer()) {
+            // First write blocks until the test releases it; every later
+            // write answers at once so the queue drains.
+            java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
+            java.util.concurrent.atomic.AtomicBoolean first = new java.util.concurrent.atomic.AtomicBoolean(true);
+            server.setDispatcher(new okhttp3.mockwebserver.Dispatcher() {
+                @Override public okhttp3.mockwebserver.MockResponse dispatch(okhttp3.mockwebserver.RecordedRequest r) {
+                    if (first.getAndSet(false)) {
+                        try { release.await(10, TimeUnit.SECONDS); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+                    }
+                    return new okhttp3.mockwebserver.MockResponse().setResponseCode(204);
+                }
+            });
+            server.start();
+            PrometheusRemoteWriterStorage s = new PrometheusRemoteWriterStorage(stalledFlusherConfig(server, 10));
+            s.start();
+            try {
+                parkFlusher(s, server);
+                s.store(List.of(sample("b"), sample("c")));
+                assertThat(depth(s)).isEqualTo(2L);
+
+                release.countDown();
+                await().atMost(Duration.ofSeconds(5)).until(() -> depth(s) == 0L);
+                assertThat(metric(s, PluginMetrics.QUEUE_DEPTH_HIGH_WATER)).isEqualTo(2L);
+            } finally {
+                s.stop();
+            }
+        }
+    }
+
+    @Test
+    void unmapped_samples_are_counted_and_the_call_succeeds() throws Exception {
+        try (MockWebServer server = new MockWebServer()) {
+            server.start();
+            server.enqueue(new okhttp3.mockwebserver.MockResponse()
+                    .setSocketPolicy(okhttp3.mockwebserver.SocketPolicy.NO_RESPONSE));
+            PrometheusRemoteWriterStorage s = new PrometheusRemoteWriterStorage(stalledFlusherConfig(server, 10));
+            s.start();
+            try {
+                parkFlusher(s, server);
+                org.opennms.integration.api.v1.timeseries.Sample nameless = ImmutableSample.builder()
+                        .metric(ImmutableMetric.builder()
+                                .intrinsicTag("resourceId", "node[1].nodeSnmp[]")
+                                .build())
+                        .time(Instant.now())
+                        .value(1.0)
+                        .build();
+
+                s.store(List.of(nameless, sample("b")));
+
+                assertThat(metric(s, PluginMetrics.SAMPLES_DROPPED_UNMAPPED)).isEqualTo(1L);
+                assertThat(metric(s, PluginMetrics.STORE_SAMPLES_OFFERED)).isEqualTo(3L); // a, nameless, b
+                assertThat(depth(s)).isEqualTo(1L);
+            } finally {
+                s.stop();
+            }
+        }
+    }
+
+    @Test
+    void metrics_are_registered_as_mbeans_while_active_and_removed_on_stop() throws Exception {
+        javax.management.MBeanServer mbs = java.lang.management.ManagementFactory.getPlatformMBeanServer();
+        // Dropwizard names MBeans <domain>:name=<metric>,type=<counters|gauges>.
+        javax.management.ObjectName depth = new javax.management.ObjectName(
+                PluginMetrics.JMX_DOMAIN + ":name=" + PluginMetrics.QUEUE_DEPTH + ",*");
+        javax.management.ObjectName all = new javax.management.ObjectName(PluginMetrics.JMX_DOMAIN + ":*");
+        try (MockWebServer server = new MockWebServer()) {
+            server.start();
+            PrometheusRemoteWriterConfig c = stalledFlusherConfig(server, 10);
+            PrometheusRemoteWriterStorage s = new PrometheusRemoteWriterStorage(c);
+
+            s.start();
+            assertThat(mbs.queryNames(depth, null)).as("registered after start").hasSize(1);
+            s.stop();
+            assertThat(mbs.queryNames(depth, null)).as("removed after stop").isEmpty();
+            assertThat(mbs.queryNames(all, null)).as("domain empty after stop").isEmpty();
+        }
+    }
+
+    private static long metric(PrometheusRemoteWriterStorage s, String name) {
+        return s.getMetrics().snapshot().get(name).longValue();
+    }
+
     private record TwoShardSamples(org.opennms.integration.api.v1.timeseries.Sample shard0,
                                    org.opennms.integration.api.v1.timeseries.Sample shard1) {}
 
@@ -914,13 +1033,9 @@ class PrometheusRemoteWriterStorageTest {
         return new TwoShardSamples(s0, s1);
     }
 
-    private static long dropped(PrometheusRemoteWriterStorage s) {
-        return s.getMetrics().snapshot().get(PluginMetrics.SAMPLES_DROPPED_QUEUE_FULL).longValue();
-    }
+    private static long dropped(PrometheusRemoteWriterStorage s) { return metric(s, PluginMetrics.SAMPLES_DROPPED_QUEUE_FULL); }
 
-    private static long depth(PrometheusRemoteWriterStorage s) {
-        return s.getMetrics().snapshot().get(PluginMetrics.QUEUE_DEPTH).longValue();
-    }
+    private static long depth(PrometheusRemoteWriterStorage s)   { return metric(s, PluginMetrics.QUEUE_DEPTH); }
 
     /** Store one sample and wait until the flusher has taken it and is
      *  parked inside the NO_RESPONSE write. Fails loudly instead of letting

@@ -7,6 +7,15 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Write-path counters** (#155): `http_write_duration_ms_total`, `flusher_idle_ms_total`, `store_calls_total`, `store_calls_failed_total`, `store_samples_offered_total`, `samples_dropped_unmapped_total` and the gauge `queue_depth_high_water`.
+  Together with the existing counts they give mean HTTP round-trip time, flusher utilisation and idle fraction, samples per write, and an offered-versus-written reconciliation from the plugin's own counters.
+  The pm-snmp-remotewrite-ab benchmark could answer none of those questions from two shell snapshots; now one scrape interval does.
+- **Metrics over JMX** (#155). Every counter and gauge is registered as an MBean under `org.opennms.plugins.prometheus.remotewriter` while the plugin is active, so a JMX exporter turns them into time series.
+  Earlier documentation described this exposure, but nothing implemented it: the registry was private and no reporter was attached, so a JMX exporter saw JVM metrics and none of the plugin's.
+  The operations section now shows the exporter rule.
+
 ### Changed
 
 - **A full shard no longer discards samples bound for shards with room** (#156).

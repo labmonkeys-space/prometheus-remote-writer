@@ -42,6 +42,9 @@ public final class Shards {
     private final SampleQueue[] queues;
     private final Flusher[] flushers;
     private final AtomicLong samplesDroppedQueueFull = new AtomicLong();
+    /** Maximum total depth seen right after a successful offer: the peak
+     *  the writer threads actually reached, not a later sample of it. */
+    private final AtomicLong depthHighWater = new AtomicLong();
 
     public Shards(int shardCount,
                   int totalQueueCapacity,
@@ -88,8 +91,12 @@ public final class Shards {
 
     /** Route {@code sample} to its shard and offer it; see {@link SampleQueue#tryEnqueue}. */
     public boolean tryEnqueue(MappedSample sample) {
-        return queues[shardOf(sample)].tryEnqueue(sample);
+        if (!queues[shardOf(sample)].tryEnqueue(sample)) return false;
+        depthHighWater.accumulateAndGet(totalDepth(), Math::max);
+        return true;
     }
+
+    public long depthHighWater() { return depthHighWater.get(); }
 
     public int shardOf(MappedSample sample) {
         return shardFor(sample.labels(), queues.length);

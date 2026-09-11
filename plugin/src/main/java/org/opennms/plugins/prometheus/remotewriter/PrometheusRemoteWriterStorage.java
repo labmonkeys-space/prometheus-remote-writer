@@ -340,6 +340,7 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
             PrometheusRemoteWriterConfig.StorePolicy policy = config.resolvedStorePolicy();
             Active built = new Active(lm, sh, wc, rc, null, null, null, null, m, policy);
             registerGauges(built);
+            m.startJmxReporter();
             logActivationOrDiff();
             LOG.info("queue.store-policy={} ({})", policy.name().toLowerCase(java.util.Locale.ROOT).replace('_', '-'),
                     config.getStorePolicy() == PrometheusRemoteWriterConfig.StorePolicy.AUTO
@@ -349,6 +350,7 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
             sh.start();
             active = built;
         } catch (RuntimeException e) {
+            if (m != null) m.stopJmxReporter();
             rollbackStart(sh, null, wc, rc, null);
             throw e;
         }
@@ -406,6 +408,7 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
             Active built = new Active(lm, null, wc, rc, ww, wf,
                     recovered.checkpoint(), walDir, m, null);
             registerGauges(built);
+            m.startJmxReporter();
             logActivationOrDiff();
             LOG.info("prometheus-remote-writer WAL active (path={}, pending={} samples, "
                     + "disk={} bytes, checkpoint={})",
@@ -414,6 +417,7 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
             wf.start();
             active = built;
         } catch (IOException | RuntimeException e) {
+            if (m != null) m.stopJmxReporter();
             rollbackStart(null, wf, wc, rc, ww);
             if (e instanceof RuntimeException re) throw re;
             throw new IllegalStateException("WAL startup failed", e);
@@ -448,6 +452,9 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
         } else {
             stopQueueMode(a);
         }
+        // After the drain so a scrape during the grace period still sees the
+        // final totals; before the clients go so no gauge reads a closed one.
+        a.metrics().stopJmxReporter();
         try { a.writeClient().shutdown(); } catch (RuntimeException e) { LOG.warn("write client shutdown: {}", e.getMessage(), e); }
         try { a.readClient().shutdown();  } catch (RuntimeException e) { LOG.warn("read client shutdown: {}",  e.getMessage(), e); }
 
@@ -511,12 +518,21 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
             throw new StorageException("prometheus-remote-writer is not accepting writes "
                     + "(plugin is stopped or not yet started)");
         }
+        // Caller-side accounting before anything else, so offered, written
+        // and dropped reconcile from the plugin's own counters (#155).
+        a.metrics().storeCall();
         if (samples == null || samples.isEmpty()) return;
+        a.metrics().storeSamplesOffered(samples.size());
 
-        if (a.walEnabled()) {
-            storeToWal(a, samples);
-        } else {
-            storeToQueue(a, samples);
+        try {
+            if (a.walEnabled()) {
+                storeToWal(a, samples);
+            } else {
+                storeToQueue(a, samples);
+            }
+        } catch (StorageException | RuntimeException e) {
+            a.metrics().storeCallFailed();
+            throw e;
         }
     }
 
@@ -526,7 +542,8 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
         List<MappedSample> mapped = new ArrayList<>(samples.size());
         for (Sample s : samples) {
             MappedSample m = a.labelMapper().map(s);
-            if (m != null) mapped.add(m);
+            if (m == null) { a.metrics().samplesDroppedUnmapped(1); continue; }
+            mapped.add(m);
         }
         if (mapped.isEmpty()) return;
 
@@ -583,7 +600,7 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
         for (int i = 0; i < samples.size(); i++) {
             Sample s = samples.get(i);
             MappedSample mapped = a.labelMapper().map(s);
-            if (mapped == null) continue;
+            if (mapped == null) { a.metrics().samplesDroppedUnmapped(1); continue; }
             byte[] encoded = WalEntryCodec.encode(mapped);
             try {
                 WalWriter.AppendResult r = a.walWriter().appendWithStats(encoded);
@@ -821,6 +838,7 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
                     + a.writeClient().getWrites5xxExhausted()
                     + a.writeClient().getWritesTransportError());
         m.registerLongGauge(PluginMetrics.HTTP_IN_FLIGHT,           () -> (long) a.writeClient().getInFlightCalls());
+        m.registerLongGauge(PluginMetrics.HTTP_WRITE_DURATION_MS,   a.writeClient()::getWriteDurationMs);
         m.registerLongGauge(PluginMetrics.DELETE_NOOP,              this::getDeleteNoopTotal);
         m.registerLongGauge(PluginMetrics.METADATA_DENYLIST_BLOCKED, a.labelMapper()::getMetadataDenylistBlockedCount);
 
@@ -828,6 +846,7 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
             registerWalGauges(a);
         } else {
             m.registerLongGauge(PluginMetrics.QUEUE_DEPTH,              () -> (long) a.shards().totalDepth());
+            m.registerLongGauge(PluginMetrics.QUEUE_DEPTH_HIGH_WATER,   a.shards()::depthHighWater);
             m.registerLongGauge(PluginMetrics.SAMPLES_DROPPED_QUEUE_FULL, a.shards()::totalSamplesDroppedQueueFull);
             // Per-shard gauges only when actually sharded — keeps the N=1
             // metric surface byte-identical to the classic pipeline.

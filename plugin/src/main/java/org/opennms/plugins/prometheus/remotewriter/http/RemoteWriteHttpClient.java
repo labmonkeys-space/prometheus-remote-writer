@@ -76,6 +76,7 @@ public final class RemoteWriteHttpClient {
     private final AtomicLong writes5xxExhausted   = new AtomicLong();
     private final AtomicLong writesTransportError = new AtomicLong();
     private final AtomicLong bytesWritten         = new AtomicLong();
+    private final AtomicLong writeDurationNanos   = new AtomicLong();
 
     /**
      * Test-friendly constructor — no operator-supplied custom headers.
@@ -112,6 +113,17 @@ public final class RemoteWriteHttpClient {
      * @param snappyCompressedPayload bytes produced by {@code RemoteWriteRequestBuilder}
      */
     public WriteResult write(byte[] snappyCompressedPayload) {
+        // Wall time of the whole call, retries and backoff included: that is
+        // how long the flusher is unavailable per write (#155).
+        long started = System.nanoTime();
+        try {
+            return doWrite(snappyCompressedPayload);
+        } finally {
+            writeDurationNanos.addAndGet(System.nanoTime() - started); // sum nanos, round once on read
+        }
+    }
+
+    private WriteResult doWrite(byte[] snappyCompressedPayload) {
         Request request = buildRequest(snappyCompressedPayload);
         int maxAttempts = Math.max(1, config.getRetryMaxAttempts());
         long backoff = Math.max(1, config.getRetryInitialBackoffMs());
@@ -202,6 +214,7 @@ public final class RemoteWriteHttpClient {
     public long getWrites5xxExhausted()   { return writes5xxExhausted.get(); }
     public long getWritesTransportError() { return writesTransportError.get(); }
     public long getBytesWritten()         { return bytesWritten.get(); }
+    public long getWriteDurationMs()      { return writeDurationNanos.get() / 1_000_000L; }
 
     /** In-flight HTTP request count — running plus queued at the dispatcher. */
     public int getInFlightCalls() {

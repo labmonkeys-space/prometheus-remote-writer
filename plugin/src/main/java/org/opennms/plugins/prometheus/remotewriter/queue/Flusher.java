@@ -157,7 +157,11 @@ public final class Flusher {
         LOG.info("flusher started (batchSize={}, flushIntervalMs={})", batchSize, flushIntervalMs);
         while (running) {
             try {
+                long waitStarted = System.nanoTime();
                 List<MappedSample> batch = queue.pollBatch(batchSize, flushIntervalMs, TimeUnit.MILLISECONDS);
+                // Everything up to the return is time with nothing to send,
+                // whether the poll timed out or a head sample finally arrived.
+                metrics.flusherIdleNanos(System.nanoTime() - waitStarted);
                 if (batch.isEmpty()) continue;
                 flushBatch(batch);
             } catch (InterruptedException e) {
