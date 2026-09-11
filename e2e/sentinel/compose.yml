@@ -50,7 +50,7 @@ services:
   # KRaft-mode single-node Kafka. Same image and env shape as the
   # indigo423/opennms-playground reference stack.
   kafka:
-    image: apache/kafka:4.1.1
+    image: apache/kafka:4.3.1
     environment:
       TZ: UTC
       KAFKA_KRAFT_MODE: "true"
