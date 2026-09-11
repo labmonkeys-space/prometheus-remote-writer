@@ -23,6 +23,12 @@ and prints them through the Karaf shell command
 | `samples_dropped_duplicate_total`          | Same-timestamp same-series dedup (last-write-wins).
 | `samples_unparseable_resource_id_total`    | Samples whose `resourceId` matched none of the parser grammars (rising rate ⇒ open an issue).
 | `samples_synthesized_mtype_total`          | Reads where the Prometheus response lacked an `mtype` label and the plugin synthesized `mtype="gauge"` to keep graphs renderable. Ticks once per Metric reconstruction — per matched series in `findMetrics`, once per fetch in `getTimeSeriesData`. See <<mtype-roundtrip>>. Should drop to flat once Prometheus retention has aged out pre-fix data, or rise indefinitely if `labels.exclude = mtype` is configured.
+| `store_calls_total`                        | Calls to `store()`. With `store_calls_failed_total` this is the caller-side failure rate that #154 had to borrow from OpenNMS's own timers.
+| `store_calls_failed_total`                 | `store()` calls that threw. Under `queue.store-policy = partial` a call that was partially accepted still counts as failed.
+| `store_samples_offered_total`              | Samples handed to `store()` before label mapping. Over a window, `offered = written + Σ dropped_* + queue_depth (+ WAL pending)`; the identity does not hold across a restart, since WAL replay writes in the new process what was offered in the old.
+| `samples_dropped_unmapped_total`           | Samples the label mapper could not map because the metric had no name. Never offered to a queue or the WAL. Only a non-OpenNMS caller of the TimeSeriesStorage API produces these.
+| `http_write_duration_ms_total`             | Wall milliseconds spent inside remote-write HTTP calls, retries and backoff included. Mean round-trip: `rate(http_write_duration_ms_total) / rate(http_writes_successful_total + http_writes_failed_total)`. Flusher utilisation: `rate(http_write_duration_ms_total) / (1000 × writer.shards)`. Samples per write: `rate(samples_written_total) / rate(http_writes_successful_total)`.
+| `flusher_idle_ms_total`                    | Milliseconds the queue-mode flushers spent waiting for a sample with an empty queue. Idle fraction: `rate(flusher_idle_ms_total) / (1000 × writer.shards)`. Near 1 with a rising `samples_dropped_queue_full_total` means arrivals are bursty, not that the flusher is slow.
 |===
 
 === Pipeline state
@@ -31,6 +37,7 @@ and prints them through the Karaf shell command
 |===
 | Gauge                              | What it shows
 
+| `queue_depth_high_water`                   | Maximum `queue_depth` observed since activation. Shows a queue that fills and empties between two reads of `queue_depth`.
 | `queue_depth`                      | Current in-memory queue occupancy (when `wal.enabled=false`).
 | `wal_segments`                     | WAL segment count on disk (when `wal.enabled=true`).
 | `wal_disk_bytes`                   | Total WAL footprint on disk.
@@ -160,11 +167,33 @@ want to survive a 10-minute outage.
 
 == Self-monitoring with the plugin itself
 
-The plugin's metrics are exposed via Dropwizard, which means you can
-scrape the Karaf JVM with a JMX exporter and feed those self-metrics back
-into the same Prometheus backend the plugin writes to. That gives you
-one Grafana dashboard with both OpenNMS data and the plugin's own
-operational health.
+While the plugin is active, every counter and gauge in the tables above
+is registered as an MBean in the Karaf JVM under the domain
+`org.opennms.plugins.prometheus.remotewriter`. The MBean name carries
+the metric name and its kind, for example
+`org.opennms.plugins.prometheus.remotewriter:name=samples_written_total,type=counters`
+and `...:name=queue_depth,type=gauges`. Counters expose the attribute
+`Count`, gauges `Value`. Several `_total` names are read live from the
+component that owns the state rather than counted in the registry, for
+example `http_writes_successful_total`, `http_writes_failed_total`,
+`samples_dropped_queue_full_total` and `flusher_idle_ms_total`, and
+therefore appear under `type=gauges` with `Value`. Do not derive the type
+from the name; the exporter rule below covers both shapes.
+The MBeans are removed when the plugin stops and re-created on a
+configuration reload.
 
-A future release may add a built-in HTTP scrape endpoint to remove the
-JMX-exporter step. Not on the v0.4 roadmap.
+A https://github.com/prometheus/jmx_exporter[JMX exporter] against the
+Karaf JVM turns them into time series. One rule covers all of them:
+
+[source,yaml]
+----
+rules:
+  - pattern: 'org.opennms.plugins.prometheus.remotewriter<name=(.+), type=(counters|gauges)><>(Count|Value)'
+    name: prometheus_remote_writer_$1
+    type: UNTYPED
+----
+
+Write those series into the same backend the plugin writes to and one
+Grafana dashboard shows both the OpenNMS data and the plugin's own
+health. `opennms:prometheus-writer-stats` in the Karaf shell remains the
+manual way to read the same values.

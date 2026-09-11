@@ -44,6 +44,40 @@ class RemoteWriteHttpClientTest {
         server.shutdown();
     }
 
+    // ---------- #155: write duration --------------------------------------
+
+    @Test
+    void write_duration_accumulates_wall_time_of_the_call() throws Exception {
+        server.enqueue(new MockResponse().setResponseCode(204)
+                .setHeadersDelay(200, java.util.concurrent.TimeUnit.MILLISECONDS));
+        client = newClient(durationConfig(1, 1));
+
+        client.write(PAYLOAD);
+
+        assertThat(client.getWriteDurationMs()).isGreaterThanOrEqualTo(200L);
+    }
+
+    @Test
+    void write_duration_includes_retry_backoff() throws Exception {
+        server.enqueue(new MockResponse().setResponseCode(503));
+        server.enqueue(new MockResponse().setResponseCode(204));
+        client = newClient(durationConfig(2, 50));
+
+        WriteResult r = client.write(PAYLOAD);
+
+        assertThat(r.outcome()).isEqualTo(RemoteWriteHttpClient.WriteOutcome.SUCCESS);
+        assertThat(r.attemptsMade()).isEqualTo(2);
+        assertThat(client.getWriteDurationMs()).isGreaterThanOrEqualTo(50L);
+    }
+
+    private PrometheusRemoteWriterConfig durationConfig(int maxAttempts, long initialBackoffMs) {
+        PrometheusRemoteWriterConfig c = cfg(server);
+        c.setRetryMaxAttempts(maxAttempts);
+        c.setRetryInitialBackoffMs(initialBackoffMs);
+        c.setRetryMaxBackoffMs(Math.max(initialBackoffMs, 2));
+        return c;
+    }
+
     // ---------- success + headers ------------------------------------------
 
     @Test

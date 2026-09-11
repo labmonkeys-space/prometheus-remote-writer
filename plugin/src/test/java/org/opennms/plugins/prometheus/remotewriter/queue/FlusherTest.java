@@ -66,6 +66,16 @@ class FlusherTest {
     }
 
     @Test
+    void waiting_on_an_empty_queue_counts_as_idle_time() throws Exception {
+        flusher = new Flusher(queue, http, 100, 100, metrics);
+        flusher.start();
+
+        await().atMost(Duration.ofSeconds(2)).until(() ->
+                metrics.snapshot().get(PluginMetrics.FLUSHER_IDLE_MS).longValue() >= 100L);
+        assertThat(server.getRequestCount()).isZero();
+    }
+
+    @Test
     void background_thread_flushes_on_sample_arrival() throws Exception {
         server.enqueue(new MockResponse().setResponseCode(204));
         flusher = new Flusher(queue, http, 100, 50, metrics);

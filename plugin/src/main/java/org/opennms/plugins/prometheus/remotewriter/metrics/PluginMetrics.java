@@ -13,6 +13,9 @@ import java.util.function.LongSupplier;
 import com.codahale.metrics.Counter;
 import com.codahale.metrics.Gauge;
 import com.codahale.metrics.MetricRegistry;
+import com.codahale.metrics.jmx.JmxReporter;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Plugin-internal metrics registry. Counters are owned by this class and
@@ -40,6 +43,25 @@ public final class PluginMetrics {
     public static final String HTTP_WRITES_SUCCESSFUL          = "http_writes_successful_total";
     public static final String HTTP_WRITES_FAILED              = "http_writes_failed_total";
     public static final String HTTP_IN_FLIGHT                  = "http_in_flight";
+    /** Wall milliseconds spent inside remote-write HTTP calls, retries and
+     *  backoff included. Over http_writes_successful_total + http_writes_failed_total
+     *  it is the mean round-trip; over wall time it is flusher utilisation. */
+    public static final String HTTP_WRITE_DURATION_MS          = "http_write_duration_ms_total";
+    /** Milliseconds the queue-mode flushers spent waiting in pollBatch with
+     *  nothing to send. Under writer.shards > 1 every flusher adds to it. */
+    public static final String FLUSHER_IDLE_MS                 = "flusher_idle_ms_total";
+    public static final String STORE_CALLS                     = "store_calls_total";
+    public static final String STORE_CALLS_FAILED              = "store_calls_failed_total";
+    /** Samples handed to store() before mapping: the caller's view of offered load. */
+    public static final String STORE_SAMPLES_OFFERED           = "store_samples_offered_total";
+    /** Samples the label mapper could not map (no metric name); never offered to a queue or the WAL. */
+    public static final String SAMPLES_DROPPED_UNMAPPED        = "samples_dropped_unmapped_total";
+    /** Maximum total queue depth observed since activation. */
+    public static final String QUEUE_DEPTH_HIGH_WATER          = "queue_depth_high_water";
+
+    /** MBean domain every counter and gauge is published under while the
+     *  plugin is active; the metric name is the MBean's {@code name} key. */
+    public static final String JMX_DOMAIN = "org.opennms.plugins.prometheus.remotewriter";
 
     // --- WAL metrics (wal.enabled=true only; gauges registered on start) ---
     public static final String WAL_BYTES_WRITTEN               = "wal_bytes_written_total";
@@ -77,6 +99,17 @@ public final class PluginMetrics {
     private final Counter findMetricsTwoPhase;
     private final Counter findMetricsPhase2Batches;
 
+    /** Nanoseconds, summed exactly; exposed as a millisecond gauge so sub-ms
+     *  polls do not round to zero and vanish. */
+    private final java.util.concurrent.atomic.AtomicLong flusherIdleNanos = new java.util.concurrent.atomic.AtomicLong();
+    private final Counter storeCalls;
+    private final Counter storeCallsFailed;
+    private final Counter storeSamplesOffered;
+    private final Counter samplesDroppedUnmapped;
+
+    private static final Logger LOG = LoggerFactory.getLogger(PluginMetrics.class);
+    private JmxReporter jmxReporter;
+
     public PluginMetrics() {
         this.samplesWritten               = registry.counter(SAMPLES_WRITTEN);
         this.samplesDropped4xx            = registry.counter(SAMPLES_DROPPED_4XX);
@@ -95,6 +128,11 @@ public final class PluginMetrics {
         this.findMetricsSinglePass        = registry.counter(FIND_METRICS_SINGLE_PASS_TOTAL);
         this.findMetricsTwoPhase          = registry.counter(FIND_METRICS_TWO_PHASE_TOTAL);
         this.findMetricsPhase2Batches     = registry.counter(FIND_METRICS_PHASE2_BATCHES_TOTAL);
+        registerLongGauge(FLUSHER_IDLE_MS, () -> flusherIdleNanos.get() / 1_000_000L);
+        this.storeCalls                   = registry.counter(STORE_CALLS);
+        this.storeCallsFailed             = registry.counter(STORE_CALLS_FAILED);
+        this.storeSamplesOffered          = registry.counter(STORE_SAMPLES_OFFERED);
+        this.samplesDroppedUnmapped       = registry.counter(SAMPLES_DROPPED_UNMAPPED);
     }
 
     public MetricRegistry registry() { return registry; }
@@ -120,6 +158,46 @@ public final class PluginMetrics {
     public void findMetricsSinglePass()                { findMetricsSinglePass.inc(); }
     public void findMetricsTwoPhase()                  { findMetricsTwoPhase.inc(); }
     public void findMetricsPhase2Batches(long n)       { if (n > 0) findMetricsPhase2Batches.inc(n); }
+
+    public void flusherIdleNanos(long n)               { if (n > 0) flusherIdleNanos.addAndGet(n); }
+    public void storeCall()                            { storeCalls.inc(); }
+    public void storeCallFailed()                      { storeCallsFailed.inc(); }
+    public void storeSamplesOffered(long n)            { if (n > 0) storeSamplesOffered.inc(n); }
+    public void samplesDroppedUnmapped(long n)         { if (n > 0) samplesDroppedUnmapped.inc(n); }
+
+    // ---- JMX exposure ------------------------------------------------------
+
+    /**
+     * Publish every metric of this registry as an MBean under
+     * {@link #JMX_DOMAIN}. Metrics registered later (the gauges Storage adds
+     * on start) are picked up too, since the reporter listens to the
+     * registry. Idempotent. A registration failure is logged and swallowed:
+     * self-metrics are not worth a write outage.
+     */
+    public synchronized void startJmxReporter() {
+        if (jmxReporter != null) return;
+        try {
+            // Assign before start(): if start() throws part-way through,
+            // stopJmxReporter() still unregisters whatever got registered.
+            jmxReporter = JmxReporter.forRegistry(registry).inDomain(JMX_DOMAIN).build();
+            jmxReporter.start();
+        } catch (RuntimeException e) {
+            LOG.warn("could not publish plugin metrics over JMX: {}", e.getMessage(), e);
+            stopJmxReporter();
+        }
+    }
+
+    /** Unregister the MBeans published by {@link #startJmxReporter()}. Idempotent. */
+    public synchronized void stopJmxReporter() {
+        if (jmxReporter == null) return;
+        try {
+            jmxReporter.stop();
+        } catch (RuntimeException e) {
+            LOG.warn("error unpublishing plugin metrics from JMX: {}", e.getMessage(), e);
+        } finally {
+            jmxReporter = null;
+        }
+    }
 
     // ---- gauge registration (called by Storage on start) ------------------
 
