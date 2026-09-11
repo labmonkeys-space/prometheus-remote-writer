@@ -14,7 +14,16 @@ concurrency:
 
 jobs:
   smoke:
-    name: Smoke (${{ matrix.backend }} / Horizon ${{ matrix.horizon }})
+    # Keep this name EXACTLY "Smoke (<backend>)". The branch ruleset requires
+    # these contexts by name, and anything else — including adding the Horizon
+    # version here — makes the required context stop reporting, which blocks
+    # every pull request with no failing check to point at.
+    #
+    # The Horizon version therefore lives in a step name, not the job name.
+    # Before adding a second value to the `horizon` axis, repoint the ruleset
+    # to require "Smoke complete" instead of the three per-backend contexts —
+    # otherwise two jobs would share one name.
+    name: Smoke (${{ matrix.backend }})
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     strategy:
@@ -64,7 +73,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-m2-
 
-      - name: Build KAR and run e2e smoke
+      - name: Build KAR and run e2e smoke against Horizon ${{ matrix.horizon }}
         run: make smoke BACKENDS=${{ matrix.backend }} HORIZON_VERSION=${{ matrix.horizon }} MAVEN_FLAGS="-B --no-transfer-progress -U"
 
   smoke-complete:
