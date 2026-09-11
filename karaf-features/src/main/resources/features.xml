@@ -11,8 +11,19 @@
              are visible to the resolver. Without this prereq, our bundle
              fails to wire the org.opennms.integration.api.v1.timeseries*
              packages at install time even though the bundles are sitting
-             in Karaf's system repository. -->
-        <feature version="2.0.0">opennms-integration-api</feature>
+             in Karaf's system repository.
+
+             This MUST be a range, not a bare version: Karaf reads a bare
+             version as the exact range [x,x], so the KAR stops installing
+             the moment upstream ships a patch release. That is exactly how
+             Horizon 36.0.4 broke us (#139) — it moved the Integration API
+             from 2.0.0 to 2.0.1 and nothing here tolerated it.
+
+             Floor 2.0.1 is the oldest API this plugin is built and tested
+             against, which makes Horizon 36.0.4 the oldest supported
+             Horizon. Ceiling 3.0.0 is exclusive: a major bump is a
+             deliberate porting exercise, not something to resolve into. -->
+        <feature version="[2.0.1,3.0.0)">opennms-integration-api</feature>
 
         <!-- Config file shipped into etc/ on install -->
         <configfile finalname="${karaf.etc}/org.opennms.plugins.tss.prometheusremotewriter.cfg"

@@ -14,6 +14,15 @@ concurrency:
 
 jobs:
   smoke:
+    # Keep this name EXACTLY "Smoke (<backend>)". The branch ruleset requires
+    # these contexts by name, and anything else — including adding the Horizon
+    # version here — makes the required context stop reporting, which blocks
+    # every pull request with no failing check to point at.
+    #
+    # The Horizon version therefore lives in a step name, not the job name.
+    # Before adding a second value to the `horizon` axis, repoint the ruleset
+    # to require "Smoke complete" instead of the three per-backend contexts —
+    # otherwise two jobs would share one name.
     name: Smoke (${{ matrix.backend }})
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -32,6 +41,18 @@ jobs:
         # broken twice with the whole suite green — so this entry is the
         # regression barrier, not a nice-to-have.
         backend: [prometheus, mimir, victoriametrics, headers]
+        # Both ends of the supported opennms-integration-api range, proven
+        # rather than asserted. The floor is whatever the feature range in
+        # karaf-features demands; the ceiling end is the newest released
+        # Horizon.
+        #
+        # These are the SAME version today: the floor is OIA 2.0.1 and
+        # 36.0.4 is both the oldest Horizon shipping it and the newest
+        # released. The axis exists anyway so that widening it at the next
+        # Horizon release is a one-line change rather than a retrofit under
+        # time pressure. Add the newer version here, keep the oldest
+        # supported one.
+        horizon: ['36.0.4']
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -52,5 +73,32 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-m2-
 
-      - name: Build KAR and run e2e smoke
-        run: make smoke BACKENDS=${{ matrix.backend }} MAVEN_FLAGS="-B --no-transfer-progress -U"
+      - name: Build KAR and run e2e smoke against Horizon ${{ matrix.horizon }}
+        run: make smoke BACKENDS=${{ matrix.backend }} HORIZON_VERSION=${{ matrix.horizon }} MAVEN_FLAGS="-B --no-transfer-progress -U"
+
+  smoke-complete:
+    # Stable aggregate context for the branch ruleset to require.
+    #
+    # The matrix job names embed the backend AND the Horizon version, so
+    # requiring them individually breaks the moment either axis changes: the
+    # required context simply stops reporting and the pull request is blocked
+    # forever with no failing check to point at. That is not hypothetical —
+    # adding the Horizon axis renamed three required contexts and blocked the
+    # very PR that added it.
+    #
+    # Requiring this job instead covers every matrix combination, including
+    # ones added later. It also closes a standing gap: `headers` was never in
+    # the required set, so the one gate that proves HTTP headers reach the
+    # wire was not blocking merges.
+    name: Smoke complete
+    if: always()
+    needs: smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check the smoke matrix result
+        env:
+          RESULT: ${{ needs.smoke.result }}
+        run: |
+          echo "smoke matrix result: $RESULT"
+          [ "$RESULT" = "success" ] || exit 1

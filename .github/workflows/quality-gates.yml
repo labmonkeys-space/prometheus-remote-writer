@@ -57,10 +57,11 @@ jobs:
           retention-days: 7
 
   badge-drift:
-    # The README "OpenNMS Horizon" badge names the version the e2e stack
-    # runs. Checking it here means a Dependabot bump that forgets the README
-    # goes red on the PR instead of drifting silently.
-    name: Check Horizon badge
+    # Two declaration-drift checks. Both exist because the files involved are
+    # edited independently — a Dependabot bump touches one and nothing
+    # notices the others fell out of step. That is how the KAR ended up
+    # unable to install on Horizon 36.0.4 (#139).
+    name: Check version declarations
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -71,6 +72,9 @@ jobs:
 
       - name: Verify README badge matches the e2e Horizon pin
         run: make verify-badge
+
+      - name: Verify the integration-api floor agrees across pom, feature and bundle
+        run: make verify-compat
 
   workflow-lint:
     # Lints the workflows themselves: unpinned actions, script injection,

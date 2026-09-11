@@ -28,6 +28,8 @@
 #   SMOKE_TIMEOUT      Per-backend deadline in seconds (default: 600)
 #   SMOKE_POLL         Poll interval in seconds (default: 15)
 #   SMOKE_LABEL_BOUND  Max distinct label names after ingestion (default: 50)
+#   HORIZON_VERSION    Override the OpenNMS image tag for one smoke run
+#                      (default: the literal pin in e2e/compose.base.yml)
 # ==============================================================================
 
 SHELL := /bin/bash
@@ -59,12 +61,18 @@ SMOKE_POLL             ?= 15
 SMOKE_LABEL_BOUND      ?= 50
 SMOKE_DEFAULT_BACKENDS ?= prometheus mimir victoriametrics headers
 BACKENDS               ?= $(SMOKE_DEFAULT_BACKENDS)
+# Run the suite against a Horizon other than the one pinned in
+# e2e/compose.base.yml, so CI can prove both ends of the supported
+# opennms-integration-api range. Applied as a generated compose override
+# layer; the pin in compose.base.yml stays a LITERAL tag so Dependabot and
+# verify-horizon-badge.sh keep working. Unset = run exactly what is pinned.
+HORIZON_VERSION        ?=
 
 .PHONY: help build test verify kar smoke \
         smoke-prometheus smoke-mimir smoke-victoriametrics smoke-sentinel \
         smoke-headers \
         sentinel-poc sentinel-poc-down docs sbom clean test-class \
-        verify-badge
+        verify-badge verify-compat
 
 .DEFAULT_GOAL := help
 
@@ -105,12 +113,17 @@ smoke: kar ## Run e2e smoke against BACKENDS (defaults exclude sentinel; SMOKE_T
 	cleanup() { \
 	    if [ -n "$$current_file" ]; then \
 	        echo "=== [$$current_backend] tearing down ==="; \
-	        docker compose -f "$$current_file" down -v --remove-orphans >/dev/null 2>&1 || true; \
+	        docker compose $$current_cf down -v --remove-orphans >/dev/null 2>&1 || true; \
 	    fi; \
 	}; \
 	cleanup_key() { [ -n "$$keydir" ] && rm -rf "$$keydir"; keydir=""; }; \
-	keydir=""; \
-	trap 'cleanup; cleanup_key; echo; echo "=== interrupted ==="; exit 130' INT TERM; \
+	cleanup_ov() { [ -n "$$ovdir" ] && rm -rf "$$ovdir"; ovdir=""; }; \
+	keydir=""; ovdir=""; current_cf=""; \
+	trap 'cleanup; cleanup_key; cleanup_ov; echo; echo "=== interrupted ==="; exit 130' INT TERM; \
+	if [ -n "$(HORIZON_VERSION)" ]; then \
+	    ovdir=$$(mktemp -d) || { echo "ERROR: could not create the Horizon override dir" >&2; exit 1; }; \
+	    echo "=== overriding OpenNMS image tag -> $(HORIZON_VERSION) ==="; \
+	fi; \
 	pub=""; \
 	keydir=$$(mktemp -d) \
 	    && ssh-keygen -q -t rsa -b 2048 -N '' -f "$$keydir/id_rsa" \
@@ -157,9 +170,24 @@ smoke: kar ## Run e2e smoke against BACKENDS (defaults exclude sentinel; SMOKE_T
 	            failed="$$failed $$backend"; continue ;; \
 	    esac; \
 	    current_file="$$file"; current_backend="$$backend"; \
+	    cf="-f $$file"; \
+	    if [ -n "$(HORIZON_VERSION)" ]; then \
+	        ov="$$ovdir/$$backend.yml"; \
+	        { echo "services:"; \
+	          echo "  core:"; \
+	          echo "    image: opennms/horizon:$(HORIZON_VERSION)"; \
+	          if [ "$$backend" = sentinel ]; then \
+	              echo "  minion:"; \
+	              echo "    image: opennms/minion:$(HORIZON_VERSION)"; \
+	              echo "  sentinel:"; \
+	              echo "    image: opennms/sentinel:$(HORIZON_VERSION)"; \
+	          fi; } > "$$ov"; \
+	        cf="$$cf -f $$ov"; \
+	    fi; \
+	    current_cf="$$cf"; \
 	    echo; echo "=== [$$backend] starting stack ==="; \
-	    docker compose -f "$$file" down -v --remove-orphans >/dev/null 2>&1 || true; \
-	    docker compose -f "$$file" up -d >/dev/null; \
+	    docker compose $$cf down -v --remove-orphans >/dev/null 2>&1 || true; \
+	    docker compose $$cf up -d >/dev/null; \
 	    echo "=== [$$backend] waiting up to $(SMOKE_TIMEOUT)s for first samples ==="; \
 	    start=$$SECONDS; \
 	    ok=0; \
@@ -206,7 +234,7 @@ smoke: kar ## Run e2e smoke against BACKENDS (defaults exclude sentinel; SMOKE_T
 	            echo "=== [$$backend] FAIL (gate): $$plugin_cfg write.url does not point at the gate — the run would prove nothing about http.headers.* ===" >&2; \
 	            gate_ok=0; \
 	        else \
-	            docker compose -f "$$file" logs authgate >"$$keydir/gate.log" 2>/dev/null || true; \
+	            docker compose $$cf logs authgate >"$$keydir/gate.log" 2>/dev/null || true; \
 	            if grep -Eq '"POST /api/v1/write [^"]*" -> 2[0-9][0-9] x-smoke-token=\[s3cr3t-smoke\] x-smoke-instance=\[e2e-headers\] authorization=\[Token s3cr3t-smoke\]' "$$keydir/gate.log"; then \
 	                echo "=== [$$backend] PASS (traversal): the gate logged an accepted POST /api/v1/write carrying both operator headers AND Authorization: Token ==="; \
 	            else \
@@ -216,7 +244,7 @@ smoke: kar ## Run e2e smoke against BACKENDS (defaults exclude sentinel; SMOKE_T
 	            fi; \
 	        fi; \
 	        echo "=== [$$backend] checking both config beans took the same PID ==="; \
-	        if docker compose -f "$$file" exec -T "$$log_container" grep -q "Custom HTTP headers attached" "$$log_path" 2>/dev/null; then \
+	        if docker compose $$cf exec -T "$$log_container" grep -q "Custom HTTP headers attached" "$$log_path" 2>/dev/null; then \
 	            echo "=== [$$backend] PASS (co-activation): HttpHeadersConfig logged its activation, so <cm:cm-properties> resolved the same PID as the placeholder ==="; \
 	        elif [ "$$gate_ok" = 1 ]; then \
 	            echo "=== [$$backend] NOTE (co-activation): no activation line in karaf.log (log level may filter it); traversal above already proves delivery ==="; \
@@ -237,15 +265,15 @@ smoke: kar ## Run e2e smoke against BACKENDS (defaults exclude sentinel; SMOKE_T
 	                echo "=== [$$backend] PASS (label-values): $$rid_count resourceIds enumerated ==="; \
 	                echo "=== [$$backend] probing opennms:prometheus-writer-stats via Karaf SSH ==="; \
 	                { [ -n "$$pub" ] \
-	                    && docker compose -f "$$file" exec -T "$$log_container" sh -c 'cat > /tmp/karaf-test-key && chmod 600 /tmp/karaf-test-key' < "$$keydir/id_rsa" \
+	                    && docker compose $$cf exec -T "$$log_container" sh -c 'cat > /tmp/karaf-test-key && chmod 600 /tmp/karaf-test-key' < "$$keydir/id_rsa" \
 	                    && printf '\nadmin=%s,_g_:admingroup\n' "$$pub" \
-	                        | docker compose -f "$$file" exec -T core sh -c 'cat >> /opt/opennms/etc/keys.properties'; } \
+	                        | docker compose $$cf exec -T core sh -c 'cat >> /opt/opennms/etc/keys.properties'; } \
 	                    || { echo "=== [$$backend] FAIL: could not stage the Karaf SSH test key (keygen/injection) ===" >&2; \
 	                         failed="$$failed $$backend"; cleanup_backend=1; }; \
 	                if [ "$${cleanup_backend:-0}" = 1 ]; then cleanup_backend=0; cleanup; current_file=""; current_backend=""; continue; fi; \
 	                stats_out=""; \
 	                for attempt in 1 2 3; do \
-	                    stats_out=$$(docker compose -f "$$file" exec -T "$$log_container" ssh -i /tmp/karaf-test-key -p 8101 \
+	                    stats_out=$$(docker compose $$cf exec -T "$$log_container" ssh -i /tmp/karaf-test-key -p 8101 \
 	                        -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR \
 	                        -o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=4 \
 	                        admin@localhost opennms:prometheus-writer-stats 2>"$$keydir/ssh.err" || true); \
@@ -307,13 +335,13 @@ smoke: kar ## Run e2e smoke against BACKENDS (defaults exclude sentinel; SMOKE_T
 	    else \
 	        echo "=== [$$backend] FAIL: no samples within $(SMOKE_TIMEOUT)s ===" >&2; \
 	        echo "--- last 40 lines of $$log_container karaf.log ---" >&2; \
-	        docker compose -f "$$file" exec -T "$$log_container" tail -n 40 "$$log_path" >&2 2>/dev/null || true; \
+	        docker compose $$cf exec -T "$$log_container" tail -n 40 "$$log_path" >&2 2>/dev/null || true; \
 	        failed="$$failed $$backend"; \
 	    fi; \
 	    cleanup; \
-	    current_file=""; current_backend=""; \
+	    current_file=""; current_backend=""; current_cf=""; \
 	done; \
-	cleanup_key; \
+	cleanup_key; cleanup_ov; \
 	echo; echo "=== SUMMARY ==="; \
 	for b in $$passed; do echo "  PASS  $$b"; done; \
 	for b in $$failed; do echo "  FAIL  $$b"; done; \
@@ -351,6 +379,9 @@ sbom: ## Generate CycloneDX 1.6 aggregate SBOM (target/bom.json) — opt-in, gat
 
 verify-badge: ## Fail if the README OpenNMS Horizon badge drifts from the e2e compose pin
 	@./e2e/tools/verify-horizon-badge.sh
+
+verify-compat: ## Fail if the opennms-integration-api floor disagrees across pom, feature and bundle
+	@./e2e/tools/verify-compat-range.sh
 
 clean: ## Remove all build artifacts
 	$(MVN) $(MAVEN_FLAGS) clean

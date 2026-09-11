@@ -103,7 +103,7 @@ services:
       retries:  20
 
   core:
-    image: opennms/horizon:36.0.3
+    image: opennms/horizon:36.0.4
     command: ["-s"]
     stop_grace_period: 2s
     depends_on:
@@ -131,7 +131,7 @@ services:
       start_period: 30s
 
   minion:
-    image: opennms/minion:36.0.3
+    image: opennms/minion:36.0.4
     command: ["-f"]
     depends_on:
       kafka:
@@ -149,7 +149,7 @@ services:
       start_period: 30s
 
   sentinel:
-    image: opennms/sentinel:36.0.3
+    image: opennms/sentinel:36.0.4
     command: ["-f"]
     depends_on:
       postgres:
