@@ -66,6 +66,7 @@ public class PrometheusComplianceIT extends AbstractStorageIntegrationTest {
         PrometheusRemoteWriterConfig c = new PrometheusRemoteWriterConfig();
         String base = "http://" + prometheus.getHost() + ":" + prometheus.getMappedPort(9090);
         c.setWriteUrl(base + "/api/v1/write");
+        c.setOverflowMaxSizeBytes(0);   // memory-only: these suites pin the queue path
         c.setReadUrl(base);
         // Surface every tag as a Prom label so the round-trip keys match.
         c.setLabelsInclude("*");

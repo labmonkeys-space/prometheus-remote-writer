@@ -546,10 +546,10 @@ encodings on every sample. The `ifSpeed`, `ifHighSpeed`, and
 `labels.copy` targets in every mode — see <<reserved-rename-copy-targets>>.
 
 [NOTE]
-.WAL flip semantics + series identity (applies to either mode knob)
+.Overflow-tier flip semantics + series identity
 ====
 Plan a brief flip window when changing `labels.if-speed-mode` or
-`labels.categories-mode` — the WAL drains in seconds at default
+`labels.categories-mode` — a bucket drains in seconds at default
 cadence; pre-flip samples flush under the old mode, post-flip samples
 emit under the new mode. Backends see briefly mixed-mode series
 identity during the flip. *Series identity also changes permanently*

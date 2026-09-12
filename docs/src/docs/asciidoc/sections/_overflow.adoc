@@ -1,0 +1,213 @@
+[#overflow]
+= Disk overflow tier
+
+Every shard has a memory queue and, behind it, a durable bucket on disk.
+In normal running only the queue is used. When the queue fills, the shard
+spills to its bucket instead of refusing the sample, so a backend outage
+becomes a delivery delay rather than data loss — for as long as the bucket
+has room.
+
+Configured by default with a 4 GiB budget. Set
+`overflow.max-size-bytes = 0` to switch it off and get the pre-0.8.0
+behaviour, where a full queue refuses with a `StorageException`.
+
+== What the tier gives you
+
+* *Zero loss with a stated bound.* Nothing is refused until the disk budget
+  is exhausted. Divided by the offered rate, `overflow.max-size-bytes` is
+  how long a backend can be down before the plugin starts refusing.
+* *Restart preservation.* Samples on disk at shutdown ship on the next
+  start, ahead of anything offered after it. Under the default `batch`
+  fsync a `kill -9` may lose the last fsync window; everything before it is
+  durable.
+* *Sharded throughput and durability together.* Each shard owns its own
+  bucket, so `writer.shards > 1` and a disk tier combine. Before 0.8.0 the
+  WAL was one ordered log and forced `writer.shards = 1`.
+
+== How the tiers relate
+
+The rule is short: *while a shard's bucket holds anything, that shard's
+memory queue is empty.*
+
+[.text-center]
+....
+  store(sample) ──▶ bucket non-empty? ──yes──▶ bucket.append
+                          │ no
+                          ▼
+                    queue.offer ──ok──▶ done
+                          │ full
+                          ▼
+                    move the whole queue into the bucket,
+                    in order, then append this sample
+....
+
+The backlog moves rather than staying behind because a queue fills from the
+front: at the moment of the spill, memory holds the *older* samples.
+Appending only the refused sample would put it on disk ahead of them, and
+the bucket drains first — so a series would arrive out of order and the
+backend would reject it.
+
+Three things follow from moving it, and they are the reason for the rule
+rather than side effects:
+
+* Disk-before-memory drain is offered order, trivially, because memory is
+  empty for the whole spilling period.
+* Every batch sent during an outage is a disk batch. A disk batch the
+  backend refuses is retried, never dropped — so zero loss does not depend
+  on which tier a sample happened to land in.
+* The batch already in flight when the outage starts is not an exception:
+  a memory batch the backend refuses is taken onto disk and retried rather
+  than dropped, so a sample is durable from the first failure and not only
+  once the queue happens to fill.
+* A shard is either memory-only or disk-only. No request ever mixes the
+  two, and there is no mixed state to reason about.
+
+The cost is one bulk transfer at the transition, bounded by
+`queue.capacity / writer.shards`.
+
+== Configuration
+
+[cols="2,1,4",options="header"]
+|===
+| Key                          | Default | Purpose
+
+| `overflow.dir`               | `""` | Empty resolves to `${karaf.data}/prometheus-remote-writer/overflow`. One subdirectory per shard. Set explicitly to redirect to a mounted volume or faster disk.
+| `overflow.max-size-bytes`    | `4294967296` (4 GiB) | Total budget across every shard's bucket, split evenly at startup. `0` disables the tier entirely.
+| `overflow.full`              | `refuse` | `refuse` = the append is refused, counted, and `store()` throws; `drop-oldest` = evict the oldest whole segment and accept.
+| `overflow.fsync`             | `batch` | `always` = fsync every append (tightest RPO); `batch` = fsync at each `flush.interval-ms` boundary (loses at most that window on `kill -9`); `none` = OS page cache only.
+|===
+
+Segment size is derived, not configured: each bucket holds eight segments,
+so `drop-oldest` evicts an eighth of a shard's budget rather than the lot,
+and the segment count per shard does not grow with `writer.shards`.
+
+== Sizing
+
+----
+outage_window = overflow.max-size-bytes / (samples_per_second × bytes_per_sample)
+----
+
+Budget about 60 bytes a sample on disk — the wire format is snappy-compressed,
+the bucket is not. At 64,000 samples/sec that is ~3.8 MB/s, so the default
+4 GiB buys on the order of 15 to 20 minutes.
+
+The budget is split evenly across shards, so hash skew applies to disk just
+as it does to memory: one hot shard exhausts its slice while its siblings
+idle. Watch `overflow_pending_samples_shard_<i>`, not only the total.
+
+== How it works, briefly
+
+[.text-center]
+....
+  store(samples)
+      │
+      ▼
+  LabelMapper.map()
+      │
+      ▼
+  Shards.accept()  ──▶  memory queue  ─┐
+      │ (spilling)                     │  bucket empty
+      ▼                                ▼
+  bucket.append(MappedSample)   ──▶  builder ──▶ sender ──▶ HTTP POST
+      ◀── durable on disk                                      │
+                                                     2xx ──────┤
+  disk batch:  checkpoint.advance(offset), segments released   │
+  4xx:         advance too — the backend will never take them  │
+  5xx / transport: leave the checkpoint, re-read next cycle ◀──┘
+
+  memory batch: 2xx counts written; 5xx exhausted or transport hands the
+  batch to the bucket and retries it from there. Only with no disk tier
+  configured is there nowhere to put it back, and only then is it dropped.
+....
+
+Segment files are named by start offset
+(`00000000000000000000.seg`, ...), each with a companion `.idx` summary.
+`checkpoint.json` in the shard's directory tracks the last offset confirmed
+shipped, written atomically (tmp + fsync + rename) on every advance.
+
+== Recovery on startup
+
+Each shard scans its own subdirectory and replays anything past its
+`checkpoint.json`. A shard whose bucket recovers non-empty starts out
+spilling, so recovered samples ship before anything offered after the
+restart. Recovery tolerates *torn tails* — an incomplete frame at the end of
+the newest segment, typical of a process killed mid-append — by logging a
+WARN, truncating to the last good frame, and resuming.
+
+An enqueue timestamp rides in each frame, so a replayed sample's
+`sample_latency_ms_total` contribution counts from its original `store()`
+call rather than from the replay.
+
+If recovery fails (unwritable path, corrupt `checkpoint.json`, unreadable
+segment), the plugin refuses to start with an error naming the file and the
+reason. Reset by removing the directory while the plugin is stopped:
+
+[source,bash]
+----
+# while the plugin is stopped
+rm -rf ${overflow.dir}
+----
+
+The plugin recreates it on next start.
+
+== Wire-version interaction
+
+The tier stores `MappedSample` (pre-wire). Flipping `wire.protocol-version`
+while a bucket holds pending samples is safe — the next flush emits in the
+new version, with no migration step. See <<wire-protocols>>.
+
+== Operational guidance
+
+[cols="1,4",options="header"]
+|===
+| Choice            | When
+
+| `overflow.fsync=always`
+| You can justify the ~10× throughput hit for tighter-than-1s RPO. Rare.
+
+| `overflow.fsync=batch` (default)
+| The right choice for almost everyone. Loses at most one
+  `flush.interval-ms` window on `kill -9` / power loss.
+
+| `overflow.fsync=none`
+| Ephemeral deployments that accept losing in-flight data on kernel panic
+  or power loss.
+
+| `overflow.full=refuse` (default)
+| Alerting-driven pipelines that want an operator to see the failure when
+  the backend has been unreachable longer than the budget allows. Silent
+  loss should be a deliberate choice.
+
+| `overflow.full=drop-oldest`
+| Dashboards showing "the last N hours" — recency over history; tolerates
+  silent eviction of the oldest samples better than a `store()` exception.
+
+| `overflow.max-size-bytes=0`
+| A local backend on the same box that is effectively always up, or a test
+  environment where disk I/O for samples that will certainly deliver is
+  pure overhead.
+|===
+
+[WARNING]
+.Containerised Karaf
+====
+If `${karaf.data}` is ephemeral (a container with no mounted volume), the
+default `overflow.dir` evaporates across restart and the tier is worse than
+useless. Set `overflow.dir` explicitly to a mounted volume.
+====
+
+== Self-metrics
+
+The tier adds these (visible via `opennms:prometheus-writer-stats`):
+
+* `samples_spilled_total`
+* `samples_drained_from_overflow_total`
+* `samples_dropped_overflow_full_total`
+* `samples_evicted_overflow_total`
+* `overflow_pending_samples`, and `overflow_pending_samples_shard_<i>` per shard
+* `overflow_bytes`
+* `wal_replay_samples_total`, `wal_batches_dropped_4xx_total`
+
+The general write counters (`samples_written_total`,
+`samples_dropped_4xx_total`, `samples_dropped_5xx_total`,
+`samples_dropped_transport_total`) are unchanged and continue to apply.

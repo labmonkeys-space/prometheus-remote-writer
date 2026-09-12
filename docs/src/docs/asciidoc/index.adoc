@@ -25,7 +25,7 @@ include::sections/_configuration.adoc[leveloffset=+1]
 
 include::sections/_wire-protocols.adoc[leveloffset=+1]
 
-include::sections/_wal.adoc[leveloffset=+1]
+include::sections/_overflow.adoc[leveloffset=+1]
 
 include::sections/_label-mapping.adoc[leveloffset=+1]
 

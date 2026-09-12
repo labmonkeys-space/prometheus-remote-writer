@@ -117,11 +117,11 @@ class ShardsTest {
             if (Shards.shardFor(labels, 2) == 0) shard0 = shard0 == null ? labels : shard0;
             else                                 shard1 = shard1 == null ? labels : shard1;
         }
-        assertThat(shards.tryEnqueue(new MappedSample(shard0, 1, 1.0))).isTrue();
-        assertThat(shards.tryEnqueue(new MappedSample(shard0, 2, 1.0))).isFalse();
+        assertThat(accepted(shards, new MappedSample(shard0, 1, 1.0))).isTrue();
+        assertThat(accepted(shards, new MappedSample(shard0, 2, 1.0))).isFalse();
         assertThat(shards.remainingCapacity(0)).isZero();
         assertThat(shards.remainingCapacity(1)).isEqualTo(1);
-        assertThat(shards.tryEnqueue(new MappedSample(shard1, 1, 1.0))).isTrue();
+        assertThat(accepted(shards, new MappedSample(shard1, 1, 1.0))).isTrue();
         assertThat(shards.totalDepth()).isEqualTo(2);
     }
 
@@ -141,11 +141,11 @@ class ShardsTest {
         assertThat(shard1).isNotNull();
 
         // Fill shard0 to its capacity (2 of the 4 total slots).
-        shards.tryEnqueue(new MappedSample(shard0, 1, 1.0));
-        shards.tryEnqueue(new MappedSample(shard0, 2, 1.0));
-        assertThat(shards.tryEnqueue(new MappedSample(shard0, 3, 1.0))).isFalse();
+        shards.accept(new MappedSample(shard0, 1, 1.0));
+        shards.accept(new MappedSample(shard0, 2, 1.0));
+        assertThat(accepted(shards, new MappedSample(shard0, 3, 1.0))).isFalse();
         // Sibling shard still accepts.
-        shards.tryEnqueue(new MappedSample(shard1, 1, 1.0));
+        shards.accept(new MappedSample(shard1, 1, 1.0));
         assertThat(shards.totalDepth()).isEqualTo(3);
     }
 
@@ -157,7 +157,7 @@ class ShardsTest {
         // Enqueue several samples of ONE series — all land on one shard.
         Map<String, String> series = Map.of("__name__", "m", "node", "n1");
         for (int t = 1; t <= 8; t++) {
-            shards.tryEnqueue(new MappedSample(series, t, 1.0));
+            shards.accept(new MappedSample(series, t, 1.0));
         }
         // max=8, mean=2 → 400%.
         assertThat(shards.skewPct()).isEqualTo(400);
@@ -196,8 +196,8 @@ class ShardsTest {
             if (Shards.shardFor(labels, 2) == 0) s0 = s0 == null ? labels : s0;
             else                                 s1 = s1 == null ? labels : s1;
         }
-        shards.tryEnqueue(new MappedSample(s0, 1, 1.0));
-        shards.tryEnqueue(new MappedSample(s1, 1, 1.0));
+        shards.accept(new MappedSample(s0, 1, 1.0));
+        shards.accept(new MappedSample(s1, 1, 1.0));
         shards.start();
 
         try {
@@ -224,7 +224,7 @@ class ShardsTest {
         shards = new Shards(2, 100, http, 10, 10_000, 0L, metrics,
                 org.opennms.plugins.prometheus.remotewriter.wire.RemoteWriteRequestBuilders.forVersion(1));
         for (int i = 0; i < 10; i++) {
-            shards.tryEnqueue(new MappedSample(Map.of("__name__", "m", "node", "n" + i), i, 1.0));
+            shards.accept(new MappedSample(Map.of("__name__", "m", "node", "n" + i), i, 1.0));
         }
         shards.start();
         shards.stop(5_000);
@@ -235,5 +235,10 @@ class ShardsTest {
 
     private static org.opennms.plugins.prometheus.remotewriter.wire.RemoteWriteRequestBuilder.BuildResult failBuild() {
         throw new AssertionError("builder must not be invoked in this test");
+    }
+
+    /** Bridges the pre-0.8.0 boolean contract onto the tier-aware accept. */
+    private static boolean accepted(Shards shards, MappedSample sample) {
+        return shards.accept(sample) != Shards.Acceptance.REFUSED;
     }
 }

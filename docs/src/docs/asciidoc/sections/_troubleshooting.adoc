@@ -25,8 +25,8 @@ Karaf shell shows the bundle as `Failure` or unresolved.
 | `<key> contains a CR or LF character`                              | An *interior* newline in `auth.authorization.*`, `auth.bearer.token` or `tenant.org-id`. A trailing newline (e.g. from a `$[secret:name]` file) is stripped before validation and is fine — this fires only on one in the middle of the value.
 | `<key> contains a non-printable or non-ASCII byte`                 | Base64-encode a binary credential at the source. Values are never echoed in these messages. `auth.basic.*` is exempt: it is base64-encoded by the plugin, so UTF-8 is legal there.
 | `instance.id contains a control character` / `… exceeds 2048 bytes`| Validation rejects unprintable / oversized values.
-| `WAL path is not writable: …`                                      | The Karaf user can't write to `wal.path`. Check ownership / SELinux / mount options.
-| `Corrupt checkpoint.json: …`                                       | Recover by stopping the plugin and removing the WAL directory.
+| `… is not writable: …`                                             | The Karaf user can't write to `overflow.dir`. Check ownership / SELinux / mount options.
+| `Corrupt checkpoint.json: …`                                       | Recover by stopping the plugin and removing `overflow.dir`.
 |===
 
 . *Check OSGi feature resolution* — `feature:list -i | grep prometheus`
@@ -104,7 +104,7 @@ also present at the front of the credentials value.
 
 The plugin retries 5xx responses with exponential backoff up to
 `retry.max-attempts` (default 5), then drops. The same batch is
-re-enqueued only when `wal.enabled=true` — without the WAL, exhausted
+re-enqueued only when a disk tier is configured — without one, exhausted
 5xx batches are gone.
 
 * *Endpoint overloaded* — Mimir ingester hot-spots, Prometheus TSDB
@@ -113,9 +113,9 @@ re-enqueued only when `wal.enabled=true` — without the WAL, exhausted
   rise alongside 5xx if upstream is the bottleneck. Confirm with
   `iftop` / `nethogs` on the OpenNMS host.
 
-If the outage is short enough to fit in `wal.max-size-bytes`, enabling
-the WAL turns 5xx outages into delivery delays instead of drops. See
-<<wal>>.
+If the outage is short enough to fit in `overflow.max-size-bytes`, the
+disk tier turns 5xx outages into delivery delays instead of drops. See
+<<overflow>>.
 
 == Series cardinality exploded
 
@@ -170,15 +170,15 @@ A rising counter is a signal that:
 Either way, file an issue with example `resourceId` strings — the parser
 is the project's responsibility, not the operator's.
 
-== WAL directory is missing across restart
+== Overflow directory is missing across restart
 
-Symptom: `wal.enabled=true`, but every restart starts from an empty WAL
+Symptom: a disk tier is configured, but every restart starts from an empty tier
 and you've lost the durability guarantee.
 
 Cause: containerised Karaf with no mounted volume. `${karaf.data}` is
-ephemeral — the default `wal.path` evaporates on container restart.
+ephemeral — the default `overflow.dir` evaporates on container restart.
 
-Fix: set `wal.path` explicitly to a path that's mounted from a
+Fix: set `overflow.dir` explicitly to a path that's mounted from a
 persistent volume.
 
 == Plugin starts but no samples reach the backend

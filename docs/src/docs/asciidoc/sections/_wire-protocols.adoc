@@ -78,11 +78,11 @@ startup WARN naming the supported backend versions when
 ====
 
 [NOTE]
-.WAL is wire-version-agnostic
+.The overflow tier is wire-version-agnostic
 ====
-The on-disk WAL stores `MappedSample` (pre-wire), so flipping
-`wire.protocol-version` while the WAL holds pending samples is safe — the
-next flush emits according to the new version, no WAL migration needed.
+The disk tier stores `MappedSample` (pre-wire), so flipping
+`wire.protocol-version` while a bucket holds pending samples is safe — the
+next flush emits according to the new version, no migration needed.
 ====
 
 [NOTE]

@@ -17,19 +17,22 @@ and prints them through the Karaf shell command
 | `samples_dropped_4xx_total`                | Samples in batches the endpoint rejected with 4xx.
 | `samples_dropped_5xx_total`                | Samples in batches that exhausted the 5xx retry budget.
 | `samples_dropped_transport_total`          | IOException / socket failures (distinct from 5xx so you can alert separately).
-| `samples_dropped_queue_full_total`         | Samples refused because the in-memory queue (`wal.enabled=false`) was full. Counted in samples per refused `store()` attempt: under `queue.store-policy = partial` each refused sample, under `all-or-nothing` every mapped sample of a refused call. With Horizon's default ring-buffer writer, which does not retry, this is the number of samples lost. The offheap writer retries the whole call, so its retries are counted again. Earlier releases counted one per failed call.
-| `samples_dropped_wal_full_total`           | Samples rejected (or evicted under `drop-oldest`) because the WAL hit `wal.max-size-bytes`.
+| `samples_dropped_queue_full_total`         | Samples refused because the in-memory queue was full and no disk tier was configured to take them. Only ever non-zero with `overflow.max-size-bytes = 0`: with a disk tier a full queue spills instead of refusing, and refusals appear in `samples_dropped_overflow_full_total`. Counted in samples per refused `store()` attempt: under `queue.store-policy = partial` each refused sample, under `all-or-nothing` every mapped sample of a refused call. With Horizon's default ring-buffer writer, which does not retry, this is the number of samples lost. The offheap writer retries the whole call, so its retries are counted again. Earlier releases counted one per failed call.
+| `samples_spilled_total`                    | Samples written to a shard's disk bucket because its memory queue had no room. Includes the whole memory backlog moved at the transition into spilling, so the first spill of a burst adds up to `queue.capacity / writer.shards` at once, not 1.
+| `samples_drained_from_overflow_total`      | Samples read back off a bucket and accepted by the backend. Over a quiet period `rate(samples_spilled_total) - rate(samples_drained_from_overflow_total)` is how fast the tier is filling or draining.
+| `samples_dropped_overflow_full_total`      | Samples refused because a shard's memory queue and its bucket were both full, under `overflow.full = refuse`. These are lost, and `store()` threw for the call carrying them.
+| `samples_evicted_overflow_total`           | Samples discarded by evicting a bucket's oldest segment under `overflow.full = drop-oldest`. The newest data is kept at the cost of the oldest; the segment is the eviction unit, so this moves in steps rather than one at a time.
 | `samples_dropped_nonfinite_total`          | Samples whose value was `NaN`, `+Inf`, or `-Inf`.
 | `samples_dropped_duplicate_total`          | Same-timestamp same-series dedup (last-write-wins).
 | `samples_unparseable_resource_id_total`    | Samples whose `resourceId` matched none of the parser grammars (rising rate ⇒ open an issue).
 | `samples_synthesized_mtype_total`          | Reads where the Prometheus response lacked an `mtype` label and the plugin synthesized `mtype="gauge"` to keep graphs renderable. Ticks once per Metric reconstruction — per matched series in `findMetrics`, once per fetch in `getTimeSeriesData`. See <<mtype-roundtrip>>. Should drop to flat once Prometheus retention has aged out pre-fix data, or rise indefinitely if `labels.exclude = mtype` is configured.
 | `store_calls_total`                        | Calls to `store()`. With `store_calls_failed_total` this is the caller-side failure rate that #154 had to borrow from OpenNMS's own timers.
 | `store_calls_failed_total`                 | `store()` calls that threw. Under `queue.store-policy = partial` a call that was partially accepted still counts as failed.
-| `store_samples_offered_total`              | Samples handed to `store()` before label mapping. Over a window, `offered = written + Σ dropped_* + queue_depth (+ WAL pending)`; the identity does not hold across a restart, since WAL replay writes in the new process what was offered in the old.
+| `store_samples_offered_total`              | Samples handed to `store()` before label mapping. Over a window, `offered = written + samples_dropped_unmapped_total + Σ dropped_* + queue_depth + overflow_pending_samples`. It is exact between scrapes rather than at every instant: depth and pending are read per shard without a global lock, so a scrape taken mid-spill can miss a sample in flight between the two. It also does not hold across a restart, since a recovered bucket writes in the new process what was offered in the old.
 | `samples_dropped_shutdown_total`           | Samples that had left the queue (built, or in the builder's hand) when a forced shutdown interrupted the flusher before they could be sent. Non-zero only when `shutdown.grace-period-ms` expired.
-| `samples_dropped_unmapped_total`           | Samples the label mapper could not map because the metric had no name. Never offered to a queue or the WAL. Only a non-OpenNMS caller of the TimeSeriesStorage API produces these.
+| `samples_dropped_unmapped_total`           | Samples the label mapper could not map because the metric had no name. Never offered to a queue or a bucket. Only a non-OpenNMS caller of the TimeSeriesStorage API produces these.
 | `http_write_duration_ms_total`             | Wall milliseconds spent inside remote-write HTTP calls, retries and backoff included. Mean round-trip: `rate(http_write_duration_ms_total) / rate(http_writes_successful_total + http_writes_failed_total)`. Sender utilisation per shard: `rate(http_write_duration_ms_total) / (1000 × writer.shards)`; the builder's share is `flusher_build_ms_total`. Samples per write: `rate(samples_written_total) / rate(http_writes_successful_total)`.
-| `sample_latency_ms_total`                  | Sum over written samples of the time from `store()` to backend acknowledgement, in milliseconds. Mean end-to-end latency: `rate(sample_latency_ms_total) / rate(samples_written_total)`. This is the number a latency budget is stated in; it includes queue wait, linger, build, the round-trip, and for WAL samples the time on disk, counted from the original `store()` even across a restart.
+| `sample_latency_ms_total`                  | Sum over written samples of the time from `store()` to backend acknowledgement, in milliseconds. Mean end-to-end latency: `rate(sample_latency_ms_total) / rate(samples_written_total)`. This is the number a latency budget is stated in; it includes queue wait, linger, build, the round-trip, and for spilled samples the time on disk, counted from the original `store()` even across a restart.
 | `store_call_duration_ms_total`             | Wall milliseconds OpenNMS's writer threads spent inside `store()`. Mean call time: `rate(store_call_duration_ms_total) / rate(store_calls_total)`. A rising mean is the first sign the plugin is holding the persister, which shows on the OpenNMS side as ring-buffer drops.
 | `flusher_build_ms_total`                   | Milliseconds queue-mode flushers spent building requests (grouping, protobuf, snappy). Build and HTTP now overlap per shard, so per-shard builder utilisation is `rate(flusher_build_ms_total) / (1000 × writer.shards)` and sender utilisation is `rate(http_write_duration_ms_total) / (1000 × writer.shards)`; headroom is whichever is lower.
 | `http_writes_4xx_total`, `http_writes_5xx_total`, `http_writes_transport_total` | Failed writes by cause, as request counts. Error rate: their sum over `http_writes_successful_total + http_writes_failed_total`. The `samples_dropped_*` counters carry the same failures in samples.
@@ -45,9 +48,10 @@ and prints them through the Karaf shell command
 | Gauge                              | What it shows
 
 | `queue_depth_high_water`                   | Maximum `queue_depth` observed since activation. Shows a queue that fills and empties between two reads of `queue_depth`.
-| `queue_depth`                      | Current in-memory queue occupancy (when `wal.enabled=false`).
-| `wal_segments`                     | WAL segment count on disk (when `wal.enabled=true`).
-| `wal_disk_bytes`                   | Total WAL footprint on disk.
+| `queue_depth`                      | Current in-memory queue occupancy, summed over shards. Reads 0 for any shard that is spilling, since a shard's memory queue is empty while its bucket is non-empty.
+| `overflow_pending_samples`         | Samples on disk past the checkpoint, summed over shards — the backlog a backend outage has built up. Divided by the drain rate, this is how long recovery will take.
+| `overflow_pending_samples_shard_<i>` | The same per shard. Registered for every shard when a disk tier is configured, because hash skew fills one bucket while its siblings idle, and the total hides that.
+| `overflow_bytes`                   | Bytes every shard's bucket occupies on disk. Against `overflow.max-size-bytes` this is how much outage headroom is left.
 | `http_in_flight`                   | Running + queued HTTP requests at the dispatcher.
 |===
 
@@ -72,7 +76,7 @@ and prints them through the Karaf shell command
 
 | `delete_noop_total`                | `delete(Metric)` calls (Remote Write has no delete semantic).
 | `metadata_denylist_blocked_total`  | Metadata keys blocked by the built-in credential denylist.
-| `wal_replay_samples_total`         | Samples replayed from the WAL on startup recovery.
+| `wal_replay_samples_total`         | Samples recovered from the disk tier at startup, summed over shards. They ship before anything offered after the restart. Approximate by a few samples either way — it sums the per-segment index counts, which over-count a segment spanning the checkpoint and under-count one whose index lagged its last append. Read it as "recovery found work", not as an accounting input; it is deliberately not a term in the reconciliation identity.
 |===
 
 == Recommended alerts
@@ -84,7 +88,8 @@ These are starting points — tune to your deployment's noise floor.
 | Alert idea                                              | Sketch
 
 | Drop rate jumps                                         | `rate(samples_dropped_5xx_total[5m]) + rate(samples_dropped_transport_total[5m]) > 0` for 10m
-| WAL filling up                                          | `wal_disk_bytes / on() (wal_max_size_bytes_constant) > 0.8` for 15m
+| Disk tier filling up                                    | `overflow_bytes / on() (overflow_max_size_bytes_constant) > 0.8` for 15m
+| Spilling at all                                         | `rate(samples_spilled_total[5m]) > 0` for 15m — the backend has not kept up for a quarter of an hour
 | Queue full (no-WAL deployments)                         | `rate(samples_dropped_queue_full_total[5m]) > 0`
 | `job="opennms"` cardinality exploded                    | `rate(samples_unparseable_resource_id_total[1h]) > 0` — parser regression or new resourceId shape
 | Endpoint persistently unhappy                           | `rate(http_writes_failed_total[5m]) / rate(http_writes_successful_total[5m]) > 0.1`
@@ -109,7 +114,7 @@ slow batch visibly stalls the drain.
 * The backend sees up to N concurrent streams; mind per-tenant ingest
   limits (Mimir, VictoriaMetrics cluster). N is capped at
   `http.max-connections`.
-* Queue mode only — `wal.enabled = true` requires `writer.shards = 1`
+* Each shard owns its own overflow bucket, so sharding and durability combine — the pre-0.8.0 rule that a WAL forced `writer.shards = 1` is gone
   (the WAL is a single ordered log).
 * Each shard runs two threads, `prometheus-remote-writer-flusher-<i>`
   (builder: drains the queue, builds the payload) and
@@ -162,6 +167,49 @@ Set in `etc/org.ops4j.pax.logging.cfg` or via the Karaf shell
             use sparingly.
 |===
 
+== The disk overflow tier
+
+Each shard has a memory queue and, behind it, a durable bucket on disk. In
+normal running only the queue is used. When the queue fills, the shard's
+whole backlog moves into its bucket and every further sample for that shard
+goes to disk until the bucket has drained — so a full queue spills rather
+than refusing, and nothing is lost while the bucket has room.
+
+The backlog moves rather than staying put because a queue fills from the
+front: at the moment of the spill, memory holds the *older* samples. Sending
+the newly-spilled one first would deliver a series out of order. Moving the
+backlog also keeps the memory queue empty for the whole spilling period,
+which is why every batch sent during an outage is a disk batch — and a disk
+batch that the backend refuses is retried, never dropped.
+
+Set `overflow.max-size-bytes = 0` to switch the tier off. A full queue then
+refuses with a `StorageException`, which is how the plugin behaved before
+0.8.0.
+
+=== Sizing the tier
+
+The budget is a stated outage tolerance. Divide it by the offered byte rate:
+
+----
+outage_window = overflow.max-size-bytes / (samples_per_second × bytes_per_sample)
+----
+
+A sample costs roughly 30–80 bytes on disk pre-snappy — the wire format is
+compressed, the bucket is not — so budget about 60 bytes. At 64,000
+samples/sec that is ~3.8 MB/s, and the default 4 GiB buys on the order of 15
+to 20 minutes. Halving the offered rate doubles the window.
+
+The budget is split evenly across `writer.shards` at startup, so hash skew
+across shards applies to disk exactly as it does to memory: one hot shard
+exhausts its slice while its siblings idle. Watch
+`overflow_pending_samples_shard_<i>`, not just the total.
+
+`overflow.full` decides what happens when a bucket does run out. `refuse`
+(the default) pushes the decision back to OpenNMS and counts the loss in
+`samples_dropped_overflow_full_total`. `drop-oldest` evicts the oldest whole
+segment and keeps accepting, counting what it discarded in
+`samples_evicted_overflow_total` — newest-data-wins, chosen deliberately.
+
 == Capacity sizing
 
 These are rough rules-of-thumb, not hard requirements. Measure your
@@ -169,17 +217,12 @@ deployment.
 
 [cols="3,3,3",options="header"]
 |===
-| Sample rate           | `queue.capacity` / WAL size              | Notes
+| Sample rate           | Settings                                  | Notes
 
-| < 5k samples/sec      | defaults                                  | `queue.capacity = 10000`, `wal.max-size-bytes = 512 MB` is plenty.
-| 5k–25k samples/sec    | `queue.capacity = 50000`, `batch.size = 2000`, `http.max-connections = 32` | Backpressure if your network RTT is high.
-| 25k+ samples/sec      | enable WAL with `wal.max-size-bytes = 4 GB`+ | Single-process Karaf is the bottleneck before the wire; consider sharding by source.
+| < 5k samples/sec      | defaults                                  | `queue.capacity = 10000` and the default 4 GiB tier are plenty.
+| 5k–25k samples/sec    | `queue.capacity = 50000`, `batch.size = 2000`, `http.max-connections = 32` | Raise `overflow.max-size-bytes` if you want the same outage window at the higher rate.
+| 25k+ samples/sec      | `writer.shards = 4`, `queue.capacity = 40000`, `batch.size = 1000`, `batch.linger-ms = 100` | Single-process Karaf is the bottleneck before the wire. Size the tier from the outage window you actually want, not from a round number.
 |===
-
-WAL footprint scales with outage tolerance: at 10k samples/sec each
-sample averages roughly 30–80 bytes pre-snappy (the wire format is
-compressed; the WAL is not). Plan for ~30 MB/s of disk in-flight if you
-want to survive a 10-minute outage.
 
 == Karaf shell commands
 

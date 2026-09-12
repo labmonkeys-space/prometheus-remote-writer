@@ -76,12 +76,10 @@
             <!-- Wire format -->
             <cm:property name="wire.protocol-version"  value="1"/>
             <!-- Write-Ahead Log -->
-            <cm:property name="wal.enabled"            value="false"/>
-            <cm:property name="wal.path"               value=""/>
-            <cm:property name="wal.max-size-bytes"     value="536870912"/>
-            <cm:property name="wal.segment-size-bytes" value="67108864"/>
-            <cm:property name="wal.fsync"              value="batch"/>
-            <cm:property name="wal.overflow"           value="backpressure"/>
+            <cm:property name="overflow.dir"            value=""/>
+            <cm:property name="overflow.max-size-bytes" value="4294967296"/>
+            <cm:property name="overflow.full"           value="refuse"/>
+            <cm:property name="overflow.fsync"          value="batch"/>
         </cm:default-properties>
     </cm:property-placeholder>
 
@@ -136,12 +134,10 @@
         <property name="metadataLabelPrefix"     value="${metadata.label-prefix}"/>
         <property name="metadataCase"            value="${metadata.case}"/>
         <property name="wireProtocolVersion"     value="${wire.protocol-version}"/>
-        <property name="walEnabled"              value="${wal.enabled}"/>
-        <property name="walPath"                 value="${wal.path}"/>
-        <property name="walMaxSizeBytes"         value="${wal.max-size-bytes}"/>
-        <property name="walSegmentSizeBytes"     value="${wal.segment-size-bytes}"/>
-        <property name="walFsync"                value="${wal.fsync}"/>
-        <property name="walOverflow"             value="${wal.overflow}"/>
+        <property name="overflowDir"             value="${overflow.dir}"/>
+        <property name="overflowMaxSizeBytes"    value="${overflow.max-size-bytes}"/>
+        <property name="overflowFull"            value="${overflow.full}"/>
+        <property name="overflowFsync"           value="${overflow.fsync}"/>
     </bean>
 
     <!--

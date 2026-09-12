@@ -234,25 +234,27 @@ the file directly when you are using either placeholder form.
 | `wire.protocol-version`      | `1`     | `1` = `prometheus.WriteRequest` (v1); `2` = `io.prometheus.write.v2.Request` with string interning. See <<wire-protocols>>.
 |===
 
-== Write pipeline (in-memory)
+== Write pipeline
 
-Used when `wal.enabled=false` (the default). When the WAL is enabled,
-`queue.capacity` is ignored.
+The memory tier. Each shard's queue is `queue.capacity / writer.shards`;
+when one fills, that shard spills to its disk bucket rather than refusing —
+see <<overflow>>. With `overflow.max-size-bytes = 0` there is no disk tier
+and a full queue refuses, which is how the plugin behaved before 0.8.0.
 
 [cols="2,1,4",options="header"]
 |===
 | Key                          | Default | Purpose
 
-| `queue.capacity`             | `10000` | Bounded in-memory queue. Overflow throws `StorageException` — OpenNMS sees the failure.
+| `queue.capacity`             | `10000` | Bounded in-memory queue, split evenly across `writer.shards`. A full shard spills to its disk bucket; it throws `StorageException` only when the bucket is full too, or when the tier is disabled.
 | `queue.store-policy`         | `auto`  | What `store()` does when a shard's queue is full. `partial`: attempt every sample, count the refused ones, throw once; a full shard never blocks samples bound for other shards. Right for a caller that drops the call on exception (Horizon's default ring-buffer writer). `all-or-nothing`: enqueue nothing and throw if any shard lacks room for its share of the call. Right for a caller that retries the whole call until accepted (Horizon's offheap writer); each shard must have room for the samples of one `store()` call that hash to it. `auto`: reads `org.opennms.timeseries.config.buffer_type` from the JVM, `OFFHEAP` selects `all-or-nothing`, anything else `partial`. Sentinel keeps that setting in ConfigAdmin, so `auto` means `partial` there; set the value explicitly. The resolved policy is logged at activation.
 | `batch.size`                 | `1000`  | Maximum samples per Remote Write POST.
 | `flush.interval-ms`          | `1000`  | How long a flusher waits for a first sample when its queue is empty. It does not delay a send once samples are present; see `batch.linger-ms`.
-| `batch.linger-ms`            | `0`     | After a first sample arrives, how long a flusher waits for the batch to reach `batch.size` before sending, draining at every arrival and sending early when full. `0` sends on first arrival. Adds at most this much latency. Set 50–200 ms on sharded deployments whose queue is usually empty: at four shards on an 11,000-device fleet, `0` produced 3,300 requests/s of 19 samples each. Queue mode only; ignored with `wal.enabled=true`.
+| `batch.linger-ms`            | `0`     | After a first sample arrives, how long a flusher waits for the batch to reach `batch.size` before sending, draining at every arrival and sending early when full. `0` sends on first arrival. Adds at most this much latency. Set 50–200 ms on sharded deployments whose queue is usually empty: at four shards on an 11,000-device fleet, `0` produced 3,300 requests/s of 19 samples each. Applies to the memory tier; a shard draining its bucket sends what the reader returns and does not linger.
 | `retry.max-attempts`         | `5`     | 5xx retry budget per batch.
 | `retry.initial-backoff-ms`   | `250`   | First backoff after a 5xx.
 | `retry.max-backoff-ms`       | `10000` | Backoff ceiling.
-| `shutdown.grace-period-ms`   | `10000` | Bounds the graceful-shutdown wait. With WAL enabled, bounds the in-flight HTTP wait, not a drain window.
-| `writer.shards`              | `1`     | Write-pipeline parallelism. N>1 splits the queue-mode pipeline into N shards (disjoint series by label-set hash, one flusher and ≤1 in-flight request each) — per-series order preserved, shards flush in parallel. Rejected with `wal.enabled=true`; capped at `http.max-connections`; requires `queue.capacity / N ≥ batch.size`. The backend sees up to N concurrent streams.
+| `shutdown.grace-period-ms`   | `10000` | Bounds the graceful-shutdown drain. Samples already on disk are durable and ship on the next start, so the window only bounds what is still in memory or in flight.
+| `writer.shards`              | `1`     | Write-pipeline parallelism. N>1 splits the queue-mode pipeline into N shards (disjoint series by label-set hash, one flusher and ≤1 in-flight request each) — per-series order preserved, shards flush in parallel. Each shard owns its own disk bucket, so sharding and durability combine. Capped at `http.max-connections`; requires `queue.capacity / N ≥ batch.size`. The backend sees up to N concurrent streams.
 |===
 
 == HTTP client
@@ -507,21 +509,39 @@ denylist (`*password*`, `*secret*`, `*token*`, `*key*`, `snmp-community`)
 is always applied — even when `metadata.include` would match a denied key.
 Leave metadata disabled unless you have an explicit use case.
 
-== Write-Ahead Log (durable buffering)
+== Disk overflow tier (durable buffering)
 
-Opt-in via `wal.enabled=true`. See <<wal>> for the full operator model.
+On by default. See <<overflow>> for the full operator model.
 
 [cols="2,1,4",options="header"]
 |===
 | Key                          | Default | Purpose
 
-| `wal.enabled`                | `false` | Opt-in.
-| `wal.path`                   | _(empty → `${karaf.data}/prometheus-remote-writer/wal`)_ | Set explicitly to redirect to a mounted volume.
-| `wal.max-size-bytes`         | `536870912` (512 MB) | Total disk-footprint cap.
-| `wal.segment-size-bytes`     | `67108864` (64 MB) | Per-segment rotation threshold.
-| `wal.fsync`                  | `batch` | `always` / `batch` / `never`. See the wal section.
-| `wal.overflow`               | `backpressure` | `backpressure` / `drop-oldest`.
+| `overflow.dir`               | _(empty → `${karaf.data}/prometheus-remote-writer/overflow`)_ | One subdirectory per shard. Set explicitly to redirect to a mounted volume.
+| `overflow.max-size-bytes`    | `4294967296` (4 GiB) | Total budget across every shard's bucket, split evenly. `0` disables the tier.
+| `overflow.full`              | `refuse` | `refuse` / `drop-oldest`.
+| `overflow.fsync`             | `batch` | `always` / `batch` / `none`.
 |===
+
+Upgrading from 0.7.x, the `wal.*` keys are gone with no aliases:
+
+[cols="2,3",options="header"]
+|===
+| 0.7.x                      | 0.8.0
+
+| `wal.enabled = true`       | a non-zero `overflow.max-size-bytes` (the default)
+| `wal.enabled = false`      | `overflow.max-size-bytes = 0`
+| `wal.path`                 | `overflow.dir`
+| `wal.max-size-bytes`       | `overflow.max-size-bytes`
+| `wal.segment-size-bytes`   | removed — derived as an eighth of a shard's slice
+| `wal.fsync = never`        | `overflow.fsync = none`
+| `wal.overflow = backpressure` | `overflow.full = refuse`
+| `wal.overflow = drop-oldest`  | `overflow.full = drop-oldest`
+|===
+
+Leftover `wal.*` lines in an old `.cfg` are inert, not an error. Drain the
+0.7.x WAL before upgrading: its layout is a single log at the directory
+root, and 0.8.0 reads per-shard subdirectories.
 
 == Worked example — fully configured
 
@@ -542,10 +562,15 @@ tenant.org-id                 = fleet-prod
 # Wire format
 wire.protocol-version         = 2
 
-# Write pipeline (in-memory, used because wal.enabled=false)
+# Write pipeline
 queue.capacity                = 50000
 batch.size                    = 2000
 flush.interval-ms             = 1000
+
+# Disk overflow tier — ~20 minutes of outage at this fleet's rate
+overflow.dir                  = /var/lib/opennms/prometheus-overflow
+overflow.max-size-bytes       = 4294967296
+overflow.full                 = refuse
 
 # HTTP
 http.max-connections          = 32

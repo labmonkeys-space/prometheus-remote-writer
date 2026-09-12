@@ -61,6 +61,19 @@ public final class WalWriter implements Closeable {
      */
     private volatile long readerOffsetFloor;
 
+    /**
+     * Running upper bound on the on-disk footprint, so the cap check on the
+     * append path is arithmetic rather than a directory listing. Every append
+     * adds its frame; eviction subtracts what it freed. Segment GC deletes
+     * files behind this class's back and only ever makes the real footprint
+     * smaller, so the tracked value can drift high but never low — which is
+     * why {@link #append} rescans for the truth before acting on a
+     * cap breach rather than trusting the estimate.
+     *
+     * <p>-1 means "not yet known"; the first check computes it.
+     */
+    private long trackedTotalBytes = -1L;
+
     public WalWriter(Path dir, WalSegment initialActiveSegment, long segmentSizeBytes,
                      long maxSizeBytes, OverflowPolicy overflow,
                      FsyncPolicy fsync, int maxPayload) {
@@ -147,10 +160,10 @@ public final class WalWriter implements Closeable {
 
         long evictedBytes = 0L;
         int evictedFrames = 0;
-        while (currentTotalBytes() + frameSize > maxSizeBytes) {
+        while (projectedTotalBytes(frameSize) > maxSizeBytes) {
             if (overflow == OverflowPolicy.BACKPRESSURE) {
                 throw new WalFullException(
-                    "WAL at cap (" + currentTotalBytes() + "/" + maxSizeBytes
+                    "WAL at cap (" + trackedTotalBytes + "/" + maxSizeBytes
                     + " bytes); refusing append under backpressure policy", 0);
             }
             // DROP_OLDEST: evict the oldest SEALED segment (never the
@@ -167,8 +180,10 @@ public final class WalWriter implements Closeable {
             }
             evictedBytes += evictedStats[0];
             evictedFrames += (int) evictedStats[1];
+            trackedTotalBytes -= evictedStats[0];
         }
 
+        trackedTotalBytes += frameSize;
         long offsetAfter = active.append(payload);
         if (active.endOffset() - active.startOffset() >= segmentSizeBytes) {
             rotate();
@@ -199,10 +214,10 @@ public final class WalWriter implements Closeable {
         }
         long evictedBytes = 0L;
         int evictedFrames = 0;
-        while (currentTotalBytes() + frameSize > maxSizeBytes) {
+        while (projectedTotalBytes(frameSize) > maxSizeBytes) {
             if (overflow == OverflowPolicy.BACKPRESSURE) {
                 throw new WalFullException(
-                    "WAL at cap (" + currentTotalBytes() + "/" + maxSizeBytes
+                    "WAL at cap (" + trackedTotalBytes + "/" + maxSizeBytes
                     + " bytes); refusing append under backpressure policy",
                     evictedFrames);
             }
@@ -214,12 +229,33 @@ public final class WalWriter implements Closeable {
             }
             evictedBytes += stats[0];
             evictedFrames += (int) stats[1];
+            trackedTotalBytes -= stats[0];
         }
+        trackedTotalBytes += frameSize;
         long offsetAfter = active.append(payload);
         if (active.endOffset() - active.startOffset() >= segmentSizeBytes) {
             rotate();
         }
         return new AppendResult(offsetAfter, evictedBytes, evictedFrames);
+    }
+
+    /**
+     * The footprint this append would leave, cheap when there is room and
+     * exact when there is not.
+     *
+     * <p>{@link #trackedTotalBytes} is an upper bound: it counts every frame
+     * this writer appended and every eviction it performed, but segment GC
+     * deletes fully-shipped segments from another code path, so the real
+     * footprint can be smaller. Under the cap, an upper bound is enough and
+     * costs nothing. At or over it, the answer decides whether to refuse or
+     * evict, so the tracked value is re-derived from the directory first —
+     * turning a per-append listing into a listing only at the boundary.
+     */
+    private long projectedTotalBytes(long frameSize) throws IOException {
+        if (trackedTotalBytes < 0) trackedTotalBytes = currentTotalBytes();
+        if (trackedTotalBytes + frameSize <= maxSizeBytes) return trackedTotalBytes + frameSize;
+        trackedTotalBytes = currentTotalBytes();
+        return trackedTotalBytes + frameSize;
     }
 
     /**

@@ -44,6 +44,32 @@ public final class Flusher {
     private static final Logger LOG = LoggerFactory.getLogger(Flusher.class);
 
     private final SampleQueue queue;
+    /** This shard's disk tier, or null when none is configured. */
+    private final OverflowBucket bucket;
+    /** The shard's memory-tier hooks, or null when there is no disk tier and
+     *  so nothing to rescue a failed memory batch into. */
+    private final MemoryTier memoryTier;
+
+    /** How a {@link Flusher} talks to its shard about batches that have left
+     *  the memory queue but not yet reached the backend. */
+    public interface MemoryTier {
+        /** Drain up to {@code maxBatch} and register it, as one step. Null
+         *  when the queue was empty. */
+        Shards.InFlight poll(int maxBatch);
+        /** Grow a registered batch to at most {@code maxBatch}; false once a
+         *  spill has taken it to disk. */
+        boolean topUp(Shards.InFlight token, int maxBatch);
+        /** Whether a spill already wrote this batch to disk. */
+        boolean wasCarried(Shards.InFlight token);
+        /** A batch was drawn from the queue and is on its way out. Returns a
+         *  token identifying it, to be handed back when it settles. */
+        Shards.InFlight inFlight(List<MappedSample> batch);
+        /** The backend finished with this batch, one way or another. */
+        void settled(Shards.InFlight token);
+        /** Take a batch the backend refused onto disk; returns how many
+         *  samples are accounted for there. */
+        int returnToOverflow(Shards.InFlight token, List<MappedSample> batch);
+    }
     private final RemoteWriteHttpClient httpClient;
     private final int batchSize;
     private final long flushIntervalMs;
@@ -53,12 +79,22 @@ public final class Flusher {
     private final String threadName;
 
     private volatile boolean running;
-    private Thread thread;   // builder: drains the queue, builds payloads
+    private Thread thread;   // builder: drains a tier, builds payloads
     private Thread sender;   // sends payloads, one request in flight
 
-    /** A built payload on its way from the builder to the sender; {@code built == null} is the stop sentinel. */
-    private record Prepared(BuildResult built, int sampleCount) {}
-    private static final Prepared STOP = new Prepared(null, 0);
+    /** Which tier a batch came from. The two have different failure
+     *  handling — a memory batch that exhausts its retries is dropped
+     *  because there is nowhere to put it back, a disk batch rewinds and
+     *  re-ships — so a batch is drawn from exactly one of them. */
+    private enum Tier { MEMORY, OVERFLOW }
+
+    /** A built payload on its way from the builder to the sender; {@code built == null} is the stop sentinel.
+     *  {@code newOffset} is the bucket offset past the batch, meaningful for {@link Tier#OVERFLOW} only.
+     *  {@code source} is the batch a memory payload was built from, retained only when a disk tier
+     *  can take it back on failure — it costs one batch of references per shard in flight. */
+    private record Prepared(BuildResult built, int sampleCount, Tier tier, long newOffset,
+                            List<MappedSample> source, Shards.InFlight token) {}
+    private static final Prepared STOP = new Prepared(null, 0, Tier.MEMORY, 0L, null, null);
     /** Depth one: the builder may run at most one payload ahead of the sender,
      *  which is the whole benefit and bounds memory to one extra payload. */
     private final java.util.concurrent.ArrayBlockingQueue<Prepared> handoff = new java.util.concurrent.ArrayBlockingQueue<>(1);
@@ -86,8 +122,17 @@ public final class Flusher {
     public Flusher(SampleQueue queue, RemoteWriteHttpClient httpClient,
                    int batchSize, long flushIntervalMs, PluginMetrics metrics,
                    Function<Collection<MappedSample>, BuildResult> builder) {
-        this(queue, httpClient, batchSize, flushIntervalMs, 0L, metrics, builder,
+        this(queue, null, null, httpClient, batchSize, flushIntervalMs, 0L, metrics, builder,
                 "prometheus-remote-writer-flusher");
+    }
+
+    /** Memory-only shard — no disk tier configured. */
+    public Flusher(SampleQueue queue, RemoteWriteHttpClient httpClient,
+                   int batchSize, long flushIntervalMs, long lingerMs, PluginMetrics metrics,
+                   Function<Collection<MappedSample>, BuildResult> builder,
+                   String threadName) {
+        this(queue, null, null, httpClient, batchSize, flushIntervalMs, lingerMs, metrics, builder,
+                threadName);
     }
 
     /** Full constructor — {@code threadName} keeps per-shard flushers
@@ -95,11 +140,15 @@ public final class Flusher {
     /** Full constructor. {@code lingerMs} is how long to wait for a batch
      *  to fill after a head sample arrived (batch.linger-ms; 0 = send on
      *  first arrival). See {@link SampleQueue#pollBatch(int, long, TimeUnit, long)}. */
-    public Flusher(SampleQueue queue, RemoteWriteHttpClient httpClient,
+    public Flusher(SampleQueue queue, OverflowBucket bucket,
+                   MemoryTier memoryTier,
+                   RemoteWriteHttpClient httpClient,
                    int batchSize, long flushIntervalMs, long lingerMs, PluginMetrics metrics,
                    Function<Collection<MappedSample>, BuildResult> builder,
                    String threadName) {
-        this.queue          = Objects.requireNonNull(queue);
+        this.queue            = Objects.requireNonNull(queue);
+        this.bucket           = bucket;   // null = no disk tier
+        this.memoryTier       = memoryTier;
         this.httpClient     = Objects.requireNonNull(httpClient);
         this.metrics        = Objects.requireNonNull(metrics);
         this.builder        = Objects.requireNonNull(builder);
@@ -219,7 +268,7 @@ public final class Flusher {
                     LOG.info("building {} residual sample(s) during shutdown", tail.size());
                     Prepared p;
                     try {
-                        p = prepare(tail);
+                        p = prepareMemory(tail);
                     } catch (RuntimeException e) {
                         LOG.error("could not build {} residual sample(s) during shutdown; dropping them", tail.size(), e);
                         metrics.samplesDroppedShutdown(tail.size());
@@ -254,17 +303,91 @@ public final class Flusher {
         }
     }
 
-    /** One builder iteration: wait for a batch, book the waits, build it.
-     *  Returns {@code null} when the poll timed out with nothing to send. The
-     *  polled list does not outlive this method, so a builder blocked on the
-     *  handoff holds only the built payload. */
+    /** One builder iteration: take a batch from whichever tier is active,
+     *  book the waits, build it. Returns {@code null} when there was nothing
+     *  to send. The polled list does not outlive this method, so a builder
+     *  blocked on the handoff holds only the built payload.
+     *
+     *  <p>The disk tier goes first: while the bucket holds anything, the
+     *  memory queue is empty by construction (see {@link Shards}), so this is
+     *  a choice between a full tier and an empty one rather than a merge. */
     private Prepared pollAndPrepare() throws InterruptedException {
+        if (bucket != null && !bucket.isEmpty()) {
+            Prepared fromDisk = pollOverflow();
+            if (fromDisk != null) return fromDisk;
+        }
+        if (memoryTier != null) return pollTieredAndPrepare();
         long waitStarted = System.nanoTime();
         SampleQueue.Batch polled = queue.pollBatch(batchSize, flushIntervalMs, TimeUnit.MILLISECONDS, lingerMs);
         metrics.flusherIdleNanos(System.nanoTime() - waitStarted - polled.lingerNanos());
         metrics.flusherLingerNanos(polled.lingerNanos());
         if (polled.samples().isEmpty()) return null;
-        return prepare(polled.samples());
+        return prepareMemory(polled.samples());
+    }
+
+    /**
+     * The memory poll for a shard that has a disk tier. Unlike
+     * {@link SampleQueue#pollBatch}, which removes samples as it waits, this
+     * waits without taking anything and then drains under the shard's accept
+     * lock, so taking the batch and registering it as in flight is one step.
+     * A batch taken but not yet registered can be stranded by a concurrent
+     * spill — it belongs on disk ahead of the backlog but arrives too late to
+     * go there.
+     */
+    private Prepared pollTieredAndPrepare() throws InterruptedException {
+        long waitStarted = System.nanoTime();
+        Shards.InFlight token = memoryTier.poll(batchSize);
+        if (token == null) {
+            queue.awaitArrival(flushIntervalMs);
+            token = memoryTier.poll(batchSize);
+            if (token == null) {
+                metrics.flusherIdleNanos(System.nanoTime() - waitStarted);
+                return null;
+            }
+        }
+        metrics.flusherIdleNanos(System.nanoTime() - waitStarted);
+
+        long lingerNanos = 0L;
+        if (lingerMs > 0 && token.size() < batchSize) {
+            long lingerStarted = System.nanoTime();
+            long deadline = lingerStarted + TimeUnit.MILLISECONDS.toNanos(lingerMs);
+            while (token.size() < batchSize) {
+                long remainingMs = (deadline - System.nanoTime()) / 1_000_000L;
+                if (remainingMs <= 0) break;
+                queue.awaitArrival(remainingMs);
+                if (!memoryTier.topUp(token, batchSize)) break;   // spilled to disk
+            }
+            lingerNanos = System.nanoTime() - lingerStarted;
+        }
+        metrics.flusherLingerNanos(lingerNanos);
+
+        if (memoryTier.wasCarried(token)) {
+            // A spill took it while we were lingering; the disk copy ships.
+            memoryTier.settled(token);
+            return null;
+        }
+        BuildResult built = build(token.batch());
+        return new Prepared(built, built.samplesWritten(), Tier.MEMORY, 0L,
+                token.batch(), token);
+    }
+
+    /** Read one batch off the disk tier. Null when the bucket turned out to
+     *  have nothing readable, which lets the caller fall through to memory. */
+    private Prepared pollOverflow() {
+        OverflowBucket.Batch batch;
+        try {
+            batch = bucket.nextBatch(batchSize);
+        } catch (java.io.IOException e) {
+            LOG.error("{}: could not read the overflow bucket; rewinding and retrying next cycle",
+                    threadName, e);
+            bucket.rewind("read-fail");
+            return null;
+        }
+        if (batch.corruptedFramesSkipped() > 0) {
+            metrics.walFramesDroppedCorrupted(batch.corruptedFramesSkipped());
+        }
+        if (batch.isEmpty()) return null;
+        return prepare(batch.samples(), Tier.OVERFLOW, batch.newOffset());
     }
 
     private void handOff(Prepared p) throws InterruptedException {
@@ -284,7 +407,7 @@ public final class Flusher {
                 Prepared p = handoff.take();
                 if (p == STOP) break;
                 try {
-                    dispatch(p.built());
+                    dispatch(p);
                 } catch (RuntimeException unexpected) {
                     // Keep the sender alive: a dead sender leaves the builder
                     // parked on a full handoff and the shard silently stops.
@@ -299,48 +422,171 @@ public final class Flusher {
     }
 
     /** Build one batch into a payload and account for what the build dropped. */
-    private Prepared prepare(List<MappedSample> batch) {
+    /**
+     * Build a memory batch, registering it with the shard first. From here
+     * until it settles the batch is out of the queue but older than everything
+     * left in it, so a spill transition has to carry it to disk with the
+     * backlog — and the shutdown residual drain goes through here too, which
+     * is what stops it from being silently discarded on failure.
+     */
+    private Prepared prepareMemory(List<MappedSample> batch) {
+        Shards.InFlight token = memoryTier == null ? null : memoryTier.inFlight(batch);
+        Prepared p = prepare(batch, Tier.MEMORY, 0L);
+        return new Prepared(p.built(), p.sampleCount(), p.tier(), p.newOffset(), p.source(), token);
+    }
+
+    /** Build one batch into a payload and account for what the build dropped. */
+    private BuildResult build(List<MappedSample> batch) {
         long started = System.nanoTime();
         BuildResult built = builder.apply(batch);
         metrics.flusherBuildNanos(System.nanoTime() - started);
         metrics.samplesDroppedNonfinite(built.samplesDroppedNonfinite());
         metrics.samplesDroppedDuplicate(built.samplesDroppedDuplicate());
-        return new Prepared(built, built.samplesWritten());
+        return built;
+    }
+
+    private Prepared prepare(List<MappedSample> batch, Tier tier, long newOffset) {
+        BuildResult built = build(batch);
+        // A disk batch is acknowledged by sample count, and the build may have
+        // dropped some as non-finite or duplicate; those are gone for good and
+        // the checkpoint must still pass them, so the batch size rather than
+        // the written count is what leaves the bucket.
+        List<MappedSample> source = (tier == Tier.MEMORY && memoryTier != null) ? batch : null;
+        return new Prepared(built, tier == Tier.OVERFLOW ? batch.size() : built.samplesWritten(),
+                tier, newOffset, source, null);
     }
 
     /** Package-private for unit tests. Builds and sends one batch synchronously. */
     void flushBatch(List<MappedSample> batch) {
-        dispatch(prepare(batch).built());
+        dispatch(prepareMemory(batch));
     }
 
     /** Write one built payload and account for the outcome. */
-    private void dispatch(BuildResult built) {
+    private void dispatch(Prepared p) {
+        try {
+            dispatchInner(p);
+        } finally {
+            // Whatever happened, the shard no longer needs to carry this batch
+            // through a spill: it either reached the backend, reached disk, or
+            // was counted as dropped.
+            if (memoryTier != null && p.tier() == Tier.MEMORY) {
+                memoryTier.settled(p.token());
+            }
+        }
+    }
+
+    private void dispatchInner(Prepared p) {
+        BuildResult built = p.built();
         if (!built.hasContent()) {
+            // Nothing to POST — every sample was dropped in the build. For a
+            // disk batch the checkpoint must still advance past them, or the
+            // same unsendable frames come back every cycle forever.
+            if (p.tier() == Tier.OVERFLOW) acknowledgeOverflow(p, 0);
             return;
         }
         WriteResult result = httpClient.write(built.compressedPayload());
         switch (result.outcome()) {
             case SUCCESS -> {
-                metrics.samplesWritten(built.samplesWritten());
-                metrics.sampleLatency(built.samplesWritten(), built.enqueuedEpochMsSum());
-                LOG.debug("flushed {} samples in {} bytes on attempt {}",
-                        built.samplesWritten(), built.compressedPayload().length, result.attemptsMade());
+                if (p.tier() == Tier.OVERFLOW) {
+                    // Counters are deferred until the checkpoint persists: if
+                    // the advance fails the batch re-ships, and it must not be
+                    // counted twice.
+                    if (acknowledgeOverflow(p, built.samplesWritten())) {
+                        metrics.samplesWritten(built.samplesWritten());
+                        metrics.sampleLatency(built.samplesWritten(), built.enqueuedEpochMsSum());
+                        metrics.samplesDrainedFromOverflow(built.samplesWritten());
+                    }
+                } else {
+                    metrics.samplesWritten(built.samplesWritten());
+                    metrics.sampleLatency(built.samplesWritten(), built.enqueuedEpochMsSum());
+                }
+                LOG.debug("flushed {} samples in {} bytes on attempt {} from {}",
+                        built.samplesWritten(), built.compressedPayload().length,
+                        result.attemptsMade(), p.tier());
             }
             case DROPPED_4XX -> {
-                metrics.samplesDropped4xx(built.samplesWritten());
+                // Permanent rejection: the backend will never take these, so a
+                // disk batch advances past them rather than retrying forever.
+                if (p.tier() == Tier.OVERFLOW) {
+                    if (acknowledgeOverflow(p, built.samplesWritten())) {
+                        metrics.samplesDropped4xx(built.samplesWritten());
+                        metrics.walBatchesDropped4xx(1);
+                    }
+                } else {
+                    metrics.samplesDropped4xx(built.samplesWritten());
+                }
                 LOG.warn("dropped batch of {} samples after 4xx: status={}",
                         built.samplesWritten(), result.httpStatus());
             }
             case DROPPED_5XX_EXHAUSTED -> {
-                metrics.samplesDropped5xx(built.samplesWritten());
-                LOG.warn("dropped batch of {} samples after {} attempts: status={}",
-                        built.samplesWritten(), result.attemptsMade(), result.httpStatus());
+                if (p.tier() == Tier.OVERFLOW) {
+                    bucket.rewind("retry-after-5xx");
+                    LOG.warn("batch of {} samples not accepted after {} attempts (status={}); "
+                            + "the overflow bucket holds them and will retry",
+                            built.samplesWritten(), result.attemptsMade(), result.httpStatus());
+                } else {
+                    int lost = rescueOrCount(p, built.samplesWritten());
+                    if (lost > 0) {
+                        metrics.samplesDropped5xx(lost);
+                        LOG.warn("dropped {} of {} samples after {} attempts: status={}",
+                                lost, built.samplesWritten(), result.attemptsMade(),
+                                result.httpStatus());
+                    }
+                }
             }
             case TRANSPORT_ERROR -> {
-                metrics.samplesDroppedTransport(built.samplesWritten());
-                LOG.warn("dropped batch of {} samples after transport errors: {}",
-                        built.samplesWritten(), result.detail());
+                if (p.tier() == Tier.OVERFLOW) {
+                    bucket.rewind("retry-after-transport-error");
+                    LOG.warn("batch of {} samples not accepted after transport errors ({}); "
+                            + "the overflow bucket holds them and will retry",
+                            built.samplesWritten(), result.detail());
+                } else {
+                    int lost = rescueOrCount(p, built.samplesWritten());
+                    if (lost > 0) {
+                        metrics.samplesDroppedTransport(lost);
+                        LOG.warn("dropped {} of {} samples after transport errors: {}",
+                                lost, built.samplesWritten(), result.detail());
+                    }
+                }
             }
         }
+    }
+
+    /**
+     * Try to hand a memory batch the backend would not take back to the disk
+     * tier, so it is retried rather than lost.
+     *
+     * <p>Before 0.8.0 there was nowhere to put such a batch, so it was
+     * dropped. With a tier configured there is, and leaving these samples to
+     * die in memory while the bucket sat empty would make "zero loss while the
+     * disk tier has room" false for exactly the samples that had not spilled
+     * yet.
+     *
+     * @return how many samples could not be rescued and must still be counted
+     *         as dropped by their original cause
+     */
+    private int rescueOrCount(Prepared p, int samplesInBatch) {
+        if (memoryTier == null || p.source() == null) return samplesInBatch;
+        int rescued = memoryTier.returnToOverflow(p.token(), p.source());
+        // The rescue works front to back, so the remainder is the tail the
+        // bucket had no room for.
+        return Math.max(0, p.source().size() - rescued);
+    }
+
+    /**
+     * Advance the bucket past a batch the backend has finished with, and log
+     * the recovery when that empties it.
+     *
+     * @return true when the checkpoint persisted, so deferred counters may tick
+     */
+    private boolean acknowledgeOverflow(Prepared p, int samplesWritten) {
+        long checkpointed = bucket.acknowledge(p.newOffset(), p.sampleCount());
+        if (checkpointed < 0) return false;   // advance failed; bucket rewound
+        if (checkpointed > 0) metrics.walBytesCheckpointed(checkpointed);
+        if (bucket.isEmpty()) {
+            LOG.info("{}: overflow bucket is empty again; new samples go back to memory "
+                    + "({} sample(s) acknowledged in the last batch)", threadName, samplesWritten);
+        }
+        return true;
     }
 }

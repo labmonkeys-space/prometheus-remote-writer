@@ -59,6 +59,6 @@ v0.5.0 changes the default emission (breaking):
 |===
 
 Profile and attr-mode changes hot-reload like the rest of the file.
-One WAL caveat: the WAL stores samples *after* mapping, so a profile
+One overflow-tier caveat: a bucket stores samples *after* mapping, so a profile
 flip with a pending backlog flushes that backlog in the old schema;
 new samples use the new one.

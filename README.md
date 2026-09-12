@@ -53,7 +53,7 @@ EOF
 ```
 
 The published [docs site](https://labmonkeys-space.github.io/prometheus-remote-writer/)
-covers full configuration, wire-format selection (v1 / v2), the WAL,
+covers full configuration, wire-format selection (v1 / v2), the disk overflow tier,
 label mapping, backend compatibility, operations, and troubleshooting.
 
 ## Build from source
