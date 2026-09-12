@@ -150,9 +150,12 @@ class SampleQueueTest {
         Thread interrupter = new Thread(() -> { try { Thread.sleep(50); } catch (InterruptedException e) { return; } me.interrupt(); });
         interrupter.start();
         SampleQueue.Batch b = q.pollBatch(100, 1000, TimeUnit.MILLISECONDS, 2000);
+        // Read and clear the flag before join(): join() itself throws on a
+        // set flag while the helper is still alive.
+        boolean flagWasSet = Thread.interrupted();
         interrupter.join();
         assertThat(b.samples()).hasSize(2);
-        assertThat(Thread.interrupted()).as("interrupt flag left set for the caller").isTrue();
+        assertThat(flagWasSet).as("interrupt flag left set for the caller").isTrue();
         assertThat(q.getSamplesDequeued()).isEqualTo(2);
     }
 
