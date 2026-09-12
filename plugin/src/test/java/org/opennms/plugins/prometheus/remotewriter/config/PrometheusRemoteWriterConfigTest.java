@@ -1852,132 +1852,144 @@ class PrometheusRemoteWriterConfigTest {
             .hasMessageContaining("'cluster'");
     }
 
-    // ---------- wal.* -------------------------------------------------------
+    // ---------- overflow.* ---------------------------------------------------
 
     @Test
-    void wal_defaults_match_the_design_contract() {
+    void overflow_defaults_match_the_design_contract() {
         PrometheusRemoteWriterConfig c = minimal();
-        assertThat(c.isWalEnabled()).isFalse();
-        assertThat(c.getWalPath()).isEmpty();
-        assertThat(c.getWalMaxSizeBytes()).isEqualTo(536_870_912L); // 512 MB
-        assertThat(c.getWalSegmentSizeBytes()).isEqualTo(67_108_864L); // 64 MB
-        assertThat(c.getWalFsync())
+        assertThat(c.getOverflowDir()).isEmpty();
+        assertThat(c.getOverflowMaxSizeBytes()).isEqualTo(4L * 1024 * 1024 * 1024); // 4 GiB
+        assertThat(c.isOverflowEnabled()).isTrue();
+        assertThat(c.getOverflowFull())
+                .isEqualTo(org.opennms.plugins.prometheus.remotewriter.queue.OverflowBucket.FullPolicy.REFUSE);
+        assertThat(c.getOverflowFsync())
                 .isEqualTo(org.opennms.plugins.prometheus.remotewriter.wal.WalSegment.FsyncPolicy.BATCH);
-        assertThat(c.getWalOverflow())
-                .isEqualTo(org.opennms.plugins.prometheus.remotewriter.wal.WalWriter.OverflowPolicy.BACKPRESSURE);
     }
 
     @Test
-    void wal_disabled_skips_wal_validation_entirely() {
-        // When wal.enabled=false, invalid wal.* values are NOT rejected —
-        // they are simply ignored. Prevents operator frustration with
-        // "I turned WAL off but it still complains."
+    void overflow_zero_size_disables_the_tier_and_skips_its_validation() {
+        // The off switch: a deployment that ran diskless before 0.8.0 keeps
+        // doing so instead of acquiring a disk dependency on upgrade.
         PrometheusRemoteWriterConfig c = minimal();
-        c.setWalEnabled(false);
-        c.setWalMaxSizeBytes(-1);       // would be invalid if enabled
-        c.setWalSegmentSizeBytes(0);    // would be invalid if enabled
+        c.setOverflowMaxSizeBytes(0);
+        assertThat(c.isOverflowEnabled()).isFalse();
         assertThatCode(c::validate).doesNotThrowAnyException();
     }
 
     @Test
-    void wal_enabled_with_minimal_extra_config_validates_cleanly() {
+    void overflow_negative_size_is_rejected() {
         PrometheusRemoteWriterConfig c = minimal();
-        c.setWalEnabled(true);
-        c.setWalPath("/tmp/test-wal-path"); // any non-blank path; resolveWalPath returns it
-        assertThatCode(c::validate).doesNotThrowAnyException();
-    }
-
-    @Test
-    void wal_fsync_parses_case_insensitively() {
-        PrometheusRemoteWriterConfig c = minimal();
-        c.setWalFsync("always");
-        assertThat(c.getWalFsync())
-                .isEqualTo(org.opennms.plugins.prometheus.remotewriter.wal.WalSegment.FsyncPolicy.ALWAYS);
-        c.setWalFsync("NEVER");
-        assertThat(c.getWalFsync())
-                .isEqualTo(org.opennms.plugins.prometheus.remotewriter.wal.WalSegment.FsyncPolicy.NEVER);
-        c.setWalFsync("Batch");
-        assertThat(c.getWalFsync())
-                .isEqualTo(org.opennms.plugins.prometheus.remotewriter.wal.WalSegment.FsyncPolicy.BATCH);
-    }
-
-    @Test
-    void wal_fsync_blank_defaults_to_batch() {
-        PrometheusRemoteWriterConfig c = minimal();
-        c.setWalFsync("");
-        assertThat(c.getWalFsync())
-                .isEqualTo(org.opennms.plugins.prometheus.remotewriter.wal.WalSegment.FsyncPolicy.BATCH);
-    }
-
-    @Test
-    void wal_fsync_rejects_unknown_value() {
-        PrometheusRemoteWriterConfig c = minimal();
-        assertThatThrownBy(() -> c.setWalFsync("sometimes"))
+        c.setOverflowMaxSizeBytes(-1);
+        assertThatThrownBy(c::validate)
                 .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("wal.fsync")
+                .hasMessageContaining("overflow.max-size-bytes");
+    }
+
+    @Test
+    void overflow_slice_too_small_for_its_shard_is_rejected() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setWriterShards(8);
+        c.setOverflowMaxSizeBytes(1024);   // 128 bytes a shard
+        assertThatThrownBy(c::validate)
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("overflow.max-size-bytes / writer.shards");
+    }
+
+    @Test
+    void sharding_and_a_disk_tier_now_validate_together() {
+        // Before 0.8.0 this pair was rejected outright: the WAL was one
+        // ordered log and could not be drained by parallel shards. Each shard
+        // now owns its own bucket, so the exclusion is gone.
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setWriterShards(4);
+        c.setQueueCapacity(40_000);
+        c.setBatchSize(1_000);
+        c.setOverflowMaxSizeBytes(4L * 1024 * 1024 * 1024);
+        assertThatCode(c::validate).doesNotThrowAnyException();
+    }
+
+    @Test
+    void overflow_budget_is_split_evenly_across_shards() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setWriterShards(4);
+        c.setOverflowMaxSizeBytes(4L << 30);
+        assertThat(c.overflowBytesPerShard()).isEqualTo(1L << 30);
+        // Eight segments a shard, so drop-oldest evicts an eighth rather than
+        // the lot.
+        assertThat(c.overflowSegmentSizeBytes()).isEqualTo((1L << 30) / 8);
+    }
+
+    @Test
+    void overflow_fsync_accepts_the_documented_grammar() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setOverflowFsync("always");
+        assertThat(c.getOverflowFsync())
+                .isEqualTo(org.opennms.plugins.prometheus.remotewriter.wal.WalSegment.FsyncPolicy.ALWAYS);
+        // "none" is the config spelling of the segment layer's NEVER.
+        c.setOverflowFsync("none");
+        assertThat(c.getOverflowFsync())
+                .isEqualTo(org.opennms.plugins.prometheus.remotewriter.wal.WalSegment.FsyncPolicy.NEVER);
+        c.setOverflowFsync("Batch");
+        assertThat(c.getOverflowFsync())
+                .isEqualTo(org.opennms.plugins.prometheus.remotewriter.wal.WalSegment.FsyncPolicy.BATCH);
+    }
+
+    @Test
+    void overflow_fsync_blank_resets_to_default() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setOverflowFsync("always");
+        c.setOverflowFsync("");
+        assertThat(c.getOverflowFsync())
+                .isEqualTo(org.opennms.plugins.prometheus.remotewriter.wal.WalSegment.FsyncPolicy.BATCH);
+    }
+
+    @Test
+    void overflow_fsync_rejects_an_unknown_value() {
+        PrometheusRemoteWriterConfig c = minimal();
+        assertThatThrownBy(() -> c.setOverflowFsync("sometimes"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("overflow.fsync")
                 .hasMessageContaining("sometimes");
     }
 
     @Test
-    void wal_overflow_accepts_hyphen_and_underscore_forms() {
+    void overflow_full_accepts_the_documented_grammar() {
         PrometheusRemoteWriterConfig c = minimal();
-        c.setWalOverflow("drop-oldest");
-        assertThat(c.getWalOverflow())
-                .isEqualTo(org.opennms.plugins.prometheus.remotewriter.wal.WalWriter.OverflowPolicy.DROP_OLDEST);
-        c.setWalOverflow("DROP_OLDEST");
-        assertThat(c.getWalOverflow())
-                .isEqualTo(org.opennms.plugins.prometheus.remotewriter.wal.WalWriter.OverflowPolicy.DROP_OLDEST);
-        c.setWalOverflow("backpressure");
-        assertThat(c.getWalOverflow())
-                .isEqualTo(org.opennms.plugins.prometheus.remotewriter.wal.WalWriter.OverflowPolicy.BACKPRESSURE);
+        c.setOverflowFull("drop-oldest");
+        assertThat(c.getOverflowFull())
+                .isEqualTo(org.opennms.plugins.prometheus.remotewriter.queue.OverflowBucket.FullPolicy.DROP_OLDEST);
+        c.setOverflowFull("DROP_OLDEST");
+        assertThat(c.getOverflowFull())
+                .isEqualTo(org.opennms.plugins.prometheus.remotewriter.queue.OverflowBucket.FullPolicy.DROP_OLDEST);
+        c.setOverflowFull("refuse");
+        assertThat(c.getOverflowFull())
+                .isEqualTo(org.opennms.plugins.prometheus.remotewriter.queue.OverflowBucket.FullPolicy.REFUSE);
     }
 
     @Test
-    void wal_overflow_rejects_unknown_value() {
+    void overflow_full_rejects_an_unknown_value() {
         PrometheusRemoteWriterConfig c = minimal();
-        assertThatThrownBy(() -> c.setWalOverflow("lose-them-all"))
+        assertThatThrownBy(() -> c.setOverflowFull("lose-them-all"))
                 .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("wal.overflow");
+                .hasMessageContaining("overflow.full");
     }
 
     @Test
-    void validate_rejects_zero_or_negative_wal_max_size_when_enabled() {
+    void resolveOverflowDir_returns_explicit_path_when_set() {
         PrometheusRemoteWriterConfig c = minimal();
-        c.setWalEnabled(true);
-        c.setWalMaxSizeBytes(0);
-        assertThatThrownBy(c::validate)
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("wal.max-size-bytes");
+        c.setOverflowDir("/var/lib/opennms/overflow");
+        assertThat(c.resolveOverflowDir()).isEqualTo("/var/lib/opennms/overflow");
     }
 
     @Test
-    void validate_rejects_segment_size_exceeding_max_size() {
+    void resolveOverflowDir_uses_karaf_data_system_property_when_blank() {
         PrometheusRemoteWriterConfig c = minimal();
-        c.setWalEnabled(true);
-        c.setWalMaxSizeBytes(1000);
-        c.setWalSegmentSizeBytes(2000);
-        assertThatThrownBy(c::validate)
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("wal.segment-size-bytes")
-                .hasMessageContaining("wal.max-size-bytes");
-    }
-
-    @Test
-    void resolveWalPath_returns_explicit_path_when_set() {
-        PrometheusRemoteWriterConfig c = minimal();
-        c.setWalPath("/var/lib/opennms/wal");
-        assertThat(c.resolveWalPath()).isEqualTo("/var/lib/opennms/wal");
-    }
-
-    @Test
-    void resolveWalPath_uses_karaf_data_system_property_when_blank() {
-        PrometheusRemoteWriterConfig c = minimal();
-        c.setWalPath("");
+        c.setOverflowDir("");
         String original = System.getProperty("karaf.data");
         try {
             System.setProperty("karaf.data", "/opt/opennms/data");
-            assertThat(c.resolveWalPath())
-                    .isEqualTo("/opt/opennms/data/prometheus-remote-writer/wal");
+            assertThat(c.resolveOverflowDir())
+                    .isEqualTo("/opt/opennms/data/prometheus-remote-writer/overflow");
         } finally {
             if (original == null) System.clearProperty("karaf.data");
             else System.setProperty("karaf.data", original);
@@ -1985,15 +1997,17 @@ class PrometheusRemoteWriterConfigTest {
     }
 
     @Test
-    void resolveWalPath_throws_when_blank_and_no_karaf_data() {
+    void resolveOverflowDir_throws_when_blank_and_no_karaf_data() {
+        // Failing here beats silently writing segments somewhere unintended.
         PrometheusRemoteWriterConfig c = minimal();
-        c.setWalPath("");
+        c.setOverflowDir("");
         String original = System.getProperty("karaf.data");
         try {
             System.clearProperty("karaf.data");
-            assertThatThrownBy(c::resolveWalPath)
+            assertThatThrownBy(c::resolveOverflowDir)
                     .isInstanceOf(IllegalStateException.class)
-                    .hasMessageContaining("karaf.data");
+                    .hasMessageContaining("karaf.data")
+                    .hasMessageContaining("overflow.dir");
         } finally {
             if (original != null) System.setProperty("karaf.data", original);
         }
@@ -2020,7 +2034,7 @@ class PrometheusRemoteWriterConfigTest {
         PrometheusRemoteWriterConfig c = minimal();
         c.setWireProtocolVersion("2");
         assertThat(c.getWireProtocolVersion()).isEqualTo(2);
-        // Blank explicitly resets to default — same convention as wal.fsync.
+        // Blank explicitly resets to default — same convention as overflow.fsync.
         c.setWireProtocolVersion("");
         assertThat(c.getWireProtocolVersion()).isEqualTo(1);
         c.setWireProtocolVersion("   ");
@@ -2082,46 +2096,39 @@ class PrometheusRemoteWriterConfigTest {
     // type. See setMetadataCase for the original instance of the pattern.
 
     @Test
-    void wal_fsync_enum_setter_accepts_each_policy() {
+    void overflow_fsync_enum_setter_accepts_each_policy() {
         PrometheusRemoteWriterConfig c = minimal();
-        c.setWalFsync(org.opennms.plugins.prometheus.remotewriter.wal.WalSegment.FsyncPolicy.ALWAYS);
-        assertThat(c.getWalFsync())
-                .isEqualTo(org.opennms.plugins.prometheus.remotewriter.wal.WalSegment.FsyncPolicy.ALWAYS);
-        c.setWalFsync(org.opennms.plugins.prometheus.remotewriter.wal.WalSegment.FsyncPolicy.NEVER);
-        assertThat(c.getWalFsync())
-                .isEqualTo(org.opennms.plugins.prometheus.remotewriter.wal.WalSegment.FsyncPolicy.NEVER);
-        c.setWalFsync(org.opennms.plugins.prometheus.remotewriter.wal.WalSegment.FsyncPolicy.BATCH);
-        assertThat(c.getWalFsync())
-                .isEqualTo(org.opennms.plugins.prometheus.remotewriter.wal.WalSegment.FsyncPolicy.BATCH);
+        c.setOverflowFsync(org.opennms.plugins.prometheus.remotewriter.wal.WalSegment.FsyncPolicy.ALWAYS);
+        assertThat(c.getOverflowFsync()).isEqualTo(org.opennms.plugins.prometheus.remotewriter.wal.WalSegment.FsyncPolicy.ALWAYS);
+        c.setOverflowFsync(org.opennms.plugins.prometheus.remotewriter.wal.WalSegment.FsyncPolicy.NEVER);
+        assertThat(c.getOverflowFsync()).isEqualTo(org.opennms.plugins.prometheus.remotewriter.wal.WalSegment.FsyncPolicy.NEVER);
+        c.setOverflowFsync(org.opennms.plugins.prometheus.remotewriter.wal.WalSegment.FsyncPolicy.BATCH);
+        assertThat(c.getOverflowFsync()).isEqualTo(org.opennms.plugins.prometheus.remotewriter.wal.WalSegment.FsyncPolicy.BATCH);
     }
 
     @Test
-    void wal_fsync_enum_setter_null_defaults_to_batch() {
+    void overflow_fsync_enum_setter_null_defaults_to_batch() {
         PrometheusRemoteWriterConfig c = minimal();
-        c.setWalFsync(org.opennms.plugins.prometheus.remotewriter.wal.WalSegment.FsyncPolicy.ALWAYS);
-        c.setWalFsync((org.opennms.plugins.prometheus.remotewriter.wal.WalSegment.FsyncPolicy) null);
-        assertThat(c.getWalFsync())
-                .isEqualTo(org.opennms.plugins.prometheus.remotewriter.wal.WalSegment.FsyncPolicy.BATCH);
+        c.setOverflowFsync(org.opennms.plugins.prometheus.remotewriter.wal.WalSegment.FsyncPolicy.ALWAYS);
+        c.setOverflowFsync((org.opennms.plugins.prometheus.remotewriter.wal.WalSegment.FsyncPolicy) null);
+        assertThat(c.getOverflowFsync()).isEqualTo(org.opennms.plugins.prometheus.remotewriter.wal.WalSegment.FsyncPolicy.BATCH);
     }
 
     @Test
-    void wal_overflow_enum_setter_accepts_each_policy() {
+    void overflow_full_enum_setter_accepts_each_policy() {
         PrometheusRemoteWriterConfig c = minimal();
-        c.setWalOverflow(org.opennms.plugins.prometheus.remotewriter.wal.WalWriter.OverflowPolicy.DROP_OLDEST);
-        assertThat(c.getWalOverflow())
-                .isEqualTo(org.opennms.plugins.prometheus.remotewriter.wal.WalWriter.OverflowPolicy.DROP_OLDEST);
-        c.setWalOverflow(org.opennms.plugins.prometheus.remotewriter.wal.WalWriter.OverflowPolicy.BACKPRESSURE);
-        assertThat(c.getWalOverflow())
-                .isEqualTo(org.opennms.plugins.prometheus.remotewriter.wal.WalWriter.OverflowPolicy.BACKPRESSURE);
+        c.setOverflowFull(org.opennms.plugins.prometheus.remotewriter.queue.OverflowBucket.FullPolicy.DROP_OLDEST);
+        assertThat(c.getOverflowFull()).isEqualTo(org.opennms.plugins.prometheus.remotewriter.queue.OverflowBucket.FullPolicy.DROP_OLDEST);
+        c.setOverflowFull(org.opennms.plugins.prometheus.remotewriter.queue.OverflowBucket.FullPolicy.REFUSE);
+        assertThat(c.getOverflowFull()).isEqualTo(org.opennms.plugins.prometheus.remotewriter.queue.OverflowBucket.FullPolicy.REFUSE);
     }
 
     @Test
-    void wal_overflow_enum_setter_null_defaults_to_backpressure() {
+    void overflow_full_enum_setter_null_defaults_to_refuse() {
         PrometheusRemoteWriterConfig c = minimal();
-        c.setWalOverflow(org.opennms.plugins.prometheus.remotewriter.wal.WalWriter.OverflowPolicy.DROP_OLDEST);
-        c.setWalOverflow((org.opennms.plugins.prometheus.remotewriter.wal.WalWriter.OverflowPolicy) null);
-        assertThat(c.getWalOverflow())
-                .isEqualTo(org.opennms.plugins.prometheus.remotewriter.wal.WalWriter.OverflowPolicy.BACKPRESSURE);
+        c.setOverflowFull(org.opennms.plugins.prometheus.remotewriter.queue.OverflowBucket.FullPolicy.DROP_OLDEST);
+        c.setOverflowFull((org.opennms.plugins.prometheus.remotewriter.queue.OverflowBucket.FullPolicy) null);
+        assertThat(c.getOverflowFull()).isEqualTo(org.opennms.plugins.prometheus.remotewriter.queue.OverflowBucket.FullPolicy.REFUSE);
     }
 
     // ---------- two-phase resource discovery -------------------------------
@@ -2401,17 +2408,6 @@ class PrometheusRemoteWriterConfigTest {
             .hasMessageContaining("[1, 64]");
         c.setWriterShards(65);
         assertThatThrownBy(c::validate).hasMessageContaining("[1, 64]");
-    }
-
-    @Test
-    void writer_shards_with_wal_is_a_validation_error() {
-        PrometheusRemoteWriterConfig c = minimal();
-        c.setWriterShards(4);
-        c.setWalEnabled(true);
-        assertThatThrownBy(c::validate)
-            .isInstanceOf(IllegalStateException.class)
-            .hasMessageContaining("writer.shards")
-            .hasMessageContaining("wal.enabled");
     }
 
     @Test

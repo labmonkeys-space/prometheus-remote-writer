@@ -68,6 +68,7 @@ class PrometheusRemoteWriteV2IT {
         PrometheusRemoteWriterConfig c = new PrometheusRemoteWriterConfig();
         String base = "http://" + prometheus.getHost() + ":" + prometheus.getMappedPort(9090);
         c.setWriteUrl(base + "/api/v1/write");
+        c.setOverflowMaxSizeBytes(0);   // memory-only: these suites pin the queue path
         c.setReadUrl(base);
         c.setBatchSize(10);
         c.setFlushIntervalMs(100);

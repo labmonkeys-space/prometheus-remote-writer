@@ -285,7 +285,7 @@ smoke: kar ## Run e2e smoke against BACKENDS (defaults exclude sentinel; SMOKE_T
 	                if [ -n "$$plugin_cfg" ] && [ ! -f "$$plugin_cfg" ]; then \
 	                    echo "WARN: [$$backend] plugin cfg $$plugin_cfg not found; shard-row assertion disabled" >&2; \
 	                elif [ -n "$$plugin_cfg" ] \
-	                    && ! grep -Eiq '^[[:space:]]*wal\.enabled[[:space:]]*=[[:space:]]*true' "$$plugin_cfg"; then \
+	                    ; then \
 	                    raw_shards=$$(grep -E '^[[:space:]]*writer\.shards[[:space:]]*=' "$$plugin_cfg" | tail -1 | cut -d= -f2 | cut -d'#' -f1 | tr -d '[:space:]'); \
 	                    case "$$raw_shards" in \
 	                        '') : ;; \

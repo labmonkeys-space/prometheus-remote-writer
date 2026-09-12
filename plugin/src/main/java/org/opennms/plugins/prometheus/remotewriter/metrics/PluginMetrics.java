@@ -94,10 +94,26 @@ public final class PluginMetrics {
     public static final String WAL_BYTES_CHECKPOINTED          = "wal_bytes_checkpointed_total";
     public static final String WAL_REPLAY_SAMPLES              = "wal_replay_samples_total";
     public static final String WAL_BATCHES_DROPPED_4XX         = "wal_batches_dropped_4xx_total";
-    public static final String SAMPLES_DROPPED_WAL_FULL        = "samples_dropped_wal_full_total";
+    public static final String SAMPLES_DROPPED_OVERFLOW_FULL   = "samples_dropped_overflow_full_total";
     public static final String WAL_FRAMES_DROPPED_CORRUPTED    = "wal_frames_dropped_corrupted_total";
-    public static final String WAL_DISK_USAGE_BYTES            = "wal_disk_usage_bytes";
-    public static final String WAL_SEGMENTS_ACTIVE             = "wal_segments_active";
+
+    // --- Disk overflow tier ---
+    /** Samples written to a shard's bucket because its memory queue had no
+     *  room, including the backlog moved at the transition into spilling.
+     *  Registered as a gauge over the Shards counter that owns it, like
+     *  {@link #SAMPLES_DROPPED_QUEUE_FULL} — the accept path books it without
+     *  reaching into this registry. */
+    public static final String SAMPLES_SPILLED                 = "samples_spilled_total";
+    /** Samples read back out of a bucket and accepted by the backend. */
+    public static final String SAMPLES_DRAINED_FROM_OVERFLOW   = "samples_drained_from_overflow_total";
+    /** Samples a drop-oldest eviction discarded to make room. */
+    public static final String SAMPLES_EVICTED_OVERFLOW        = "samples_evicted_overflow_total";
+    /** Samples on disk past the checkpoint, across every shard. */
+    public static final String OVERFLOW_PENDING_SAMPLES        = "overflow_pending_samples";
+    /** Per-shard form of {@link #OVERFLOW_PENDING_SAMPLES}: name + "_" + index. */
+    public static final String OVERFLOW_PENDING_SAMPLES_SHARD  = "overflow_pending_samples_shard";
+    /** Bytes every shard's bucket currently occupies on disk. */
+    public static final String OVERFLOW_BYTES                  = "overflow_bytes";
 
     // --- Read-path discovery metrics ---------------------------------------
     public static final String FIND_METRICS_SINGLE_PASS_TOTAL  = "find_metrics_single_pass_total";
@@ -118,7 +134,7 @@ public final class PluginMetrics {
     private final Counter walBytesCheckpointed;
     private final Counter walReplaySamples;
     private final Counter walBatchesDropped4xx;
-    private final Counter samplesDroppedWalFull;
+    private final Counter samplesDrainedFromOverflow;
     private final Counter walFramesDroppedCorrupted;
 
     private final Counter findMetricsSinglePass;
@@ -154,7 +170,7 @@ public final class PluginMetrics {
         this.walBytesCheckpointed         = registry.counter(WAL_BYTES_CHECKPOINTED);
         this.walReplaySamples             = registry.counter(WAL_REPLAY_SAMPLES);
         this.walBatchesDropped4xx         = registry.counter(WAL_BATCHES_DROPPED_4XX);
-        this.samplesDroppedWalFull        = registry.counter(SAMPLES_DROPPED_WAL_FULL);
+        this.samplesDrainedFromOverflow   = registry.counter(SAMPLES_DRAINED_FROM_OVERFLOW);
         this.walFramesDroppedCorrupted    = registry.counter(WAL_FRAMES_DROPPED_CORRUPTED);
         this.findMetricsSinglePass        = registry.counter(FIND_METRICS_SINGLE_PASS_TOTAL);
         this.findMetricsTwoPhase          = registry.counter(FIND_METRICS_TWO_PHASE_TOTAL);
@@ -188,7 +204,7 @@ public final class PluginMetrics {
     public void walBytesCheckpointed(long n)           { if (n > 0) walBytesCheckpointed.inc(n); }
     public void walReplaySamples(long n)               { if (n > 0) walReplaySamples.inc(n); }
     public void walBatchesDropped4xx(long n)           { if (n > 0) walBatchesDropped4xx.inc(n); }
-    public void samplesDroppedWalFull(long n)          { if (n > 0) samplesDroppedWalFull.inc(n); }
+    public void samplesDrainedFromOverflow(long n)     { if (n > 0) samplesDrainedFromOverflow.inc(n); }
     public void walFramesDroppedCorrupted(long n)      { if (n > 0) walFramesDroppedCorrupted.inc(n); }
 
     public void findMetricsSinglePass()                { findMetricsSinglePass.inc(); }

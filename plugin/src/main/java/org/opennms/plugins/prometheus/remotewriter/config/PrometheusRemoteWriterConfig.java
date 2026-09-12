@@ -18,8 +18,8 @@ import java.util.Set;
 
 import org.opennms.plugins.prometheus.remotewriter.mapper.LabelMapper;
 import org.opennms.plugins.prometheus.remotewriter.sanitize.Sanitizer;
+import org.opennms.plugins.prometheus.remotewriter.queue.OverflowBucket;
 import org.opennms.plugins.prometheus.remotewriter.wal.WalSegment;
-import org.opennms.plugins.prometheus.remotewriter.wal.WalWriter;
 
 /**
  * Plugin configuration. Blueprint sets each property individually through the
@@ -208,8 +208,22 @@ public class PrometheusRemoteWriterConfig {
      *  a queue segment of {@code queue.capacity / N}, and a flusher thread
      *  with at most one request in flight — so the Remote Write
      *  in-order-per-series rule holds structurally while shards flush in
-     *  parallel. Queue mode only; validation rejects it with wal.enabled. */
+     *  parallel. Each shard also owns its own overflow bucket, so sharding
+     *  and durability combine. */
     private int writerShards = 1;
+
+    /** Segments per shard bucket. Drop-oldest evicts a whole segment, so a
+     *  bucket needs several for eviction to be a partial loss rather than a
+     *  total one; GC releases at the same granularity. Fixed rather than
+     *  configurable so the segment count per shard does not grow with
+     *  writer.shards. */
+    static final int SEGMENTS_PER_SHARD = 8;
+
+    /** Smallest per-shard slice the segment arithmetic still works at:
+     *  SEGMENTS_PER_SHARD segments of 1 KiB. This is a correctness floor, not
+     *  a sizing recommendation — the docs carry the outage-window arithmetic
+     *  an operator should actually size against. */
+    static final long MIN_OVERFLOW_BYTES_PER_SHARD = SEGMENTS_PER_SHARD * 1024L;
 
     // --- Read path ---
     /** How far back findMetrics() looks when no explicit start is provided. */
@@ -290,50 +304,40 @@ public class PrometheusRemoteWriterConfig {
      *  deployments). {@code 2} emits the Prometheus 2.50+ v2 format with
      *  string interning — requires a v2-capable backend (Prometheus
      *  ≥2.50, Mimir ≥2.10, VictoriaMetrics with v2, Grafana Cloud, or
-     *  equivalent). The WAL is wire-version-agnostic, so flipping this
-     *  knob with pending samples in the WAL is safe — the next flush
+     *  equivalent). The overflow tier is wire-version-agnostic, so flipping
+     *  this knob with samples pending on disk is safe — the next flush
      *  emits according to the new value. */
     private int wireProtocolVersion = 1;
 
-    // --- Write-Ahead Log (WAL) ---
-    /** Whether to durably persist samples to disk before ack'ing store().
-     *  When false (default), samples buffer in memory via queue.capacity and
-     *  are lost on process restart — matching v0.4 behavior. When true, the
-     *  plugin maintains a Write-Ahead Log at {@link #walPath} and replaces
-     *  the in-memory queue as source of truth; queue.capacity is ignored
-     *  with a startup WARN. See the "Write-Ahead Log" section of the
-     *  README for disk-space planning. */
-    private boolean walEnabled;
-
-    /** Directory for WAL segments + checkpoint. Empty (default) resolves
-     *  to {@code ${karaf.data}/prometheus-remote-writer/wal} at startup.
+    // --- Disk overflow tier ---
+    /** Directory holding the per-shard overflow buckets, one subdirectory
+     *  per shard. Empty (default) resolves to
+     *  {@code ${karaf.data}/prometheus-remote-writer/overflow} at startup.
      *  Operators running containerised Karaf with an ephemeral
-     *  {@code ${karaf.data}} MUST set this to a mounted volume or the WAL
-     *  will evaporate across restarts (undermining its whole point). */
-    private String walPath = "";
+     *  {@code ${karaf.data}} MUST set this to a mounted volume or the tier
+     *  evaporates across restarts, undermining its whole point. */
+    private String overflowDir = "";
 
-    /** Total on-disk footprint cap. Reached → {@link #walOverflow} policy
-     *  kicks in. Default 512 MB. */
-    private long walMaxSizeBytes = 536_870_912L;
+    /** Total on-disk footprint cap across every shard's bucket, divided
+     *  equally at activation. Default 4 GiB. Zero disables the disk tier
+     *  entirely: no directory is created and a full memory queue refuses,
+     *  which is the pre-0.8.0 behaviour. Divided by the offered rate, this
+     *  is how long a backend outage can last before the plugin refuses. */
+    private long overflowMaxSizeBytes = 4L * 1024 * 1024 * 1024;
 
-    /** Per-segment rotation threshold. A new segment is opened when the
-     *  active one crosses this size. Smaller = more segments = more
-     *  syscalls for listing / GC; larger = fewer but coarser GC unit.
-     *  Default 64 MB. */
-    private long walSegmentSizeBytes = 67_108_864L;
+    /** What a shard does when its bucket is at its size bound:
+     *  {@code refuse} — the append is refused, counted in
+     *  {@code samples_dropped_overflow_full_total}, and store() throws
+     *  (default, so silent loss is always a deliberate choice);
+     *  {@code drop-oldest} — evict the oldest whole segment and accept. */
+    private OverflowBucket.FullPolicy overflowFull = OverflowBucket.FullPolicy.REFUSE;
 
-    /** Fsync policy: {@code always} (fsync every append; tightest RPO,
-     *  lowest throughput), {@code batch} (fsync at flush-interval
-     *  boundary; loses at most ~flush-interval-ms of samples on kill -9),
-     *  {@code never} (OS page cache only; suitable for ephemeral
-     *  deployments). Default {@code batch}. */
-    private WalSegment.FsyncPolicy walFsync = WalSegment.FsyncPolicy.BATCH;
-
-    /** Overflow policy when {@link #walMaxSizeBytes} is reached:
-     *  {@code backpressure} — new samples refused with StorageException
-     *  (matches v0.4 queue-full semantics, default); {@code drop-oldest}
-     *  — evict the oldest segment to make room. */
-    private WalWriter.OverflowPolicy walOverflow = WalWriter.OverflowPolicy.BACKPRESSURE;
+    /** Fsync policy for bucket segments: {@code always} (fsync every
+     *  append; tightest RPO, lowest throughput), {@code batch} (fsync at
+     *  the flush-interval boundary; loses at most ~flush-interval-ms of
+     *  samples on kill -9), {@code none} (OS page cache only; suitable for
+     *  ephemeral deployments). Default {@code batch}. */
+    private WalSegment.FsyncPolicy overflowFsync = WalSegment.FsyncPolicy.BATCH;
 
     /**
      * Validate a fully populated config. Called by Blueprint's {@code init-method}
@@ -516,20 +520,21 @@ public class PrometheusRemoteWriterConfig {
             }
         }
 
-        validateWal();
         validateDiscovery();
         validateIfSpeedMode();
         validateLabelProfile();
+        // Shards first: the overflow budget is divided by writer.shards, so an
+        // out-of-range shard count has to be rejected before that arithmetic.
         validateWriterShards();
+        validateOverflow();
     }
 
     /**
      * Cross-key rules for {@code writer.shards}. Sharding multiplies
      * concurrent outbound requests (one per shard), so it is capped by the
      * connection pool; it splits {@code queue.capacity} evenly, so each
-     * shard must still be able to fill a batch; and the WAL is a single
-     * ordered log whose ordering a parallel drain would break, so sharding
-     * is queue-mode only (per-shard WALs are a future proposal).
+     * shard must still be able to fill a batch. Each shard owns its own
+     * ordered overflow bucket, so sharding and durability combine.
      */
     private void validateWriterShards() {
         if (writerShards < 1 || writerShards > 64) {
@@ -537,12 +542,6 @@ public class PrometheusRemoteWriterConfig {
                 "writer.shards must be in [1, 64] (got " + writerShards + ")");
         }
         if (writerShards == 1) return; // classic pipeline — nothing else to check
-        if (walEnabled) {
-            throw new IllegalStateException(
-                "writer.shards=" + writerShards + " requires wal.enabled=false — the WAL is a "
-                + "single ordered log and cannot be drained by parallel shards. Set "
-                + "writer.shards=1 or disable the WAL.");
-        }
         if (writerShards > httpMaxConnections) {
             throw new IllegalStateException(
                 "writer.shards (" + writerShards + ") must not exceed http.max-connections ("
@@ -654,27 +653,30 @@ public class PrometheusRemoteWriterConfig {
         }
     }
 
-    private void validateWal() {
-        if (!walEnabled) return; // all other wal.* fields are ignored when disabled
-        if (walMaxSizeBytes <= 0) {
+    private void validateOverflow() {
+        if (overflowMaxSizeBytes == 0) return; // tier disabled — the rest is moot
+        if (overflowMaxSizeBytes < 0) {
             throw new IllegalStateException(
-                "wal.max-size-bytes must be > 0 when wal.enabled=true (got " + walMaxSizeBytes + ")");
+                "overflow.max-size-bytes must be >= 0 (got " + overflowMaxSizeBytes
+                + "); 0 disables the disk tier");
         }
-        if (walSegmentSizeBytes <= 0) {
+        // Each shard gets an equal slice and needs room for the SEGMENTS_PER_SHARD
+        // segments that make drop-oldest and GC meaningful — evicting the oldest
+        // of one segment would evict the whole bucket.
+        long perShard = overflowMaxSizeBytes / writerShards;
+        if (perShard < MIN_OVERFLOW_BYTES_PER_SHARD) {
             throw new IllegalStateException(
-                "wal.segment-size-bytes must be > 0 when wal.enabled=true (got " + walSegmentSizeBytes + ")");
+                "overflow.max-size-bytes / writer.shards (" + overflowMaxSizeBytes + " / "
+                + writerShards + " = " + perShard + ") must be >= " + MIN_OVERFLOW_BYTES_PER_SHARD
+                + " — each shard's bucket needs room for " + SEGMENTS_PER_SHARD
+                + " segments of at least 1 KiB. Raise overflow.max-size-bytes, lower "
+                + "writer.shards, or set "
+                + "overflow.max-size-bytes=0 to run without a disk tier.");
         }
-        if (walSegmentSizeBytes > walMaxSizeBytes) {
-            throw new IllegalStateException(
-                "wal.segment-size-bytes (" + walSegmentSizeBytes + ") must not exceed "
-                + "wal.max-size-bytes (" + walMaxSizeBytes + ") — otherwise a single "
-                + "segment alone could fill the cap and leave nothing to evict under "
-                + "drop-oldest");
-        }
-        // wal.path resolution is deferred to resolveWalPath() since Blueprint
-        // may read karaf.data lazily; validate() only enforces the
+        // overflow.dir resolution is deferred to resolveOverflowDir() since
+        // Blueprint may read karaf.data lazily; validate() only enforces the
         // syntactically-required fields here. Physical-path writability is
-        // checked in WalRecovery at startup.
+        // checked when the buckets are opened at startup.
     }
 
     /**
@@ -1105,7 +1107,7 @@ public class PrometheusRemoteWriterConfig {
 
     // Aries Blueprint requires at least one setter to match the getter's
     // return type; otherwise blueprint rejects the bean. Same pattern as
-    // setMetadataCase / setWalFsync / setWalOverflow.
+    // setMetadataCase / setOverflowFsync / setOverflowFull.
     public void setDiscoveryStrategy(DiscoveryStrategy v) {
         discoveryStrategy = v == null ? DiscoveryStrategy.SINGLE_PASS : v;
     }
@@ -1302,24 +1304,24 @@ public class PrometheusRemoteWriterConfig {
 
     public void setLabelsAttrInclude(String v) { labelsAttrInclude = blankToNull(v); }
 
-    // --- WAL setters ---------------------------------------------------------
+    // --- Overflow tier setters -----------------------------------------------
 
-    public void setWalEnabled(boolean v)        { walEnabled = v; }
-    public void setWalPath(String v)            { walPath = v == null ? "" : v.trim(); }
-    public void setWalMaxSizeBytes(long v)      { walMaxSizeBytes = v; }
-    public void setWalSegmentSizeBytes(long v)  { walSegmentSizeBytes = v; }
+    public void setOverflowDir(String v)          { overflowDir = v == null ? "" : v.trim(); }
+    public void setOverflowMaxSizeBytes(long v)   { overflowMaxSizeBytes = v; }
 
-    public void setWalFsync(String v) {
+    /** {@code none} is the config grammar for the segment layer's {@code NEVER}. */
+    public void setOverflowFsync(String v) {
         if (isBlank(v)) {
-            walFsync = WalSegment.FsyncPolicy.BATCH;
+            overflowFsync = WalSegment.FsyncPolicy.BATCH;
             return;
         }
         String normalized = v.trim().toUpperCase();
+        if ("NONE".equals(normalized)) normalized = "NEVER";
         try {
-            walFsync = WalSegment.FsyncPolicy.valueOf(normalized);
+            overflowFsync = WalSegment.FsyncPolicy.valueOf(normalized);
         } catch (IllegalArgumentException e) {
             throw new IllegalStateException(
-                "wal.fsync must be 'always', 'batch', or 'never', got: " + v);
+                "overflow.fsync must be 'always', 'batch', or 'none', got: " + v);
         }
     }
 
@@ -1327,14 +1329,33 @@ public class PrometheusRemoteWriterConfig {
     // return type. Without this overload the String setter above is the
     // only pairing candidate and Sentinel's blueprint rejects the bean.
     // Same pattern as setMetadataCase / setWireProtocolVersion(int).
-    public void setWalFsync(WalSegment.FsyncPolicy v) {
-        walFsync = v == null ? WalSegment.FsyncPolicy.BATCH : v;
+    public void setOverflowFsync(WalSegment.FsyncPolicy v) {
+        overflowFsync = v == null ? WalSegment.FsyncPolicy.BATCH : v;
+    }
+
+    public void setOverflowFull(String v) {
+        if (isBlank(v)) {
+            overflowFull = OverflowBucket.FullPolicy.REFUSE;
+            return;
+        }
+        // Normalise to the enum grammar: "drop-oldest" → "DROP_OLDEST".
+        String normalized = v.trim().toUpperCase().replace('-', '_');
+        try {
+            overflowFull = OverflowBucket.FullPolicy.valueOf(normalized);
+        } catch (IllegalArgumentException e) {
+            throw new IllegalStateException(
+                "overflow.full must be 'refuse' or 'drop-oldest', got: " + v);
+        }
+    }
+
+    public void setOverflowFull(OverflowBucket.FullPolicy v) {
+        overflowFull = v == null ? OverflowBucket.FullPolicy.REFUSE : v;
     }
 
     public void setWireProtocolVersion(String v) {
         // Treat null, empty, AND whitespace-only as "use default" so an
         // operator config of `wire.protocol-version =   ` doesn't throw.
-        // Mirrors the wal.fsync / wal.overflow handling above.
+        // Mirrors the overflow.fsync / overflow.full handling above.
         String normalized = blankToNull(v);
         if (normalized == null) {
             wireProtocolVersion = 1;
@@ -1360,30 +1381,6 @@ public class PrometheusRemoteWriterConfig {
             default -> throw new IllegalStateException(
                 "wire.protocol-version must be 1 or 2, got: " + v);
         }
-    }
-
-    public void setWalOverflow(String v) {
-        if (isBlank(v)) {
-            walOverflow = WalWriter.OverflowPolicy.BACKPRESSURE;
-            return;
-        }
-        // Normalise to the enum grammar: "drop-oldest" → "DROP_OLDEST".
-        String normalized = v.trim().toUpperCase().replace('-', '_');
-        try {
-            walOverflow = WalWriter.OverflowPolicy.valueOf(normalized);
-        } catch (IllegalArgumentException e) {
-            throw new IllegalStateException(
-                "wal.overflow must be 'backpressure' or 'drop-oldest', got: " + v);
-        }
-    }
-
-    // Aries Blueprint requires at least one setter to match the getter's
-    // return type. Without this overload the String setter above is the
-    // only pairing candidate and Sentinel's blueprint rejects the bean.
-    // Same pattern as setMetadataCase / setWireProtocolVersion(int) /
-    // setWalFsync(FsyncPolicy).
-    public void setWalOverflow(WalWriter.OverflowPolicy v) {
-        walOverflow = v == null ? WalWriter.OverflowPolicy.BACKPRESSURE : v;
     }
 
     // Aries Blueprint requires at least one setter to match the getter's
@@ -1442,39 +1439,51 @@ public class PrometheusRemoteWriterConfig {
     public String  getMetadataLabelPrefix()   { return metadataLabelPrefix; }
     public MetadataCase getMetadataCase()     { return metadataCase; }
 
-    // --- WAL getters ---------------------------------------------------------
+    // --- Overflow tier getters -----------------------------------------------
 
-    public boolean isWalEnabled()                       { return walEnabled; }
-    public String  getWalPath()                         { return walPath; }
-    public long    getWalMaxSizeBytes()                 { return walMaxSizeBytes; }
-    public long    getWalSegmentSizeBytes()             { return walSegmentSizeBytes; }
-    public WalSegment.FsyncPolicy    getWalFsync()      { return walFsync; }
-    public WalWriter.OverflowPolicy  getWalOverflow()   { return walOverflow; }
+    public String getOverflowDir()                       { return overflowDir; }
+    public long   getOverflowMaxSizeBytes()              { return overflowMaxSizeBytes; }
+    public OverflowBucket.FullPolicy getOverflowFull()   { return overflowFull; }
+    public WalSegment.FsyncPolicy    getOverflowFsync()  { return overflowFsync; }
+
+    /** True when a disk tier is configured; false disables spilling entirely. */
+    public boolean isOverflowEnabled() { return overflowMaxSizeBytes > 0; }
+
+    /** Byte budget for one shard's bucket: the total split evenly. */
+    public long overflowBytesPerShard() { return overflowMaxSizeBytes / writerShards; }
+
+    /** Segment size for one shard's bucket, derived so a bucket always holds
+     *  {@link #SEGMENTS_PER_SHARD} of them. */
+    public long overflowSegmentSizeBytes() { return overflowBytesPerShard() / SEGMENTS_PER_SHARD; }
 
     public int getWireProtocolVersion() { return wireProtocolVersion; }
 
     /**
-     * Resolve {@link #walPath} to an absolute directory path. If the
+     * Resolve {@link #overflowDir} to an absolute directory path. If the
      * operator set a non-blank value, it's returned verbatim. If blank
-     * (the default), resolves to {@code ${karaf.data}/prometheus-remote-writer/wal}
-     * using the {@code karaf.data} system property.
+     * (the default), resolves to
+     * {@code ${karaf.data}/prometheus-remote-writer/overflow} using the
+     * {@code karaf.data} system property.
      *
-     * <p>Intended to be called only when {@link #isWalEnabled()} is true.
+     * <p>Intended to be called only when {@link #isOverflowEnabled()} is true.
      *
      * @throws IllegalStateException if the path is unresolvable (blank
-     *   wal.path AND no karaf.data system property) — operator must set
-     *   an explicit wal.path outside Karaf.
+     *   overflow.dir AND no karaf.data system property) — the operator must
+     *   set an explicit overflow.dir outside Karaf, rather than have
+     *   segments land somewhere unintended.
      */
-    public String resolveWalPath() {
-        if (!isBlank(walPath)) return walPath;
+    public String resolveOverflowDir() {
+        if (!isBlank(overflowDir)) return overflowDir;
         String karafData = System.getProperty("karaf.data");
         if (karafData == null || karafData.isEmpty()) {
             throw new IllegalStateException(
-                "wal.enabled=true but wal.path is empty and the karaf.data "
-                + "system property is not set — either set wal.path explicitly "
-                + "or run inside a Karaf instance where karaf.data is available");
+                "a disk tier is configured (overflow.max-size-bytes=" + overflowMaxSizeBytes
+                + ") but overflow.dir is empty and the karaf.data system property is not "
+                + "set — either set overflow.dir explicitly, run inside a Karaf instance "
+                + "where karaf.data is available, or set overflow.max-size-bytes=0 to run "
+                + "without a disk tier");
         }
-        return karafData + "/prometheus-remote-writer/wal";
+        return karafData + "/prometheus-remote-writer/overflow";
     }
 
     // ---------- helpers -------------------------------------------------------

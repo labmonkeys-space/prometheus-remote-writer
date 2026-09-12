@@ -35,16 +35,9 @@ import org.opennms.plugins.prometheus.remotewriter.config.PrometheusRemoteWriter
 import org.opennms.plugins.prometheus.remotewriter.http.RemoteWriteHttpClient;
 import org.opennms.plugins.prometheus.remotewriter.mapper.LabelMapper;
 import org.opennms.plugins.prometheus.remotewriter.metrics.PluginMetrics;
+import org.opennms.plugins.prometheus.remotewriter.queue.OverflowBucket;
 import org.opennms.plugins.prometheus.remotewriter.queue.Shards;
-import org.opennms.plugins.prometheus.remotewriter.queue.WalFlusher;
 import org.opennms.plugins.prometheus.remotewriter.read.PrometheusReadClient;
-import org.opennms.plugins.prometheus.remotewriter.wal.Checkpoint;
-import org.opennms.plugins.prometheus.remotewriter.wal.WalEntryCodec;
-import org.opennms.plugins.prometheus.remotewriter.wal.WalFullException;
-import org.opennms.plugins.prometheus.remotewriter.wal.WalRecovery;
-import org.opennms.plugins.prometheus.remotewriter.wal.WalRecovery.RecoveredWal;
-import org.opennms.plugins.prometheus.remotewriter.wal.WalSegment;
-import org.opennms.plugins.prometheus.remotewriter.wal.WalWriter;
 import org.opennms.plugins.prometheus.remotewriter.wire.MappedSample;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -102,30 +95,20 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
      * the {@link #active} volatile so SPI callers can snapshot the whole
      * pipeline without worrying about partial views.
      *
-     * <p>Two modes share this record:
-     * <ul>
-     *   <li><b>Queue mode</b> (wal.enabled=false, v0.4 default): {@code queue}
-     *       and {@code flusher} are non-null; all WAL fields are null.</li>
-     *   <li><b>WAL mode</b> (wal.enabled=true): {@code walWriter},
-     *       {@code walFlusher}, {@code checkpoint}, {@code walDir} are
-     *       non-null; {@code queue} and {@code flusher} are null.</li>
-     * </ul>
-     * The {@code walEnabled()} convenience tells SPI methods which branch
-     * to take without re-reading config (immune to hot-reload mid-call).
+     * <p>One pipeline, one shape. Before 0.8.0 this record carried a queue-mode
+     * half and a WAL-mode half with a discriminator, because the two were
+     * alternatives; the disk tier now sits behind the queue inside
+     * {@link Shards} rather than replacing it, so there is nothing to branch
+     * on. A deployment with no disk tier is the same pipeline with the buckets
+     * left out.
      */
     private record Active(
             LabelMapper           labelMapper,
-            Shards                shards,         // queue mode only
+            Shards                shards,
             RemoteWriteHttpClient writeClient,
             PrometheusReadClient  readClient,
-            WalWriter             walWriter,      // WAL mode only
-            WalFlusher            walFlusher,     // WAL mode only
-            Checkpoint            checkpoint,     // WAL mode only
-            Path                  walDir,         // WAL mode only
             PluginMetrics         metrics,
-            PrometheusRemoteWriterConfig.StorePolicy storePolicy) { // queue mode only
-
-        boolean walEnabled() { return walWriter != null; }
+            PrometheusRemoteWriterConfig.StorePolicy storePolicy) {
     }
 
     private final PrometheusRemoteWriterConfig config;
@@ -230,10 +213,18 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
         warnIfWireV2();
         logEffectiveAuth();
 
-        if (config.isWalEnabled()) {
-            startWalMode();
-        } else {
-            startQueueMode();
+        try {
+            startPipeline();
+        } catch (IllegalStateException e) {
+            // Same contract as the config and header failures above: leave the
+            // plugin inactive and let the next cfg save revive it, rather than
+            // throwing and marking the Blueprint container permanently failed.
+            // This became reachable in 0.8.0 — the disk tier is on by default,
+            // so an unresolvable or unwritable overflow.dir now fails a start
+            // that used to succeed with wal.enabled=false.
+            LOG.error("prometheus-remote-writer not started — {}. The plugin will activate on "
+                    + "the next save of etc/org.opennms.plugins.tss.prometheusremotewriter.cfg "
+                    + "once the problem is resolved.", e.getMessage());
         }
     }
 
@@ -321,7 +312,7 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
              + "which is indistinguishable from leaving the key blank";
     }
 
-    private void startQueueMode() {
+    private void startPipeline() {
         PluginMetrics         m  = null;
         LabelMapper           lm = null;
         RemoteWriteHttpClient wc = null;
@@ -335,10 +326,11 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
             sh = new Shards(config.getWriterShards(), config.getQueueCapacity(), wc,
                     config.getBatchSize(), config.getFlushIntervalMs(), config.getBatchLingerMs(), m,
                     org.opennms.plugins.prometheus.remotewriter.wire.RemoteWriteRequestBuilders
-                            .forVersion(config.getWireProtocolVersion()));
+                            .forVersion(config.getWireProtocolVersion()),
+                    bucketFactory(m));
 
             PrometheusRemoteWriterConfig.StorePolicy policy = config.resolvedStorePolicy();
-            Active built = new Active(lm, sh, wc, rc, null, null, null, null, m, policy);
+            Active built = new Active(lm, sh, wc, rc, m, policy);
             registerGauges(built);
             m.startJmxReporter();
             logActivationOrDiff();
@@ -351,81 +343,50 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
             active = built;
         } catch (RuntimeException e) {
             if (m != null) m.stopJmxReporter();
-            rollbackStart(sh, null, wc, rc, null);
+            rollbackStart(sh, wc, rc);
             throw e;
         }
     }
 
-    private void startWalMode() {
-        // Operator-visible one-shot WARN if queue.capacity was explicitly
-        // set — under wal.enabled=true, it is ignored. We log rather than
-        // fail because the default (10_000) is harmless; operators who
-        // did set it may otherwise wonder where their config went.
-        if (config.getQueueCapacity() != 10_000) {
-            LOG.warn("queue.capacity={} is ignored when wal.enabled=true; "
-                    + "the WAL replaces the in-memory queue as source of truth. "
-                    + "Size the WAL via wal.max-size-bytes instead.",
-                    config.getQueueCapacity());
+    /**
+     * Build the per-shard bucket opener, or null when no disk tier is
+     * configured. Each shard gets its own subdirectory of
+     * {@code overflow.dir}, which is what lets the buckets be independent
+     * ordered logs rather than one log with parallel readers.
+     */
+    private java.util.function.IntFunction<OverflowBucket> bucketFactory(PluginMetrics m) {
+        if (!config.isOverflowEnabled()) {
+            LOG.info("overflow.max-size-bytes=0 — no disk tier; a full queue refuses, "
+                    + "as before 0.8.0");
+            return null;
         }
-        if (config.getBatchLingerMs() != 0) {
-            LOG.warn("batch.linger-ms={} is ignored when wal.enabled=true; the WAL flusher sends "
-                    + "what the reader returns and has no linger.", config.getBatchLingerMs());
-        }
-        if (config.getStorePolicy() != PrometheusRemoteWriterConfig.StorePolicy.AUTO) {
-            LOG.warn("queue.store-policy={} is ignored when wal.enabled=true; "
-                    + "the WAL is one ordered log and a full WAL refuses every later "
-                    + "append, so a call that meets it is accepted up to that point and "
-                    + "then throws. A caller that retries whole calls re-sends that prefix.",
-                    config.getStorePolicy().name().toLowerCase(java.util.Locale.ROOT).replace('_', '-'));
-        }
-
-        PluginMetrics         m  = null;
-        LabelMapper           lm = null;
-        RemoteWriteHttpClient wc = null;
-        PrometheusReadClient  rc = null;
-        WalWriter             ww = null;
-        WalFlusher            wf = null;
-        RecoveredWal          recovered = null;
-        try {
-            m  = new PluginMetrics();
-            lm = new LabelMapper(config, m);
-
-            String walPathStr = config.resolveWalPath();
-            Path walDir = Paths.get(walPathStr);
-            recovered = WalRecovery.recover(walDir, config.getWalFsync(), effectiveMaxPayload());
-            m.walReplaySamples(recovered.pendingSampleCount());
-
-            ww = WalWriter.resume(walDir, recovered.activeSegment(),
-                    config.getWalSegmentSizeBytes(),
-                    config.getWalMaxSizeBytes(),
-                    config.getWalOverflow(),
-                    config.getWalFsync(),
-                    effectiveMaxPayload());
-
-            wc = new RemoteWriteHttpClient(config, httpHeadersConfig);
-            rc = new PrometheusReadClient(config, m, httpHeadersConfig);
-            wf = new WalFlusher(walDir, ww, recovered.checkpoint(), effectiveMaxPayload(),
-                    wc, config.getBatchSize(), config.getFlushIntervalMs(), m,
-                    org.opennms.plugins.prometheus.remotewriter.wire.RemoteWriteRequestBuilders
-                            .forVersion(config.getWireProtocolVersion()));
-
-            Active built = new Active(lm, null, wc, rc, ww, wf,
-                    recovered.checkpoint(), walDir, m, null);
-            registerGauges(built);
-            m.startJmxReporter();
-            logActivationOrDiff();
-            LOG.info("prometheus-remote-writer WAL active (path={}, pending={} samples, "
-                    + "disk={} bytes, checkpoint={})",
-                    walDir, recovered.pendingSampleCount(), recovered.totalBytesOnDisk(),
-                    recovered.checkpoint().lastSentOffset());
-            wf.start();
-            active = built;
-        } catch (IOException | RuntimeException e) {
-            if (m != null) m.stopJmxReporter();
-            rollbackStart(null, wf, wc, rc, ww);
-            if (e instanceof RuntimeException re) throw re;
-            throw new IllegalStateException("WAL startup failed", e);
-        }
+        Path root = Paths.get(config.resolveOverflowDir());
+        long perShard   = config.overflowBytesPerShard();
+        long segment    = config.overflowSegmentSizeBytes();
+        LOG.info("overflow tier at {} ({} bytes over {} shard(s), {} per shard, full={}, fsync={})",
+                root, config.getOverflowMaxSizeBytes(), config.getWriterShards(), perShard,
+                config.getOverflowFull(), config.getOverflowFsync());
+        return shard -> {
+            Path dir = root.resolve("shard-" + shard);
+            try {
+                OverflowBucket bucket = OverflowBucket.open(dir, perShard, segment,
+                        config.getOverflowFull(), config.getOverflowFsync(),
+                        effectiveMaxPayload(), "shard-" + shard);
+                int recovered = bucket.pendingSamples();
+                if (recovered > 0) {
+                    m.walReplaySamples(recovered);
+                    LOG.info("shard {}: recovered {} pending sample(s) from {}; they ship "
+                            + "before anything offered after this start",
+                            shard, recovered, dir);
+                }
+                return bucket;
+            } catch (IOException e) {
+                throw new IllegalStateException(
+                        "could not open the overflow bucket for shard " + shard + " at " + dir
+                        + " — check that overflow.dir exists and is writable, or set "
+                        + "overflow.max-size-bytes=0 to run without a disk tier", e);
+            }
+        };
     }
 
     /**
@@ -451,11 +412,7 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
         active = null;
 
         LOG.info("prometheus-remote-writer stopping");
-        if (a.walEnabled()) {
-            stopWalMode(a);
-        } else {
-            stopQueueMode(a);
-        }
+        stopPipeline(a);
         // After the drain so a scrape during the grace period still sees the
         // final totals; before the clients go so no gauge reads a closed one.
         a.metrics().stopJmxReporter();
@@ -472,44 +429,27 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
         LAST_HEADERS.set(null);
     }
 
-    private void stopQueueMode(Active a) {
+    private void stopPipeline(Active a) {
         try {
             a.shards().stop(config.getShutdownGracePeriodMs());
             int residual = a.shards().totalDepth();
             if (residual > 0) {
                 LOG.warn("shutdown completed with {} sample(s) still queued; dropping", residual);
             }
+            // Anything on disk is durable and replays on next start, so it is
+            // reported rather than mourned.
+            int pending = a.shards().totalOverflowPending();
+            if (pending > 0) {
+                LOG.info("shutdown with {} sample(s) pending in the overflow tier; "
+                        + "they ship on next start", pending);
+            }
         } catch (RuntimeException e) {
             LOG.warn("error stopping flusher: {}", e.getMessage(), e);
         }
-    }
-
-    private void stopWalMode(Active a) {
         try {
-            // The grace period bounds the stop-thread's wait for the
-            // flusher loop to exit. WAL durability means unflushed
-            // samples are NOT lost — they replay on next start.
-            //
-            // Note: Thread.interrupt() does NOT cancel an in-flight
-            // OkHttp call. A POST stuck on a dead TCP connection will
-            // continue running until http.read-timeout-ms even after
-            // the grace window elapses; the writeClient.shutdown()
-            // below cancels the dispatcher to break out faster.
-            int pending = a.walFlusher().pendingSampleCount();
-            long checkpointAtStop = a.checkpoint().lastSentOffset();
-            a.walFlusher().stop(config.getShutdownGracePeriodMs());
-            if (pending > 0) {
-                LOG.info("WAL shutdown: {} sample(s) drained past checkpoint not yet "
-                        + "acknowledged; will replay from checkpoint offset {} on "
-                        + "next start", pending, checkpointAtStop);
-            }
+            a.shards().close();
         } catch (RuntimeException e) {
-            LOG.warn("error stopping wal-flusher: {}", e.getMessage(), e);
-        }
-        try {
-            a.walWriter().close();
-        } catch (IOException | RuntimeException e) {
-            LOG.warn("error closing wal writer: {}", e.getMessage(), e);
+            LOG.warn("error closing overflow buckets: {}", e.getMessage(), e);
         }
     }
 
@@ -532,11 +472,7 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
             if (samples == null || samples.isEmpty()) return;
             a.metrics().storeSamplesOffered(samples.size());
             try {
-                if (a.walEnabled()) {
-                    storeToWal(a, samples);
-                } else {
-                    storeToQueue(a, samples);
-                }
+                storeMapped(a, samples);
             } catch (StorageException | RuntimeException e) {
                 a.metrics().storeCallFailed();
                 throw e;
@@ -546,7 +482,7 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
         }
     }
 
-    private void storeToQueue(Active a, List<Sample> samples) throws StorageException {
+    private void storeMapped(Active a, List<Sample> samples) throws StorageException {
         // Map first: the policy decisions below need the routed shard, and a
         // sample the mapper skips is not offered to any shard.
         List<MappedSample> mapped = new ArrayList<>(samples.size());
@@ -558,37 +494,56 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
         if (mapped.isEmpty()) return;
 
         if (a.storePolicy() == PrometheusRemoteWriterConfig.StorePolicy.ALL_OR_NOTHING) {
-            // Refuse the whole call without enqueuing anything, so a caller
-            // that retries the whole call on exception (Horizon's offheap
-            // writer) never re-sends samples we already took. The lock makes
-            // check-then-offer atomic against other store() threads; the
+            // Refuse the whole call without placing anything, so a caller that
+            // retries the whole call on exception (Horizon's offheap writer)
+            // never re-sends samples we already took. The lock makes
+            // check-then-place atomic against other store() threads; the
             // flusher only ever removes, which can only make room.
             synchronized (allOrNothingLock) {
                 if (!everyShardHasRoomFor(a.shards(), mapped)) {
-                    a.shards().countDroppedQueueFull(mapped.size());
-                    throw queueFull(mapped.size(), mapped.size(), a.shards().shardCount());
+                    countRefused(a, mapped.size());
+                    throw noRoom(a, mapped.size(), mapped.size());
                 }
-                enqueueAll(a, mapped);
+                acceptAll(a, mapped);
             }
             return;
         }
-        enqueueAll(a, mapped);
+        acceptAll(a, mapped);
     }
 
-    /** PARTIAL: attempt every sample so a full shard does not discard
-     *  samples bound for shards with room (#156). Unlike storeToWal, which
-     *  stops at the first refusal because a full WAL is full for every later
-     *  append, shards fill independently. One exception per call, not per
-     *  refused sample: under overload that is tens of thousands of stack
+    /** PARTIAL: attempt every sample so a shard that is out of room does not
+     *  discard samples bound for shards with room (#156). Shards fill
+     *  independently, and with a disk tier configured a shard is out of room
+     *  only when its bucket is at its bound too. One exception per call, not
+     *  per refused sample: under overload that is tens of thousands of stack
      *  traces a second saved. */
-    private static void enqueueAll(Active a, List<MappedSample> mapped) throws StorageException {
+    private static void acceptAll(Active a, List<MappedSample> mapped) throws StorageException {
         int refused = 0;
-        for (MappedSample m : mapped) {
-            if (!a.shards().tryEnqueue(m)) refused++;
+        try {
+            for (MappedSample m : mapped) {
+                if (a.shards().accept(m) == Shards.Acceptance.REFUSED) refused++;
+            }
+        } catch (java.io.UncheckedIOException io) {
+            // The disk tier could not be written. Surface it as a typed error
+            // rather than an unchecked one, so OpenNMS backs off instead of
+            // seeing the plugin throw something it does not model.
+            throw new StorageException(
+                "prometheus-remote-writer could not write to the overflow tier: "
+                + io.getMessage() + " — check that overflow.dir is present and writable",
+                io.getCause());
         }
         if (refused > 0) {
+            countRefused(a, refused);
+            throw noRoom(a, refused, mapped.size());
+        }
+    }
+
+    /** Book refusals against whichever tier was the one that ran out. */
+    private static void countRefused(Active a, int refused) {
+        if (a.shards().overflowEnabled()) {
+            a.shards().countDroppedOverflowFull(refused);
+        } else {
             a.shards().countDroppedQueueFull(refused);
-            throw queueFull(refused, mapped.size(), a.shards().shardCount());
         }
     }
 
@@ -596,62 +551,21 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
         int[] needed = new int[shards.shardCount()];
         for (MappedSample m : mapped) needed[shards.shardOf(m)]++;
         for (int shard = 0; shard < needed.length; shard++) {
-            if (needed[shard] > shards.remainingCapacity(shard)) return false;
+            if (needed[shard] > 0 && !shards.hasRoomFor(shard, needed[shard])) return false;
         }
         return true;
     }
 
-    private static StorageException queueFull(int refused, int offered, int shards) {
-        return new StorageException("prometheus-remote-writer queue full: refused " + refused + " of "
-                + offered + " sample(s) (writer.shards=" + shards + "); see samples_dropped_queue_full_total");
-    }
-
-    private void storeToWal(Active a, List<Sample> samples) throws StorageException {
-        for (int i = 0; i < samples.size(); i++) {
-            Sample s = samples.get(i);
-            MappedSample mapped = a.labelMapper().map(s);
-            if (mapped == null) { a.metrics().samplesDroppedUnmapped(1); continue; }
-            byte[] encoded = WalEntryCodec.encode(mapped);
-            try {
-                WalWriter.AppendResult r = a.walWriter().appendWithStats(encoded);
-                if (r.evictedFrames() > 0) {
-                    a.metrics().samplesDroppedWalFull(r.evictedFrames());
-                }
-                // Count what actually went to disk: 4-byte length + payload
-                // + 4-byte CRC = Frame.HEADER_BYTES + encoded.length.
-                a.metrics().walBytesWritten(org.opennms.plugins.prometheus.remotewriter.wal.Frame.HEADER_BYTES + encoded.length);
-            } catch (WalFullException full) {
-                // Bump the counter by the number of samples actually
-                // refused — this sample plus any later ones the caller
-                // had queued. Using `samples.size()` would double-count
-                // samples that already landed earlier in this batch and
-                // could over-count by an entire batch on a typical
-                // multi-sample store() call. The eviction count carried
-                // on the exception covers any frames already evicted
-                // BEFORE the giving-up throw (rare; only when a single
-                // frame exceeds the entire cap).
-                int refused = samples.size() - i;
-                a.metrics().samplesDroppedWalFull(
-                    (long) refused + full.evictedFramesBeforeFailure());
-                throw new StorageException(
-                    "WAL is full under backpressure policy (" + full.getMessage() + "); "
-                    + "increase wal.max-size-bytes, switch to wal.overflow=drop-oldest, "
-                    + "or resolve the downstream outage that is preventing drain",
-                    full);
-            } catch (IllegalStateException stateEx) {
-                // Triggered when start() partially rolled back, or when
-                // stop() snapped the writer between SPI snapshot of
-                // Active and the appendWithStats call. Wrap as
-                // StorageException so OpenNMS sees a typed error rather
-                // than an unchecked exception.
-                throw new StorageException(
-                    "WAL writer is not in an appendable state ("
-                    + stateEx.getMessage() + ") — plugin may be stopping or "
-                    + "in a recovered-but-failed state", stateEx);
-            } catch (IOException io) {
-                throw new StorageException("WAL append failed: " + io.getMessage(), io);
-            }
-        }
+    private static StorageException noRoom(Active a, int refused, int offered) {
+        return a.shards().overflowEnabled()
+                ? new StorageException("prometheus-remote-writer overflow tier full: refused "
+                        + refused + " of " + offered + " sample(s) (writer.shards="
+                        + a.shards().shardCount() + "); raise overflow.max-size-bytes, switch to "
+                        + "overflow.full=drop-oldest, or resolve the downstream outage that is "
+                        + "preventing drain; see samples_dropped_overflow_full_total")
+                : new StorageException("prometheus-remote-writer queue full: refused " + refused
+                        + " of " + offered + " sample(s) (writer.shards=" + a.shards().shardCount()
+                        + "); see samples_dropped_queue_full_total");
     }
 
     @Override
@@ -859,56 +773,50 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
         m.registerLongGauge(PluginMetrics.DELETE_NOOP,              this::getDeleteNoopTotal);
         m.registerLongGauge(PluginMetrics.METADATA_DENYLIST_BLOCKED, a.labelMapper()::getMetadataDenylistBlockedCount);
 
-        if (a.walEnabled()) {
-            registerWalGauges(a);
-        } else {
-            m.registerLongGauge(PluginMetrics.QUEUE_DEPTH,              () -> (long) a.shards().totalDepth());
-            m.registerLongGauge(PluginMetrics.QUEUE_DEPTH_HIGH_WATER,   a.shards()::depthHighWater);
-            m.registerLongGauge(PluginMetrics.SAMPLES_DROPPED_QUEUE_FULL, a.shards()::totalSamplesDroppedQueueFull);
-            // Per-shard gauges only when actually sharded — keeps the N=1
-            // metric surface byte-identical to the classic pipeline.
-            int shards = a.shards().shardCount();
-            if (shards > 1) {
-                m.registerLongGauge(PluginMetrics.SHARD_SKEW_PCT, a.shards()::skewPct);
-                for (int i = 0; i < shards; i++) {
-                    final int shard = i;
-                    m.registerLongGauge(PluginMetrics.shardQueueDepthName(shard),
-                            () -> (long) a.shards().depth(shard));
-                }
+        m.registerLongGauge(PluginMetrics.QUEUE_DEPTH,              () -> (long) a.shards().totalDepth());
+        m.registerLongGauge(PluginMetrics.QUEUE_DEPTH_HIGH_WATER,   a.shards()::depthHighWater);
+        m.registerLongGauge(PluginMetrics.SAMPLES_DROPPED_QUEUE_FULL, a.shards()::totalSamplesDroppedQueueFull);
+        // Per-shard gauges only when actually sharded — keeps the N=1
+        // metric surface byte-identical to the classic pipeline.
+        int shards = a.shards().shardCount();
+        if (shards > 1) {
+            m.registerLongGauge(PluginMetrics.SHARD_SKEW_PCT, a.shards()::skewPct);
+            for (int i = 0; i < shards; i++) {
+                final int shard = i;
+                m.registerLongGauge(PluginMetrics.shardQueueDepthName(shard),
+                        () -> (long) a.shards().depth(shard));
             }
         }
+        if (a.shards().overflowEnabled()) {
+            registerOverflowGauges(a);
+        }
     }
 
-    private void registerWalGauges(Active a) {
+    private void registerOverflowGauges(Active a) {
         PluginMetrics m = a.metrics();
-        Path walDir = a.walDir();
-        // wal_disk_usage_bytes: sum of .seg file sizes in the WAL
-        // directory. A dir scan per gauge-read; acceptable because the
-        // Karaf shell and Dropwizard registry only snapshot on demand.
-        m.registerLongGauge(PluginMetrics.WAL_DISK_USAGE_BYTES, () -> {
-            try { return a.walWriter().currentTotalBytes(); }
-            catch (IOException e) { return -1L; }
-        });
-        m.registerLongGauge(PluginMetrics.WAL_SEGMENTS_ACTIVE, () -> {
-            try (var stream = java.nio.file.Files.newDirectoryStream(
-                    walDir, "*" + WalSegment.SEG_EXT)) {
-                long count = 0;
-                for (@SuppressWarnings("unused") Path p : stream) count++;
-                return count;
-            } catch (IOException e) { return -1L; }
-        });
+        m.registerLongGauge(PluginMetrics.OVERFLOW_PENDING_SAMPLES,
+                () -> (long) a.shards().totalOverflowPending());
+        m.registerLongGauge(PluginMetrics.OVERFLOW_BYTES,       a.shards()::totalOverflowBytes);
+        m.registerLongGauge(PluginMetrics.SAMPLES_SPILLED,      a.shards()::totalSamplesSpilled);
+        m.registerLongGauge(PluginMetrics.SAMPLES_DROPPED_OVERFLOW_FULL,
+                a.shards()::totalSamplesDroppedOverflowFull);
+        m.registerLongGauge(PluginMetrics.SAMPLES_EVICTED_OVERFLOW,
+                a.shards()::totalSamplesEvictedOverflow);
+        // Per-shard depth is what shows hash skew filling one bucket while
+        // its siblings idle — the failure arm G ran into on the memory tier.
+        int shards = a.shards().shardCount();
+        for (int i = 0; i < shards; i++) {
+            final int shard = i;
+            m.registerLongGauge(PluginMetrics.OVERFLOW_PENDING_SAMPLES_SHARD + "_" + shard,
+                    () -> (long) a.shards().overflowPending(shard));
+        }
     }
 
-    private static void rollbackStart(Shards sh, WalFlusher wf, RemoteWriteHttpClient wc,
-                                      PrometheusReadClient rc, WalWriter ww) {
+    private static void rollbackStart(Shards sh, RemoteWriteHttpClient wc,
+                                      PrometheusReadClient rc) {
         if (sh != null) {
             try { sh.stop(0); } catch (RuntimeException ignored) {}
-        }
-        if (wf != null) {
-            try { wf.stop(0); } catch (RuntimeException ignored) {}
-        }
-        if (ww != null) {
-            try { ww.close(); } catch (IOException | RuntimeException ignored) {}
+            try { sh.close(); } catch (RuntimeException ignored) {}
         }
         if (wc != null) {
             try { wc.shutdown(); } catch (RuntimeException ignored) {}

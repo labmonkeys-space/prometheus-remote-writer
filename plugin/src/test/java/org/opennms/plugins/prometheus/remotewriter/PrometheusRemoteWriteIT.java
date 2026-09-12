@@ -69,6 +69,7 @@ class PrometheusRemoteWriteIT {
         PrometheusRemoteWriterConfig c = new PrometheusRemoteWriterConfig();
         String base = "http://" + prometheus.getHost() + ":" + prometheus.getMappedPort(9090);
         c.setWriteUrl(base + "/api/v1/write");
+        c.setOverflowMaxSizeBytes(0);   // memory-only: these suites pin the queue path
         c.setReadUrl(base);
         c.setBatchSize(10);
         c.setFlushIntervalMs(100);
@@ -254,6 +255,7 @@ class PrometheusRemoteWriteIT {
         // fixture's default-config storage.
         storage.stop();
         PrometheusRemoteWriterConfig c = new PrometheusRemoteWriterConfig();
+        c.setOverflowMaxSizeBytes(0);   // memory-only: these suites pin the queue path
         String base = "http://" + prometheus.getHost() + ":" + prometheus.getMappedPort(9090);
         c.setWriteUrl(base + "/api/v1/write");
         c.setReadUrl(base);
@@ -368,6 +370,7 @@ class PrometheusRemoteWriteIT {
         // carry meta tags with those names.
         storage.stop();
         PrometheusRemoteWriterConfig c = new PrometheusRemoteWriterConfig();
+        c.setOverflowMaxSizeBytes(0);   // memory-only: these suites pin the queue path
         String base = "http://" + prometheus.getHost() + ":" + prometheus.getMappedPort(9090);
         c.setWriteUrl(base + "/api/v1/write");
         c.setReadUrl(base);
@@ -440,6 +443,7 @@ class PrometheusRemoteWriteIT {
         // `instance` because v0.4 reserved `instance` (now a default emit).
         storage.stop();
         PrometheusRemoteWriterConfig c = new PrometheusRemoteWriterConfig();
+        c.setOverflowMaxSizeBytes(0);   // memory-only: these suites pin the queue path
         String base = "http://" + prometheus.getHost() + ":" + prometheus.getMappedPort(9090);
         c.setWriteUrl(base + "/api/v1/write");
         c.setReadUrl(base);
@@ -506,6 +510,7 @@ class PrometheusRemoteWriteIT {
         // `instance` because v0.4 reserved `instance` (now a default emit).
         storage.stop();
         PrometheusRemoteWriterConfig c = new PrometheusRemoteWriterConfig();
+        c.setOverflowMaxSizeBytes(0);   // memory-only: these suites pin the queue path
         String base = "http://" + prometheus.getHost() + ":" + prometheus.getMappedPort(9090);
         c.setWriteUrl(base + "/api/v1/write");
         c.setReadUrl(base);
@@ -625,6 +630,7 @@ class PrometheusRemoteWriteIT {
         // consistency (e.g., `opennms-prod` across SNMP and JMX data).
         storage.stop();
         PrometheusRemoteWriterConfig c = new PrometheusRemoteWriterConfig();
+        c.setOverflowMaxSizeBytes(0);   // memory-only: these suites pin the queue path
         String base = "http://" + prometheus.getHost() + ":" + prometheus.getMappedPort(9090);
         c.setWriteUrl(base + "/api/v1/write");
         c.setReadUrl(base);
@@ -755,6 +761,7 @@ class PrometheusRemoteWriteIT {
         // getTimeSeriesData).
         storage.stop();
         PrometheusRemoteWriterConfig c = new PrometheusRemoteWriterConfig();
+        c.setOverflowMaxSizeBytes(0);   // memory-only: these suites pin the queue path
         String base = "http://" + prometheus.getHost() + ":" + prometheus.getMappedPort(9090);
         c.setWriteUrl(base + "/api/v1/write");
         c.setReadUrl(base);
@@ -1044,6 +1051,7 @@ class PrometheusRemoteWriteIT {
         // Now flip to label-values-first and re-run; expect the same set.
         storage.stop();
         PrometheusRemoteWriterConfig c = new PrometheusRemoteWriterConfig();
+        c.setOverflowMaxSizeBytes(0);   // memory-only: these suites pin the queue path
         String base = "http://" + prometheus.getHost() + ":" + prometheus.getMappedPort(9090);
         c.setWriteUrl(base + "/api/v1/write");
         c.setReadUrl(base);
@@ -1119,6 +1127,7 @@ class PrometheusRemoteWriteIT {
 
         storage.stop();
         PrometheusRemoteWriterConfig c = new PrometheusRemoteWriterConfig();
+        c.setOverflowMaxSizeBytes(0);   // memory-only: these suites pin the queue path
         String base = "http://" + prometheus.getHost() + ":" + prometheus.getMappedPort(9090);
         c.setWriteUrl(base + "/api/v1/write");
         c.setReadUrl(base);

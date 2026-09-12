@@ -234,10 +234,18 @@ class PrometheusRemoteWriterStorageTest {
         }
     }
 
+    /**
+     * A memory-only pipeline: no disk tier, which is what the cases in this
+     * class assert. The queue-full contract they pin — a full shard refuses
+     * and throws — is exactly the {@code overflow.max-size-bytes=0} behaviour
+     * after 0.8.0; spilling is covered in {@code OverflowTierTest} and the
+     * integration suites, which configure a directory.
+     */
     private static PrometheusRemoteWriterConfig minimal() {
         PrometheusRemoteWriterConfig c = new PrometheusRemoteWriterConfig();
         c.setWriteUrl("https://example.com/api/v1/push");
         c.setReadUrl("https://example.com/prometheus");
+        c.setOverflowMaxSizeBytes(0);
         return c;
     }
 
@@ -422,6 +430,7 @@ class PrometheusRemoteWriterStorageTest {
             server.enqueue(new MockResponse().setResponseCode(204));
 
             PrometheusRemoteWriterConfig c = new PrometheusRemoteWriterConfig();
+            c.setOverflowMaxSizeBytes(0);   // memory-only pipeline
             c.setWriteUrl(server.url("/api/v1/push").toString());
             c.setReadUrl(server.url("/prometheus").toString());
             c.setBatchSize(10);
@@ -468,6 +477,7 @@ class PrometheusRemoteWriterStorageTest {
             server.enqueue(new MockResponse().setResponseCode(204));
 
             PrometheusRemoteWriterConfig c = new PrometheusRemoteWriterConfig();
+            c.setOverflowMaxSizeBytes(0);   // memory-only pipeline
             c.setWriteUrl(server.url("/api/v1/push").toString());
             c.setReadUrl(server.url("/prometheus").toString());
             c.setBatchSize(10);
@@ -525,6 +535,7 @@ class PrometheusRemoteWriterStorageTest {
                            + "]}"));
 
             PrometheusRemoteWriterConfig c = new PrometheusRemoteWriterConfig();
+            c.setOverflowMaxSizeBytes(0);   // memory-only pipeline
             c.setWriteUrl(server.url("/api/v1/push").toString());
             c.setReadUrl(server.url("").toString());
             c.setShutdownGracePeriodMs(1_000);
@@ -554,6 +565,7 @@ class PrometheusRemoteWriterStorageTest {
     @Test
     void storage_refuses_to_start_when_header_config_was_never_delivered() {
         PrometheusRemoteWriterConfig c = new PrometheusRemoteWriterConfig();
+        c.setOverflowMaxSizeBytes(0);   // memory-only pipeline
         c.setWriteUrl("http://localhost:9090/api/v1/push");
         c.setReadUrl("http://localhost:9090");
 
@@ -582,6 +594,7 @@ class PrometheusRemoteWriterStorageTest {
         try (MockWebServer server = new MockWebServer()) {
             server.start();
             PrometheusRemoteWriterConfig c = new PrometheusRemoteWriterConfig();
+            c.setOverflowMaxSizeBytes(0);   // memory-only pipeline
             c.setWriteUrl(server.url("/api/v1/push").toString());
             c.setReadUrl(server.url("/prometheus").toString());
             c.setShutdownGracePeriodMs(1_000);
@@ -605,6 +618,7 @@ class PrometheusRemoteWriterStorageTest {
     @Test
     void invalid_http_headers_leave_the_storage_inert() {
         PrometheusRemoteWriterConfig c = new PrometheusRemoteWriterConfig();
+        c.setOverflowMaxSizeBytes(0);   // memory-only pipeline
         c.setWriteUrl("http://localhost:9090/api/v1/push");
         c.setReadUrl("http://localhost:9090/prometheus");
 
@@ -691,6 +705,7 @@ class PrometheusRemoteWriterStorageTest {
             server.enqueue(new MockResponse().setResponseCode(400).setBody("bad labels"));
 
             PrometheusRemoteWriterConfig c = new PrometheusRemoteWriterConfig();
+            c.setOverflowMaxSizeBytes(0);   // memory-only pipeline
             c.setWriteUrl(server.url("/api/v1/push").toString());
             c.setReadUrl(server.url("/prometheus").toString());
             c.setBatchSize(10);
@@ -1092,6 +1107,7 @@ class PrometheusRemoteWriterStorageTest {
     private static PrometheusRemoteWriterConfig stalledFlusherConfig(MockWebServer server, int queueCapacity) {
         PrometheusRemoteWriterConfig c = new PrometheusRemoteWriterConfig();
         c.setWriteUrl(server.url("/api/v1/push").toString());
+        c.setOverflowMaxSizeBytes(0);   // memory-only: these cases pin the refusal contract
         c.setReadUrl(server.url("/prometheus").toString());
         c.setQueueCapacity(queueCapacity);
         c.setStorePolicy("partial"); // pin: AUTO would read a JVM-global property another test may set

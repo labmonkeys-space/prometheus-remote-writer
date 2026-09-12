@@ -54,7 +54,39 @@ public final class SampleQueue {
         Objects.requireNonNull(sample, "sample");
         if (!queue.offer(sample)) return false;
         samplesEnqueued.incrementAndGet();
+        signalArrival();
         return true;
+    }
+
+    /**
+     * Monitor a consumer can wait on for a sample to show up without taking
+     * one. {@link #pollBatch} removes as it waits, which is fine when the
+     * consumer owns the queue outright; a shard with a disk tier cannot do
+     * that, because a batch removed but not yet registered as in flight can be
+     * stranded by a concurrent spill. Such a consumer waits here and then
+     * drains under the shard's accept lock, so taking the samples and
+     * registering them is one step.
+     */
+    private final Object arrival = new Object();
+
+    private void signalArrival() {
+        synchronized (arrival) {
+            arrival.notifyAll();
+        }
+    }
+
+    /**
+     * Wait up to {@code timeoutMs} for the queue to be non-empty, without
+     * removing anything. Returns immediately when it already is. A spurious
+     * return is harmless: the caller drains and finds nothing.
+     */
+    public void awaitArrival(long timeoutMs) throws InterruptedException {
+        if (timeoutMs <= 0) return;
+        synchronized (arrival) {
+            // Checked inside the monitor, and tryEnqueue signals inside it
+            // after the offer, so an arrival cannot slip between the two.
+            if (queue.isEmpty()) arrival.wait(timeoutMs);
+        }
     }
 
     /** What {@link #pollBatch(int, long, TimeUnit, long)} hands back: the

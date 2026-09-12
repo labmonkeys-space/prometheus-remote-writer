@@ -147,9 +147,10 @@ to keep state across restarts.
 
 ## What's NOT (yet) exercised here
 
-- **WAL on Sentinel**: the plugin runs with `wal.enabled=false` in this
-  spike. Once the basic sample path is verified, a follow-up scenario
-  adds a writable WAL volume.
+- **The disk overflow tier on Sentinel**: the plugin runs with
+  `overflow.max-size-bytes=0` in this spike, so a full queue refuses
+  instead of spilling. Once the basic sample path is verified, a follow-up
+  scenario mounts a writable volume and turns the tier on.
 - **Mimir / VictoriaMetrics / Cortex backends**: only Prometheus is
   wired up. Same plugin config shape applies; per-backend variants are
   follow-ups.
