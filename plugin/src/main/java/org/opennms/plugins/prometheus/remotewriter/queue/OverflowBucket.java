@@ -70,6 +70,8 @@ public final class OverflowBucket implements Closeable {
     private final Path dir;
     private final WalWriter writer;
     private final Checkpoint checkpoint;
+    private final FullPolicy fullPolicy;
+    private final long maxSizeBytes;
     private final int maxPayload;
     private final String name;
 
@@ -91,19 +93,41 @@ public final class OverflowBucket implements Closeable {
     private volatile long writeOffset;
 
     private OverflowBucket(Path dir, WalWriter writer, Checkpoint checkpoint,
+                           FullPolicy fullPolicy, long maxSizeBytes,
                            int maxPayload, String name,
                            int recoveredPending, long writeOffset) {
         this.dir             = dir;
         this.writer          = writer;
         this.checkpoint      = checkpoint;
+        this.fullPolicy      = fullPolicy;
+        this.maxSizeBytes    = maxSizeBytes;
         this.maxPayload      = maxPayload;
         this.name            = name;
         this.reader          = new WalReader(dir, checkpoint.lastSentOffset(), maxPayload);
         this.pending         = recoveredPending;
         this.writeOffset     = writeOffset;
-        // Pin the eviction floor at the checkpoint so a drop-oldest cannot
-        // discard a segment the reader is about to scan.
-        writer.setReaderOffsetFloor(checkpoint.lastSentOffset());
+        pinEvictionFloor();
+    }
+
+    /**
+     * Where eviction is allowed to reach.
+     *
+     * <p>Under {@link FullPolicy#REFUSE} the floor is the checkpoint, so
+     * nothing the reader still needs can be discarded — a full bucket refuses
+     * instead.
+     *
+     * <p>Under {@link FullPolicy#DROP_OLDEST} there is no floor. The operator
+     * has said newest-wins, and a floor at the checkpoint would make the
+     * policy a no-op precisely when it is needed: during an outage the
+     * checkpoint is frozen and every surviving segment sits above it, so
+     * eviction would find nothing to take and the append would be refused.
+     * Discarding acknowledged-but-unshipped data is the whole point; what has
+     * to follow is moving the reader and checkpoint past the hole, which
+     * {@link #repositionAfterEviction()} does.
+     */
+    private void pinEvictionFloor() {
+        writer.setReaderOffsetFloor(
+                fullPolicy == FullPolicy.DROP_OLDEST ? 0L : checkpoint.lastSentOffset());
     }
 
     /**
@@ -123,8 +147,8 @@ public final class OverflowBucket implements Closeable {
                         ? WalWriter.OverflowPolicy.DROP_OLDEST
                         : WalWriter.OverflowPolicy.BACKPRESSURE,
                 fsync, maxPayload);
-        return new OverflowBucket(dir, writer, recovered.checkpoint(), maxPayload,
-                name, (int) recovered.pendingSampleCount(), writer.currentOffset());
+        return new OverflowBucket(dir, writer, recovered.checkpoint(), fullPolicy, maxSizeBytes,
+                maxPayload, name, (int) recovered.pendingSampleCount(), writer.currentOffset());
     }
 
     /**
@@ -139,7 +163,10 @@ public final class OverflowBucket implements Closeable {
             WalWriter.AppendResult r = writer.appendWithStats(encoded);
             writeOffset = r.offsetAfter();
             pending++;
-            if (r.evictedFrames() > 0) pending = Math.max(0, pending - r.evictedFrames());
+            if (r.evictedFrames() > 0) {
+                pending = Math.max(0, pending - r.evictedFrames());
+                repositionAfterEviction();
+            }
             return new AppendResult(true, r.evictedFrames(),
                     org.opennms.plugins.prometheus.remotewriter.wal.Frame.HEADER_BYTES
                             + encoded.length);
@@ -154,6 +181,51 @@ public final class OverflowBucket implements Closeable {
             }
             return AppendResult.REFUSED;
         }
+    }
+
+    /**
+     * Move the checkpoint and reader past frames an eviction deleted.
+     *
+     * <p>Only reachable under {@code drop-oldest}, which can discard segments
+     * the reader has not drained. Leaving the checkpoint behind the oldest
+     * surviving segment would send the reader looking for frames that are no
+     * longer there.
+     */
+    private void repositionAfterEviction() throws IOException {
+        long oldest = oldestSegmentStart();
+        if (oldest <= checkpoint.lastSentOffset()) return;
+        try {
+            checkpoint.advance(oldest);
+        } catch (IOException | RuntimeException e) {
+            LOG.warn("{}: could not move the checkpoint past evicted segments; the reader will "
+                    + "skip the hole on its next scan", name, e);
+        }
+        pinEvictionFloor();
+        rewind("after-eviction");
+    }
+
+    /** Lowest start offset still on disk, or the checkpoint when none remain. */
+    private long oldestSegmentStart() throws IOException {
+        long oldest = Long.MAX_VALUE;
+        try (java.util.stream.Stream<Path> files = java.nio.file.Files.list(dir)) {
+            for (Path p : (Iterable<Path>) files::iterator) {
+                String n = p.getFileName().toString();
+                if (!n.endsWith(org.opennms.plugins.prometheus.remotewriter.wal.WalSegment.SEG_EXT)) {
+                    continue;
+                }
+                try {
+                    oldest = Math.min(oldest, Long.parseLong(n.substring(0, n.length() - 4)));
+                } catch (NumberFormatException ignored) {
+                    // Not a segment we wrote; leave it alone.
+                }
+            }
+        }
+        return oldest == Long.MAX_VALUE ? checkpoint.lastSentOffset() : oldest;
+    }
+
+    /** True while the bucket is below its size bound. */
+    public boolean hasRoom() {
+        return bytes() < maxSizeBytes;
     }
 
     /** Read up to {@code maxSamples} unacknowledged samples, decoded. */
@@ -196,7 +268,7 @@ public final class OverflowBucket implements Closeable {
         // Best-effort: eviction floor and GC. A failure here only delays
         // reclaim; the next successful batch runs them again.
         try {
-            writer.setReaderOffsetFloor(newOffset);
+            pinEvictionFloor();
             long reclaimed = Checkpoint.gcSegments(dir, newOffset);
             if (reclaimed > 0) {
                 LOG.debug("{}: reclaimed {} bytes at checkpoint {}", name, reclaimed, newOffset);
@@ -215,7 +287,7 @@ public final class OverflowBucket implements Closeable {
      */
     public void rewind(String reason) {
         long offset = checkpoint.lastSentOffset();
-        writer.setReaderOffsetFloor(offset);
+        pinEvictionFloor();
         try {
             reader.close();
         } catch (IOException e) {

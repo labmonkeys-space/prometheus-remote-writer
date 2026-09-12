@@ -181,6 +181,11 @@ new version, with no migration step. See <<wire-protocols>>.
 | `overflow.full=drop-oldest`
 | Dashboards showing "the last N hours" — recency over history; tolerates
   silent eviction of the oldest samples better than a `store()` exception.
+  Note that eviction discards the oldest segment whether or not the backend
+  has taken it: during an outage the checkpoint is frozen, so refusing to
+  evict unacknowledged data would make the policy a no-op exactly when it is
+  needed. The shard moves its reader past the hole and carries on with the
+  newest data.
 
 | `overflow.max-size-bytes=0`
 | A local backend on the same box that is effectively always up, or a test

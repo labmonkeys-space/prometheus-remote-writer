@@ -182,6 +182,50 @@ class OverflowBucketTest {
     }
 
     @Test
+    void drop_oldest_keeps_accepting_after_the_checkpoint_has_advanced(@TempDir Path dir)
+            throws IOException {
+        // The case the first version of this suite missed. With the checkpoint
+        // still at 0 the eviction floor is 0 and eviction is unrestricted, so
+        // drop-oldest looked fine. Once the checkpoint moves, a floor pinned to
+        // it makes every surviving segment unevictable — and during an outage
+        // the checkpoint is frozen, so the policy silently became `refuse`
+        // exactly when it was needed.
+        try (OverflowBucket b = open(dir, 8 * 1024, 1024, OverflowBucket.FullPolicy.DROP_OLDEST)) {
+            for (int i = 0; i < 20; i++) b.append(sample(i));
+            OverflowBucket.Batch first = b.nextBatch(5);
+            assertThat(first.isEmpty()).isFalse();
+            assertThat(b.acknowledge(first.newOffset(), first.size())).isNotNegative();
+            assertThat(b.acknowledge(first.newOffset(), 0)).isNotNegative();
+
+            int evicted = 0;
+            for (int i = 20; i < 500; i++) {
+                OverflowBucket.AppendResult r = b.append(sample(i));
+                assertThat(r.accepted())
+                        .as("drop-oldest must keep accepting once the checkpoint has moved")
+                        .isTrue();
+                evicted += r.evictedSamples();
+            }
+            assertThat(evicted).isPositive();
+            assertThat(b.bytes()).isLessThanOrEqualTo(8 * 1024);
+        }
+    }
+
+    @Test
+    void a_bucket_evicted_out_from_under_its_reader_stays_readable(@TempDir Path dir)
+            throws IOException {
+        // Eviction under drop-oldest can delete frames the reader has not
+        // reached. The checkpoint has to move past the hole, or the next scan
+        // goes looking for segments that are gone.
+        try (OverflowBucket b = open(dir, 8 * 1024, 1024, OverflowBucket.FullPolicy.DROP_OLDEST)) {
+            for (int i = 0; i < 400; i++) b.append(sample(i));
+
+            OverflowBucket.Batch batch = b.nextBatch(50);
+            assertThat(batch.isEmpty()).as("the surviving tail must still be readable").isFalse();
+            assertThat(b.acknowledge(batch.newOffset(), batch.size())).isNotNegative();
+        }
+    }
+
+    @Test
     void buckets_in_different_directories_do_not_share_segments(@TempDir Path root)
             throws IOException {
         Path a = root.resolve("shard-0");

@@ -213,7 +213,19 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
         warnIfWireV2();
         logEffectiveAuth();
 
-        startPipeline();
+        try {
+            startPipeline();
+        } catch (IllegalStateException e) {
+            // Same contract as the config and header failures above: leave the
+            // plugin inactive and let the next cfg save revive it, rather than
+            // throwing and marking the Blueprint container permanently failed.
+            // This became reachable in 0.8.0 — the disk tier is on by default,
+            // so an unresolvable or unwritable overflow.dir now fails a start
+            // that used to succeed with wal.enabled=false.
+            LOG.error("prometheus-remote-writer not started — {}. The plugin will activate on "
+                    + "the next save of etc/org.opennms.plugins.tss.prometheusremotewriter.cfg "
+                    + "once the problem is resolved.", e.getMessage());
+        }
     }
 
     /**

@@ -244,6 +244,55 @@ class OverflowFlusherTest {
     }
 
     @Test
+    void a_rewound_disk_batch_is_not_overtaken_by_the_next_one(@TempDir Path dir)
+            throws Exception {
+        // The builder runs one payload ahead of the sender (D2). For the disk
+        // tier that is only safe if it stops at one: the reader position is
+        // shared state coupled to send outcomes. Read batch 2 while batch 1 is
+        // in flight, and batch 1's rewind is undone by batch 2's
+        // acknowledgement advancing the checkpoint straight past batch 1's
+        // frames — which are then never sent, and whose series arrives out of
+        // order behind batch 2's.
+        openBucket(dir);
+        for (int i = 1; i <= 6; i++) bucket.append(sample(i));
+
+        // Exhaust the retries on the first request, then accept everything.
+        server.enqueue(new MockResponse().setResponseCode(503));
+        server.enqueue(new MockResponse().setResponseCode(503));
+        for (int i = 0; i < 20; i++) server.enqueue(new MockResponse().setResponseCode(204));
+
+        flusher = flusher(2);   // three batches of two
+        flusher.start();
+
+        await().atMost(Duration.ofSeconds(20))
+                .until(() -> counter(PluginMetrics.SAMPLES_WRITTEN) >= 6);
+
+        assertThat(counter(PluginMetrics.SAMPLES_WRITTEN))
+                .as("every sample ships, including the batch that was rewound")
+                .isEqualTo(6);
+        assertThat(counter(PluginMetrics.SAMPLES_DROPPED_5XX)).isZero();
+        await().atMost(Duration.ofSeconds(10)).until(() -> bucket.isEmpty());
+    }
+
+    @Test
+    void the_bucket_is_fsynced_on_the_flush_interval(@TempDir Path dir) throws Exception {
+        // overflow.fsync=batch is documented as "loses at most one
+        // flush-interval window". The segment layer only forces under
+        // `always`, so that promise is only true if something calls flush() on
+        // the boundary — and for a while nothing did, making the real RPO the
+        // whole unflushed segment.
+        OverflowBucket real = OverflowBucket.open(dir, 1L << 20, 64 * 1024,
+                OverflowBucket.FullPolicy.REFUSE, FsyncPolicy.BATCH, MAX_PAYLOAD, "shard-0");
+        bucket = org.mockito.Mockito.spy(real);
+
+        flusher = flusher(10);
+        flusher.start();
+
+        await().atMost(Duration.ofSeconds(10)).untilAsserted(() ->
+                org.mockito.Mockito.verify(bucket, org.mockito.Mockito.atLeastOnce()).flush());
+    }
+
+    @Test
     void latency_of_a_spilled_sample_counts_from_its_original_store(@TempDir Path dir)
             throws Exception {
         // The stamp rides in the frame, so time on disk is inside the budget

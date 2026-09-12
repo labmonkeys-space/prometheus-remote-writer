@@ -105,6 +105,7 @@ public final class Shards implements java.io.Closeable {
     /** Maximum total depth seen right after a successful offer: the peak
      *  the writer threads actually reached, not a later sample of it. */
     private final AtomicLong depthHighWater = new AtomicLong();
+    private final PluginMetrics metrics;
 
     /** No disk tier — the pre-0.8.0 pipeline, where a full shard refuses. */
     public Shards(int shardCount,
@@ -150,8 +151,10 @@ public final class Shards implements java.io.Closeable {
         // slots to integer division (first `remainder` shards get one extra).
         // Config validation guarantees totalQueueCapacity / shardCount >=
         // batchSize, so every shard can fill a batch.
+        this.metrics = metrics;
         int base = totalQueueCapacity / shardCount;
         int remainder = totalQueueCapacity % shardCount;
+        try {
         for (int i = 0; i < shardCount; i++) {
             queues[i] = new SampleQueue(base + (i < remainder ? 1 : 0));
             acceptLocks[i] = new java.util.concurrent.locks.ReentrantLock();
@@ -182,6 +185,19 @@ public final class Shards implements java.io.Closeable {
                     },
                     httpClient, batchSize, flushIntervalMs, lingerMs,
                     metrics, builder, threadName);
+        }
+        } catch (RuntimeException e) {
+            // A bucket that failed to open leaves the ones before it holding
+            // segment file handles, and the half-built Shards is unreachable
+            // for anyone to close. Blueprint retries start() on every config
+            // reload, so leaking here leaks per reload.
+            if (buckets != null) {
+                for (OverflowBucket b : buckets) {
+                    if (b == null) continue;
+                    try { b.close(); } catch (RuntimeException ignored) { /* best effort */ }
+                }
+            }
+            throw e;
         }
     }
 
@@ -249,9 +265,19 @@ public final class Shards implements java.io.Closeable {
         int carried = 0;
         for (InFlight inFlight : outstanding[shard]) {
             if (inFlight.carried) continue;   // already on disk; do not write it twice
-            carried += appendAll(shard, inFlight.batch);
-            // Recorded, so the rescue path knows these reached disk instead of
-            // guessing from whether the token is still here.
+            int taken = appendAll(shard, inFlight.batch);
+            carried += taken;
+            int lost = inFlight.batch.size() - taken;
+            if (lost > 0) {
+                // The bucket refused partway. The tail is gone, and it has to
+                // be counted here — marking the batch carried without counting
+                // would let the rescue path report it fully rescued.
+                samplesDroppedOverflowFull.addAndGet(lost);
+                LOG.error("shard {}: overflow bucket refused {} sample(s) of an in-flight batch "
+                        + "during spill; they are lost", shard, lost);
+            }
+            // Carried either way: the batch has been dealt with, so the rescue
+            // path must not count it a second time.
             inFlight.carried = true;
         }
         List<MappedSample> backlog = queues[shard].drain(queues[shard].capacity());
@@ -450,6 +476,7 @@ public final class Shards implements java.io.Closeable {
             OverflowBucket.AppendResult r = buckets[shard].append(sample);
             if (r.evictedSamples() > 0) samplesEvictedOverflow.addAndGet(r.evictedSamples());
             if (!r.accepted()) return Acceptance.REFUSED;
+            metrics.walBytesWritten(r.bytesWritten());
             samplesSpilled.incrementAndGet();
             return Acceptance.OVERFLOW;
         } catch (java.io.IOException e) {
@@ -466,15 +493,14 @@ public final class Shards implements java.io.Closeable {
      * before it places anything.
      */
     public boolean hasRoomFor(int shard, int samples) {
-        if (buckets != null && !buckets[shard].isEmpty()) {
-            // Spilling: the bucket's own bound decides, and it is a byte
-            // budget rather than a slot count. Treat it as room; a refusal
-            // surfaces from the append and is counted there.
-            return true;
-        }
-        if (queues[shard].remainingCapacity() >= samples) return true;
-        // Memory is short but the bucket would take the overflow.
-        return buckets != null;
+        if (buckets == null) return queues[shard].remainingCapacity() >= samples;
+        // A shard that is spilling, or short of memory, depends on its bucket.
+        // The bucket's bound is bytes rather than slots, so this cannot be
+        // exact — but "is the bucket under its cap" is the question that
+        // decides refusal, and answering it beats the previous unconditional
+        // yes, which let all-or-nothing accept part of a call and then throw.
+        if (!buckets[shard].isEmpty()) return buckets[shard].hasRoom();
+        return queues[shard].remainingCapacity() >= samples || buckets[shard].hasRoom();
     }
 
     public long depthHighWater() { return depthHighWater.get(); }

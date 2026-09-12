@@ -96,8 +96,6 @@ public final class PluginMetrics {
     public static final String WAL_BATCHES_DROPPED_4XX         = "wal_batches_dropped_4xx_total";
     public static final String SAMPLES_DROPPED_OVERFLOW_FULL   = "samples_dropped_overflow_full_total";
     public static final String WAL_FRAMES_DROPPED_CORRUPTED    = "wal_frames_dropped_corrupted_total";
-    public static final String WAL_DISK_USAGE_BYTES            = "wal_disk_usage_bytes";
-    public static final String WAL_SEGMENTS_ACTIVE             = "wal_segments_active";
 
     // --- Disk overflow tier ---
     /** Samples written to a shard's bucket because its memory queue had no

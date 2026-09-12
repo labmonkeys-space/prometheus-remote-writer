@@ -93,11 +93,31 @@ public final class Flusher {
      *  {@code source} is the batch a memory payload was built from, retained only when a disk tier
      *  can take it back on failure — it costs one batch of references per shard in flight. */
     private record Prepared(BuildResult built, int sampleCount, Tier tier, long newOffset,
-                            List<MappedSample> source, Shards.InFlight token) {}
-    private static final Prepared STOP = new Prepared(null, 0, Tier.MEMORY, 0L, null, null);
+                            List<MappedSample> source, Shards.InFlight token,
+                            int corruptedFramesSkipped) {}
+    private static final Prepared STOP = new Prepared(null, 0, Tier.MEMORY, 0L, null, null, 0);
     /** Depth one: the builder may run at most one payload ahead of the sender,
      *  which is the whole benefit and bounds memory to one extra payload. */
     private final java.util.concurrent.ArrayBlockingQueue<Prepared> handoff = new java.util.concurrent.ArrayBlockingQueue<>(1);
+
+    /**
+     * Payloads handed to the sender but not yet dispatched.
+     *
+     * <p>The memory tier can be pipelined freely: a batch is off the queue for
+     * good, and its outcome touches nothing the builder is about to read. The
+     * disk tier cannot. Its reader position is shared state coupled to send
+     * outcomes — a failure rewinds the reader, a success advances the
+     * checkpoint — so a builder running ahead would read batch 2 while batch 1
+     * is in flight, and batch 1's rewind would be undone by batch 2's
+     * acknowledgement advancing the checkpoint straight past it. That loses
+     * batch 1 and ships its series out of order. The old single-threaded
+     * WalFlusher could not hit this; D2's pipelining can, so a disk batch
+     * waits for the previous payload to settle.
+     */
+    private final java.util.concurrent.locks.ReentrantLock pipelineLock =
+            new java.util.concurrent.locks.ReentrantLock();
+    private final java.util.concurrent.locks.Condition settledCondition = pipelineLock.newCondition();
+    private int outstandingPayloads;
 
     /**
      * Test-only convenience constructor — hard-codes the v1 builder.
@@ -242,9 +262,22 @@ public final class Flusher {
     /** Builder loop: poll, build, hand off. Never touches the network. */
     private void run() {
         LOG.info("flusher started (batchSize={}, flushIntervalMs={}, lingerMs={})", batchSize, flushIntervalMs, lingerMs);
+        long lastFsyncNanos = System.nanoTime();
+        long fsyncIntervalNanos = TimeUnit.MILLISECONDS.toNanos(flushIntervalMs);
         try {
             while (running) {
                 try {
+                    // What overflow.fsync=batch means: force the segment on
+                    // each flush-interval boundary, so a kill -9 loses at most
+                    // that window. The segment layer gates the policy — this is
+                    // a no-op under `none` and redundant under `always`.
+                    if (bucket != null) {
+                        long now = System.nanoTime();
+                        if (now - lastFsyncNanos >= fsyncIntervalNanos) {
+                            bucket.flush();
+                            lastFsyncNanos = now;
+                        }
+                    }
                     handOff(pollAndPrepare());
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
@@ -276,6 +309,7 @@ public final class Flusher {
                     }
                     try {
                         handoff.put(p);
+                        payloadHandedOff();
                     } catch (InterruptedException e) {
                         wasInterrupted = true;
                         dropAtShutdown(p);
@@ -313,6 +347,9 @@ public final class Flusher {
      *  a choice between a full tier and an empty one rather than a merge. */
     private Prepared pollAndPrepare() throws InterruptedException {
         if (bucket != null && !bucket.isEmpty()) {
+            // One disk batch at a time: see the pipeline note on
+            // outstandingPayloads.
+            if (!awaitSenderIdle()) return null;
             Prepared fromDisk = pollOverflow();
             if (fromDisk != null) return fromDisk;
         }
@@ -368,7 +405,7 @@ public final class Flusher {
         }
         BuildResult built = build(token.batch());
         return new Prepared(built, built.samplesWritten(), Tier.MEMORY, 0L,
-                token.batch(), token);
+                token.batch(), token, 0);
     }
 
     /** Read one batch off the disk tier. Null when the bucket turned out to
@@ -383,20 +420,73 @@ public final class Flusher {
             bucket.rewind("read-fail");
             return null;
         }
-        if (batch.corruptedFramesSkipped() > 0) {
-            metrics.walFramesDroppedCorrupted(batch.corruptedFramesSkipped());
+        if (batch.isEmpty()) {
+            // Nothing readable, but the scan may still have stepped over
+            // corruption. Book it here: there is no acknowledgement coming to
+            // defer it to, and without a batch there is nothing to re-scan.
+            if (batch.corruptedFramesSkipped() > 0) {
+                metrics.walFramesDroppedCorrupted(batch.corruptedFramesSkipped());
+            }
+            return null;
         }
-        if (batch.isEmpty()) return null;
-        return prepare(batch.samples(), Tier.OVERFLOW, batch.newOffset());
+        // Deferred to the acknowledgement, like the other disk counters. A
+        // rewind re-scans the same segment, so counting on every read would
+        // re-count the same bad frames once per retry cycle — unbounded during
+        // a long outage over a bucket with one corrupt segment.
+        Prepared p = prepare(batch.samples(), Tier.OVERFLOW, batch.newOffset());
+        return new Prepared(p.built(), p.sampleCount(), p.tier(), p.newOffset(),
+                p.source(), p.token(), batch.corruptedFramesSkipped());
     }
 
     private void handOff(Prepared p) throws InterruptedException {
         if (p == null) return;
         try {
             handoff.put(p);
+            payloadHandedOff();
         } catch (InterruptedException e) {
             dropAtShutdown(p); // interrupted while blocked: this payload cannot be sent
             throw e;
+        }
+    }
+
+    private void payloadHandedOff() {
+        pipelineLock.lock();
+        try {
+            outstandingPayloads++;
+        } finally {
+            pipelineLock.unlock();
+        }
+    }
+
+    private void payloadSettled() {
+        pipelineLock.lock();
+        try {
+            if (outstandingPayloads > 0) outstandingPayloads--;
+            settledCondition.signalAll();
+        } finally {
+            pipelineLock.unlock();
+        }
+    }
+
+    /**
+     * Wait until the sender has finished everything handed to it, so the next
+     * disk read cannot be overtaken by the previous batch's outcome. Bounded
+     * so a dead sender parks the builder for a cycle rather than forever.
+     *
+     * @return false when the wait timed out with work still outstanding
+     */
+    private boolean awaitSenderIdle() throws InterruptedException {
+        pipelineLock.lock();
+        try {
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
+            while (outstandingPayloads > 0 && running) {
+                long remaining = deadline - System.nanoTime();
+                if (remaining <= 0) return false;
+                settledCondition.awaitNanos(remaining);
+            }
+            return outstandingPayloads == 0;
+        } finally {
+            pipelineLock.unlock();
         }
     }
 
@@ -412,6 +502,8 @@ public final class Flusher {
                     // Keep the sender alive: a dead sender leaves the builder
                     // parked on a full handoff and the shard silently stops.
                     LOG.error("sender caught unexpected exception; {} sample(s) not sent", p.sampleCount(), unexpected);
+                } finally {
+                    payloadSettled();
                 }
             }
         } catch (InterruptedException e) {
@@ -432,7 +524,8 @@ public final class Flusher {
     private Prepared prepareMemory(List<MappedSample> batch) {
         Shards.InFlight token = memoryTier == null ? null : memoryTier.inFlight(batch);
         Prepared p = prepare(batch, Tier.MEMORY, 0L);
-        return new Prepared(p.built(), p.sampleCount(), p.tier(), p.newOffset(), p.source(), token);
+        return new Prepared(p.built(), p.sampleCount(), p.tier(), p.newOffset(), p.source(),
+                token, 0);
     }
 
     /** Build one batch into a payload and account for what the build dropped. */
@@ -453,7 +546,7 @@ public final class Flusher {
         // the written count is what leaves the bucket.
         List<MappedSample> source = (tier == Tier.MEMORY && memoryTier != null) ? batch : null;
         return new Prepared(built, tier == Tier.OVERFLOW ? batch.size() : built.samplesWritten(),
-                tier, newOffset, source, null);
+                tier, newOffset, source, null, 0);
     }
 
     /** Package-private for unit tests. Builds and sends one batch synchronously. */
@@ -476,6 +569,14 @@ public final class Flusher {
     }
 
     private void dispatchInner(Prepared p) {
+        if (p.tier() == Tier.MEMORY && p.token() != null && memoryTier.wasCarried(p.token())) {
+            // A spill took this batch to disk while it sat in the handoff.
+            // Sending it now would put it on the wire ahead of the older
+            // samples already queued on disk in front of it; the disk copy
+            // ships instead, in order.
+            LOG.debug("{}: skipping a memory batch a spill already wrote to disk", threadName);
+            return;
+        }
         BuildResult built = p.built();
         if (!built.hasContent()) {
             // Nothing to POST — every sample was dropped in the build. For a
@@ -583,6 +684,11 @@ public final class Flusher {
         long checkpointed = bucket.acknowledge(p.newOffset(), p.sampleCount());
         if (checkpointed < 0) return false;   // advance failed; bucket rewound
         if (checkpointed > 0) metrics.walBytesCheckpointed(checkpointed);
+        // Now that the checkpoint has moved past them, these frames will not
+        // be scanned again, so counting them here counts them once.
+        if (p.corruptedFramesSkipped() > 0) {
+            metrics.walFramesDroppedCorrupted(p.corruptedFramesSkipped());
+        }
         if (bucket.isEmpty()) {
             LOG.info("{}: overflow bucket is empty again; new samples go back to memory "
                     + "({} sample(s) acknowledged in the last batch)", threadName, samplesWritten);
