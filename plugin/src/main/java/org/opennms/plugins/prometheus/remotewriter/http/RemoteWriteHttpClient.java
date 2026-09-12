@@ -77,6 +77,10 @@ public final class RemoteWriteHttpClient {
     private final AtomicLong writesTransportError = new AtomicLong();
     private final AtomicLong bytesWritten         = new AtomicLong();
     private final AtomicLong writeDurationNanos   = new AtomicLong();
+    /** Per-bin counts for the cumulative duration buckets (see PluginMetrics.HTTP_WRITE_DURATION_BUCKETS_MS). */
+    private final java.util.concurrent.atomic.AtomicLongArray writeDurationBins =
+            new java.util.concurrent.atomic.AtomicLongArray(
+                    org.opennms.plugins.prometheus.remotewriter.metrics.PluginMetrics.HTTP_WRITE_DURATION_BUCKETS_MS.length);
 
     /**
      * Test-friendly constructor — no operator-supplied custom headers.
@@ -119,7 +123,13 @@ public final class RemoteWriteHttpClient {
         try {
             return doWrite(snappyCompressedPayload);
         } finally {
-            writeDurationNanos.addAndGet(System.nanoTime() - started); // sum nanos, round once on read
+            long elapsed = System.nanoTime() - started;
+            writeDurationNanos.addAndGet(elapsed); // sum nanos, round once on read
+            int[] bounds = org.opennms.plugins.prometheus.remotewriter.metrics.PluginMetrics.HTTP_WRITE_DURATION_BUCKETS_MS;
+            int bin = bounds.length - 1;
+            // Compare in nanos so a 5.9 ms write is "above 5", as the bucket semantics promise.
+            for (int i = 0; i < bounds.length; i++) { if (elapsed <= bounds[i] * 1_000_000L) { bin = i; break; } }
+            writeDurationBins.incrementAndGet(bin);
         }
     }
 
@@ -215,6 +225,18 @@ public final class RemoteWriteHttpClient {
     public long getWritesTransportError() { return writesTransportError.get(); }
     public long getBytesWritten()         { return bytesWritten.get(); }
     public long getWriteDurationMs()      { return writeDurationNanos.get() / 1_000_000L; }
+
+    /** Number of writes whose wall time was at or below {@code leMs}
+     *  (cumulative, Prometheus histogram shape); {@code Integer.MAX_VALUE} is +Inf. */
+    public long getWriteDurationBucketCount(int leMs) {
+        int[] bounds = org.opennms.plugins.prometheus.remotewriter.metrics.PluginMetrics.HTTP_WRITE_DURATION_BUCKETS_MS;
+        long sum = 0;
+        for (int i = 0; i < bounds.length; i++) {
+            sum += writeDurationBins.get(i);
+            if (bounds[i] >= leMs) break;
+        }
+        return sum;
+    }
 
     /** In-flight HTTP request count — running plus queued at the dispatcher. */
     public int getInFlightCalls() {

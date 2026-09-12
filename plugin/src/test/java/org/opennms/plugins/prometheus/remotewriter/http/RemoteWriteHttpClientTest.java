@@ -44,6 +44,29 @@ class RemoteWriteHttpClientTest {
         server.shutdown();
     }
 
+    // ---------- #163: duration buckets and error request counts -----------
+
+    @Test
+    void a_slow_write_lands_in_the_cumulative_buckets_at_or_above_its_duration() throws Exception {
+        server.enqueue(new MockResponse().setResponseCode(204)
+                .setHeadersDelay(200, java.util.concurrent.TimeUnit.MILLISECONDS));
+        client = newClient(durationConfig(1, 1));
+        client.write(PAYLOAD);
+        assertThat(client.getWriteDurationBucketCount(100)).isZero();
+        assertThat(client.getWriteDurationBucketCount(250)).isEqualTo(1);
+        assertThat(client.getWriteDurationBucketCount(1000)).isEqualTo(1);
+        assertThat(client.getWriteDurationBucketCount(Integer.MAX_VALUE)).isEqualTo(1);
+    }
+
+    @Test
+    void a_4xx_counts_one_failed_request() throws Exception {
+        server.enqueue(new MockResponse().setResponseCode(400));
+        client = newClient(durationConfig(1, 1));
+        client.write(PAYLOAD);
+        assertThat(client.getWrites4xx()).isEqualTo(1);
+        assertThat(client.getWriteDurationBucketCount(Integer.MAX_VALUE)).as("failed writes are timed too").isEqualTo(1);
+    }
+
     // ---------- #155: write duration --------------------------------------
 
     @Test
