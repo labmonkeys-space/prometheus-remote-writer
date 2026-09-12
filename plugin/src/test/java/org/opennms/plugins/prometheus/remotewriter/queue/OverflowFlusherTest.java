@@ -103,6 +103,29 @@ class OverflowFlusherTest {
         return metrics.snapshot().get(name).longValue();
     }
 
+    /**
+     * How much of the disk backlog had shipped at the moment the first memory
+     * sample did.
+     *
+     * <p>Sampled inside the wait rather than after it. The flusher keeps
+     * draining while the assertion runs, so reading the disk counter after an
+     * await would measure how fast the runner is, not which tier went first —
+     * which is how both of these passed locally and failed in CI.
+     */
+    private long diskDrainedWhenMemoryFirstShips() {
+        java.util.concurrent.atomic.AtomicLong captured =
+                new java.util.concurrent.atomic.AtomicLong(-1);
+        await().atMost(Duration.ofSeconds(20))
+               .pollInterval(Duration.ofMillis(5))
+               .until(() -> {
+                   long disk = counter(PluginMetrics.SAMPLES_DRAINED_FROM_OVERFLOW);
+                   long memory = counter(PluginMetrics.SAMPLES_WRITTEN) - disk;
+                   if (memory > 0) captured.compareAndSet(-1, disk);
+                   return captured.get() >= 0;
+               });
+        return captured.get();
+    }
+
     @Test
     void the_disk_tier_drains_before_the_memory_tier(@TempDir Path dir) throws Exception {
         openBucket(dir);
@@ -362,11 +385,11 @@ class OverflowFlusherTest {
         flusher = concurrentFlusher(2);
         flusher.start();
 
-        // The memory sample is one of the first handful out, not the 21st.
-        await().atMost(Duration.ofSeconds(15)).until(() ->
-                counter(PluginMetrics.SAMPLES_WRITTEN)
-                        - counter(PluginMetrics.SAMPLES_DRAINED_FROM_OVERFLOW) >= 1);
-        assertThat(counter(PluginMetrics.SAMPLES_DRAINED_FROM_OVERFLOW))
+        // Sample the disk count at the instant memory first ships. Reading it
+        // after the await would race the flusher, which keeps draining — on a
+        // fast runner the whole backlog can be gone by then, whatever the
+        // policy did.
+        assertThat(diskDrainedWhenMemoryFirstShips())
                 .as("memory got a turn well before the 40-sample backlog was gone")
                 .isLessThan(40);
     }
@@ -420,11 +443,7 @@ class OverflowFlusherTest {
 
             shards.start();
 
-            await().atMost(Duration.ofSeconds(20)).until(() ->
-                    counter(PluginMetrics.SAMPLES_WRITTEN)
-                            - counter(PluginMetrics.SAMPLES_DRAINED_FROM_OVERFLOW) >= 4);
-
-            assertThat(counter(PluginMetrics.SAMPLES_DRAINED_FROM_OVERFLOW))
+            assertThat(diskDrainedWhenMemoryFirstShips())
                     .as("the memory samples went out well before the 30-sample "
                         + "disk backlog was exhausted")
                     .isLessThan(30);
