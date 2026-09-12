@@ -120,8 +120,9 @@ class PrometheusRemoteWriteWalIT {
             assertThat(replayed).isPositive();
 
             // The actual contract: every sample offered before the restart
-            // reaches the backend after it.
+            // reaches the backend after it, in order.
             awaitMetricInPrometheus(metricName, 3);
+            assertEveryStoredSampleIsInPrometheus(metricName, 3);
         }
     }
 
@@ -333,6 +334,7 @@ class PrometheusRemoteWriteWalIT {
         c.setRetryInitialBackoffMs(50);
         c.setRetryMaxBackoffMs(200);
         c.setShutdownGracePeriodMs(2_000);
+        c.setWriterShards(1);   // one queue of one slot, deliberately; 0.8.0 defaults to 4
         c.setQueueCapacity(1);
         c.setOverflowDir(walDir.toString());
         c.setOverflowMaxSizeBytes(1L << 20); // 1 MiB
@@ -362,6 +364,39 @@ class PrometheusRemoteWriteWalIT {
                 .time(t)
                 .value(value)
                 .build();
+    }
+
+    /**
+     * Assert that Prometheus holds every sample of a spilled series.
+     *
+     * <p>This is the ordering assertion, not merely a delivery one. Prometheus
+     * rejects a sample older than the newest it already holds for a series, so
+     * a tier that shipped a spilled series out of order would show up here as
+     * missing samples rather than as an error — which is exactly how an
+     * ordering bug reaches production unnoticed.
+     */
+    private void assertEveryStoredSampleIsInPrometheus(String metricName, int offered)
+            throws Exception {
+        String base = "http://" + prometheus.getHost() + ":" + prometheus.getMappedPort(9090);
+        java.net.http.HttpClient http = java.net.http.HttpClient.newHttpClient();
+        String query = java.net.URLEncoder.encode(
+                "count_over_time(" + metricName + "[1h])", java.nio.charset.StandardCharsets.UTF_8);
+        await().atMost(Duration.ofSeconds(30)).untilAsserted(() -> {
+            java.net.http.HttpResponse<String> r = http.send(
+                    java.net.http.HttpRequest.newBuilder()
+                            .uri(java.net.URI.create(base + "/api/v1/query?query=" + query))
+                            .build(),
+                    java.net.http.HttpResponse.BodyHandlers.ofString());
+            assertThat(r.statusCode()).isEqualTo(200);
+            // "value":[<ts>,"<count>"] — the count of samples Prometheus kept.
+            java.util.regex.Matcher m = java.util.regex.Pattern
+                    .compile("\"value\":\\[[^,]+,\"(\\d+)\"\\]").matcher(r.body());
+            assertThat(m.find()).as("no result for %s: %s", metricName, r.body()).isTrue();
+            assertThat(Integer.parseInt(m.group(1)))
+                    .as("Prometheus kept every offered sample, so none was rejected as "
+                        + "out-of-order")
+                    .isEqualTo(offered);
+        });
     }
 
     private void awaitMetricInPrometheus(String metricName, long minSamples) throws Exception {

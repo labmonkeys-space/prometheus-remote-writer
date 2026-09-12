@@ -245,16 +245,16 @@ and a full queue refuses, which is how the plugin behaved before 0.8.0.
 |===
 | Key                          | Default | Purpose
 
-| `queue.capacity`             | `10000` | Bounded in-memory queue, split evenly across `writer.shards`. A full shard spills to its disk bucket; it throws `StorageException` only when the bucket is full too, or when the tier is disabled.
+| `queue.capacity`             | `40000` | Bounded in-memory queue, split evenly across `writer.shards`. A full shard spills to its disk bucket; it throws `StorageException` only when the bucket is full too, or when the tier is disabled.
 | `queue.store-policy`         | `auto`  | What `store()` does when a shard's queue is full. `partial`: attempt every sample, count the refused ones, throw once; a full shard never blocks samples bound for other shards. Right for a caller that drops the call on exception (Horizon's default ring-buffer writer). `all-or-nothing`: enqueue nothing and throw if any shard lacks room for its share of the call. Right for a caller that retries the whole call until accepted (Horizon's offheap writer); each shard must have room for the samples of one `store()` call that hash to it. `auto`: reads `org.opennms.timeseries.config.buffer_type` from the JVM, `OFFHEAP` selects `all-or-nothing`, anything else `partial`. Sentinel keeps that setting in ConfigAdmin, so `auto` means `partial` there; set the value explicitly. The resolved policy is logged at activation.
 | `batch.size`                 | `1000`  | Maximum samples per Remote Write POST.
 | `flush.interval-ms`          | `1000`  | How long a flusher waits for a first sample when its queue is empty. It does not delay a send once samples are present; see `batch.linger-ms`.
-| `batch.linger-ms`            | `0`     | After a first sample arrives, how long a flusher waits for the batch to reach `batch.size` before sending, draining at every arrival and sending early when full. `0` sends on first arrival. Adds at most this much latency. Set 50–200 ms on sharded deployments whose queue is usually empty: at four shards on an 11,000-device fleet, `0` produced 3,300 requests/s of 19 samples each. Applies to the memory tier; a shard draining its bucket sends what the reader returns and does not linger.
+| `batch.linger-ms`            | `100`   | After a first sample arrives, how long a flusher waits for the batch to reach `batch.size` before sending, draining at every arrival and sending early when full. `0` sends on first arrival. Adds at most this much latency. Set 50–200 ms on sharded deployments whose queue is usually empty: at four shards on an 11,000-device fleet, `0` produced 3,300 requests/s of 19 samples each. Applies to the memory tier; a shard draining its bucket sends what the reader returns and does not linger.
 | `retry.max-attempts`         | `5`     | 5xx retry budget per batch.
 | `retry.initial-backoff-ms`   | `250`   | First backoff after a 5xx.
 | `retry.max-backoff-ms`       | `10000` | Backoff ceiling.
 | `shutdown.grace-period-ms`   | `10000` | Bounds the graceful-shutdown drain. Samples already on disk are durable and ship on the next start, so the window only bounds what is still in memory or in flight.
-| `writer.shards`              | `1`     | Write-pipeline parallelism. N>1 splits the queue-mode pipeline into N shards (disjoint series by label-set hash, one flusher and ≤1 in-flight request each) — per-series order preserved, shards flush in parallel. Each shard owns its own disk bucket, so sharding and durability combine. Capped at `http.max-connections`; requires `queue.capacity / N ≥ batch.size`. The backend sees up to N concurrent streams.
+| `writer.shards`              | `4`     | Write-pipeline parallelism. N>1 splits the queue-mode pipeline into N shards (disjoint series by label-set hash, one flusher and ≤1 in-flight request each) — per-series order preserved, shards flush in parallel. Each shard owns its own disk bucket, so sharding and durability combine. Capped at `http.max-connections`; requires `queue.capacity / N ≥ batch.size`. The backend sees up to N concurrent streams.
 |===
 
 == HTTP client
@@ -509,6 +509,34 @@ denylist (`*password*`, `*secret*`, `*token*`, `*key*`, `snmp-community`)
 is always applied — even when `metadata.include` would match a denied key.
 Leave metadata disabled unless you have an explicit use case.
 
+[NOTE]
+.Defaults moved in 0.8.0
+====
+`writer.shards` 1 → 4, `queue.capacity` 10000 → 40000, `batch.linger-ms`
+0 → 100, from the benchmark: one shard at the old defaults lost 7.5% of
+samples over eight hours with the backend idle, where these accepted
+99.75%.
+
+Four shards means **up to four concurrent streams to the backend** where
+there was one. Check per-tenant ingest limits on Mimir and VictoriaMetrics
+cluster before upgrading. Per-shard gauges also start appearing, since they
+are only registered when sharding is on.
+
+Budgets, both split evenly across shards:
+
+----
+memory  = queue.capacity samples                  (40,000 → 10,000 a shard)
+disk    = overflow.max-size-bytes                 (4 GiB  → 1 GiB a shard)
+outage  = overflow.max-size-bytes / (samples_per_second × bytes_per_sample)
+----
+
+At 64,000 samples/sec and ~60 bytes a sample the shipped defaults buy
+roughly 15 to 20 minutes of backend outage with no loss.
+
+The activation log names the whole resolved write path on one line, so
+what you actually got after an upgrade is one grep.
+====
+
 == Disk overflow tier (durable buffering)
 
 On by default. See <<overflow>> for the full operator model.
@@ -521,6 +549,7 @@ On by default. See <<overflow>> for the full operator model.
 | `overflow.max-size-bytes`    | `4294967296` (4 GiB) | Total budget across every shard's bucket, split evenly. `0` disables the tier.
 | `overflow.full`              | `refuse` | `refuse` / `drop-oldest`.
 | `overflow.fsync`             | `batch` | `always` / `batch` / `none`.
+| `overflow.drain`             | `ordered` | `ordered` / `concurrent`. `concurrent` needs a backend that accepts out-of-order writes; see <<overflow>> for the per-backend table.
 |===
 
 Upgrading from 0.7.x, the `wal.*` keys are gone with no aliases:

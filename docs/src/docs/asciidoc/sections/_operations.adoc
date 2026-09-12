@@ -52,6 +52,8 @@ and prints them through the Karaf shell command
 | `overflow_pending_samples`         | Samples on disk past the checkpoint, summed over shards — the backlog a backend outage has built up. Divided by the drain rate, this is how long recovery will take.
 | `overflow_pending_samples_shard_<i>` | The same per shard. Registered for every shard when a disk tier is configured, because hash skew fills one bucket while its siblings idle, and the total hides that.
 | `overflow_bytes`                   | Bytes every shard's bucket occupies on disk. Against `overflow.max-size-bytes` this is how much outage headroom is left.
+| `overflow_recovering_shards`       | Shards currently draining a backlog off disk. 1 of 4 is usually hash skew — one hot series set — where 4 of 4 is a backend that went away.
+| `overflow_oldest_pending_age_ms`   | How long the oldest sample the backend has not taken has been waiting. **This is the recovery alert.** Depth says how much is queued, which is only meaningful against the drain rate; this says how far behind the tier is, in the unit the latency budget is written in. Correct from the moment a recovered bucket opens, before anything has been drained.
 | `http_in_flight`                   | Running + queued HTTP requests at the dispatcher.
 |===
 
@@ -90,6 +92,7 @@ These are starting points — tune to your deployment's noise floor.
 | Drop rate jumps                                         | `rate(samples_dropped_5xx_total[5m]) + rate(samples_dropped_transport_total[5m]) > 0` for 10m
 | Disk tier filling up                                    | `overflow_bytes / on() (overflow_max_size_bytes_constant) > 0.8` for 15m
 | Spilling at all                                         | `rate(samples_spilled_total[5m]) > 0` for 15m — the backend has not kept up for a quarter of an hour
+| Recovery falling behind the budget                      | `overflow_oldest_pending_age_ms > 300000` for 10m — the oldest unwritten sample is more than five minutes old
 | Queue full (no-WAL deployments)                         | `rate(samples_dropped_queue_full_total[5m]) > 0`
 | `job="opennms"` cardinality exploded                    | `rate(samples_unparseable_resource_id_total[1h]) > 0` — parser regression or new resourceId shape
 | Endpoint persistently unhappy                           | `rate(http_writes_failed_total[5m]) / rate(http_writes_successful_total[5m]) > 0.1`

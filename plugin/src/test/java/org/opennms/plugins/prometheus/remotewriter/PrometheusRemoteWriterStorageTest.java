@@ -1110,6 +1110,7 @@ class PrometheusRemoteWriterStorageTest {
         c.setOverflowMaxSizeBytes(0);   // memory-only: these cases pin the refusal contract
         c.setReadUrl(server.url("/prometheus").toString());
         c.setQueueCapacity(queueCapacity);
+        c.setWriterShards(1);   // these cases size one queue deliberately; 0.8.0 defaults to 4
         c.setStorePolicy("partial"); // pin: AUTO would read a JVM-global property another test may set
         c.setBatchSize(1);
         c.setFlushIntervalMs(50);

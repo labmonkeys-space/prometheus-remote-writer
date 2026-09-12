@@ -27,7 +27,7 @@ class PrometheusRemoteWriterConfigTest {
         PrometheusRemoteWriterConfig c = minimal();
         assertThatCode(c::validate).doesNotThrowAnyException();
 
-        assertThat(c.getQueueCapacity()).isEqualTo(10_000);
+        assertThat(c.getQueueCapacity()).isEqualTo(40_000);
         assertThat(c.getBatchSize()).isEqualTo(1_000);
         assertThat(c.getFlushIntervalMs()).isEqualTo(1_000L);
         assertThat(c.getRetryMaxAttempts()).isEqualTo(5);
@@ -766,8 +766,10 @@ class PrometheusRemoteWriterConfigTest {
     // ---------- batch.linger-ms -----------------------------------------------
 
     @Test
-    void batch_linger_default_is_zero() {
-        assertThat(minimal().getBatchLingerMs()).isZero();
+    void batch_linger_default_is_the_measured_one() {
+        // 0.8.0 moved it off zero: at four shards on an 11,000-device fleet a
+        // linger of 0 produced 3,300 requests a second of 19 samples each.
+        assertThat(minimal().getBatchLingerMs()).isEqualTo(100L);
     }
 
     @Test
@@ -1975,6 +1977,43 @@ class PrometheusRemoteWriterConfigTest {
     }
 
     @Test
+    void overflow_drain_defaults_to_ordered() {
+        assertThat(minimal().getOverflowDrain())
+                .isEqualTo(org.opennms.plugins.prometheus.remotewriter.queue.OverflowBucket.DrainPolicy.ORDERED);
+    }
+
+    @Test
+    void overflow_drain_accepts_the_documented_grammar() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setOverflowDrain("concurrent");
+        assertThat(c.getOverflowDrain())
+                .isEqualTo(org.opennms.plugins.prometheus.remotewriter.queue.OverflowBucket.DrainPolicy.CONCURRENT);
+        c.setOverflowDrain("ORDERED");
+        assertThat(c.getOverflowDrain())
+                .isEqualTo(org.opennms.plugins.prometheus.remotewriter.queue.OverflowBucket.DrainPolicy.ORDERED);
+        c.setOverflowDrain("");
+        assertThat(c.getOverflowDrain())
+                .isEqualTo(org.opennms.plugins.prometheus.remotewriter.queue.OverflowBucket.DrainPolicy.ORDERED);
+    }
+
+    @Test
+    void overflow_drain_rejects_an_unknown_value() {
+        assertThatThrownBy(() -> minimal().setOverflowDrain("whenever"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("overflow.drain")
+                .hasMessageContaining("whenever");
+    }
+
+    @Test
+    void overflow_drain_enum_setter_null_defaults_to_ordered() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setOverflowDrain(org.opennms.plugins.prometheus.remotewriter.queue.OverflowBucket.DrainPolicy.CONCURRENT);
+        c.setOverflowDrain((org.opennms.plugins.prometheus.remotewriter.queue.OverflowBucket.DrainPolicy) null);
+        assertThat(c.getOverflowDrain())
+                .isEqualTo(org.opennms.plugins.prometheus.remotewriter.queue.OverflowBucket.DrainPolicy.ORDERED);
+    }
+
+    @Test
     void resolveOverflowDir_returns_explicit_path_when_set() {
         PrometheusRemoteWriterConfig c = minimal();
         c.setOverflowDir("/var/lib/opennms/overflow");
@@ -2392,10 +2431,24 @@ class PrometheusRemoteWriterConfigTest {
     // ---------- writer.shards ------------------------------------------------
 
     @Test
-    void writer_shards_defaults_to_one() {
+    void writer_shards_defaults_to_four() {
+        // 0.8.0 moved it off one, from the benchmark: a single shard at the
+        // old defaults lost 7.5% of samples over eight hours.
         PrometheusRemoteWriterConfig c = minimal();
         assertThatCode(c::validate).doesNotThrowAnyException();
-        assertThat(c.getWriterShards()).isEqualTo(1);
+        assertThat(c.getWriterShards()).isEqualTo(4);
+    }
+
+    @Test
+    void the_shipped_defaults_validate_together() {
+        // The three moved defaults have to be consistent with each other and
+        // with the untouched ones: 40000/4 = 10000 >= batch.size, 4 <=
+        // http.max-connections.
+        PrometheusRemoteWriterConfig c = minimal();
+        assertThatCode(c::validate).doesNotThrowAnyException();
+        assertThat(c.getQueueCapacity() / c.getWriterShards())
+                .isGreaterThanOrEqualTo(c.getBatchSize());
+        assertThat(c.getWriterShards()).isLessThanOrEqualTo(c.getHttpMaxConnections());
     }
 
     @Test
@@ -2424,6 +2477,7 @@ class PrometheusRemoteWriterConfigTest {
     @Test
     void writer_shards_must_leave_room_for_a_batch_per_shard() {
         PrometheusRemoteWriterConfig c = minimal();
+        c.setQueueCapacity(10_000);
         c.setWriterShards(16);          // 10000 / 16 = 625 < 1000
         assertThatThrownBy(c::validate)
             .isInstanceOf(IllegalStateException.class)
@@ -2434,7 +2488,7 @@ class PrometheusRemoteWriterConfigTest {
     @Test
     void valid_sharded_config_passes_and_diffs() {
         PrometheusRemoteWriterConfig c = minimal();
-        c.setWriterShards(4);           // 10000/4 = 2500 >= 1000; 4 <= 16
+        c.setWriterShards(8);           // 40000/8 = 5000 >= 1000; 8 <= 16
         assertThatCode(c::validate).doesNotThrowAnyException();
         assertThat(c.diff(minimal())).anyMatch(l -> l.startsWith("writer.shards:"));
     }

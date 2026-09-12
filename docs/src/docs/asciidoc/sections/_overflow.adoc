@@ -65,6 +65,77 @@ rather than side effects:
 The cost is one bulk transfer at the transition, bounded by
 `queue.capacity / writer.shards`.
 
+== Drain policy
+
+`overflow.drain` decides how a shard divides its drain between the two
+tiers. It is not only a drain-side setting: under `ordered` the *accept*
+path keeps the memory queue empty while the bucket is non-empty, which is
+what makes disk-before-memory equal offered order. `concurrent` changes
+both ends.
+
+[cols="1,2,2",options="header"]
+|===
+| | `ordered` (default) | `concurrent`
+
+| Accept with a non-empty bucket
+| goes to the bucket
+| goes to memory while it has room
+
+| Memory queue fills
+| the whole backlog moves to the bucket
+| only the refused sample is appended
+
+| Drain
+| bucket to empty, then memory
+| the tiers alternate
+
+| Per-series order across the boundary
+| preserved
+| not preserved
+
+| Fresh-sample latency during a recovery
+| behind the whole backlog
+| roughly one batch
+
+| Time to clear the backlog
+| baseline
+| about twice as long
+|===
+
+`ordered` is correct on every backend. `concurrent` needs one that accepts
+out-of-order writes, and choosing it wrongly is a quiet failure: the
+backend answers 4xx, `samples_dropped_4xx_total` climbs, and nothing says
+"wrong drain policy".
+
+[cols="2,1,3",options="header"]
+|===
+| Backend | Safe policy | Note
+
+| Prometheus
+| `ordered`
+| Rejects a sample older than the newest it holds for that series.
+
+| Mimir
+| `ordered`, or `concurrent` inside its window
+| Only if `-ingester.out-of-order-time-window` is configured and your
+  backlog fits inside it. A recovery longer than the window is rejected.
+
+| VictoriaMetrics
+| either
+| Accepts out-of-order writes by design.
+
+| Cortex
+| `ordered`
+| Same model as Prometheus unless out-of-order ingestion is enabled.
+|===
+
+Alternating rather than draining memory first is deliberate. Memory-first
+minimises fresh-sample latency, but a bucket then never empties while the
+offered rate matches the drain rate: the backlog becomes permanent and the
+outage window quietly shrinks to nothing. Alternating bounds how long the
+backlog lives and keeps `overflow_oldest_pending_age_ms` a number that
+comes back down.
+
 == Configuration
 
 [cols="2,1,4",options="header"]
@@ -75,6 +146,7 @@ The cost is one bulk transfer at the transition, bounded by
 | `overflow.max-size-bytes`    | `4294967296` (4 GiB) | Total budget across every shard's bucket, split evenly at startup. `0` disables the tier entirely.
 | `overflow.full`              | `refuse` | `refuse` = the append is refused, counted, and `store()` throws; `drop-oldest` = evict the oldest whole segment and accept.
 | `overflow.fsync`             | `batch` | `always` = fsync every append (tightest RPO); `batch` = fsync at each `flush.interval-ms` boundary (loses at most that window on `kill -9`); `none` = OS page cache only.
+| `overflow.drain`             | `ordered` | `ordered` = bucket drained to empty before any memory sample, per-series order preserved; `concurrent` = tiers alternate, needs a backend that accepts out-of-order writes. See the table above.
 |===
 
 Segment size is derived, not configured: each bucket holds eight segments,
@@ -124,6 +196,18 @@ Segment files are named by start offset
 (`00000000000000000000.seg`, ...), each with a companion `.idx` summary.
 `checkpoint.json` in the shard's directory tracks the last offset confirmed
 shipped, written atomically (tmp + fsync + rename) on every advance.
+
+== Watching a recovery
+
+`overflow_pending_samples` says how much is waiting. `overflow_oldest_pending_age_ms`
+says how far behind the tier is, in the same unit the latency budget is
+written in — that is the one to alert on. A backlog of 200,000 samples is
+only alarming relative to the drain rate; an oldest sample 12 minutes old
+is alarming on its own.
+
+`overflow_recovering_shards` says how many shards are draining. With hash
+skew it is often 1 of 4, which is a different problem from all 4 — the
+first is one hot series set, the second is a backend that went away.
 
 == Recovery on startup
 

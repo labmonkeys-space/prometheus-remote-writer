@@ -114,6 +114,13 @@ public final class PluginMetrics {
     public static final String OVERFLOW_PENDING_SAMPLES_SHARD  = "overflow_pending_samples_shard";
     /** Bytes every shard's bucket currently occupies on disk. */
     public static final String OVERFLOW_BYTES                  = "overflow_bytes";
+    /** Shards currently draining a backlog off disk. */
+    public static final String OVERFLOW_RECOVERING_SHARDS       = "overflow_recovering_shards";
+    /** How long the oldest unacknowledged sample on disk has been waiting.
+     *  The recovery figure worth alerting on: depth says how much is waiting,
+     *  this says how far behind the tier is, in the unit the latency budget
+     *  is written in. */
+    public static final String OVERFLOW_OLDEST_PENDING_AGE_MS   = "overflow_oldest_pending_age_ms";
 
     // --- Read-path discovery metrics ---------------------------------------
     public static final String FIND_METRICS_SINGLE_PASS_TOTAL  = "find_metrics_single_pass_total";

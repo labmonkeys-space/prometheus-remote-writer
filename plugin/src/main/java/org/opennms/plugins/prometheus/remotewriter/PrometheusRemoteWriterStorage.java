@@ -327,18 +327,14 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
                     config.getBatchSize(), config.getFlushIntervalMs(), config.getBatchLingerMs(), m,
                     org.opennms.plugins.prometheus.remotewriter.wire.RemoteWriteRequestBuilders
                             .forVersion(config.getWireProtocolVersion()),
-                    bucketFactory(m));
+                    bucketFactory(m), config.getOverflowDrain());
 
             PrometheusRemoteWriterConfig.StorePolicy policy = config.resolvedStorePolicy();
             Active built = new Active(lm, sh, wc, rc, m, policy);
             registerGauges(built);
             m.startJmxReporter();
             logActivationOrDiff();
-            LOG.info("queue.store-policy={} ({})", policy.name().toLowerCase(java.util.Locale.ROOT).replace('_', '-'),
-                    config.getStorePolicy() == PrometheusRemoteWriterConfig.StorePolicy.AUTO
-                            ? "auto: " + PrometheusRemoteWriterConfig.OPENNMS_BUFFER_TYPE_PROPERTY + "="
-                              + System.getProperty(PrometheusRemoteWriterConfig.OPENNMS_BUFFER_TYPE_PROPERTY)
-                            : "configured");
+            logEffectiveWritePath(policy);
             sh.start();
             active = built;
         } catch (RuntimeException e) {
@@ -346,6 +342,33 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
             rollbackStart(sh, wc, rc);
             throw e;
         }
+    }
+
+    /**
+     * One line naming the write path as it actually resolved, so an operator
+     * upgrading into changed defaults can grep for what they got rather than
+     * reading seven keys and inferring. 0.8.0 moves three of them, so this is
+     * the first thing worth having in the log.
+     */
+    private void logEffectiveWritePath(PrometheusRemoteWriterConfig.StorePolicy policy) {
+        String storePolicy = policy.name().toLowerCase(java.util.Locale.ROOT).replace('_', '-')
+                + (config.getStorePolicy() == PrometheusRemoteWriterConfig.StorePolicy.AUTO
+                        ? " (auto: " + PrometheusRemoteWriterConfig.OPENNMS_BUFFER_TYPE_PROPERTY + "="
+                          + System.getProperty(PrometheusRemoteWriterConfig.OPENNMS_BUFFER_TYPE_PROPERTY) + ")"
+                        : " (configured)");
+        LOG.info("write path: writer.shards={}, queue.capacity={} ({} per shard), "
+                + "batch.size={}, batch.linger-ms={}, overflow={}, overflow.drain={}, "
+                + "overflow.full={}, queue.store-policy={}",
+                config.getWriterShards(), config.getQueueCapacity(),
+                config.getQueueCapacity() / config.getWriterShards(),
+                config.getBatchSize(), config.getBatchLingerMs(),
+                config.isOverflowEnabled()
+                        ? config.getOverflowMaxSizeBytes() + " bytes ("
+                          + config.overflowBytesPerShard() + " per shard)"
+                        : "disabled",
+                config.getOverflowDrain().name().toLowerCase(java.util.Locale.ROOT),
+                config.getOverflowFull().name().toLowerCase(java.util.Locale.ROOT).replace('_', '-'),
+                storePolicy);
     }
 
     /**
@@ -802,6 +825,10 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
                 a.shards()::totalSamplesDroppedOverflowFull);
         m.registerLongGauge(PluginMetrics.SAMPLES_EVICTED_OVERFLOW,
                 a.shards()::totalSamplesEvictedOverflow);
+        m.registerLongGauge(PluginMetrics.OVERFLOW_RECOVERING_SHARDS,
+                () -> (long) a.shards().recoveringShards());
+        m.registerLongGauge(PluginMetrics.OVERFLOW_OLDEST_PENDING_AGE_MS,
+                a.shards()::oldestPendingAgeMs);
         // Per-shard depth is what shows hash skew filling one bucket while
         // its siblings idle — the failure arm G ran into on the memory tier.
         int shards = a.shards().shardCount();
