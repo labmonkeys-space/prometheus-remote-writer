@@ -181,13 +181,18 @@ public class PrometheusRemoteWriterConfig {
     private boolean tlsInsecureSkipVerify;
 
     // --- Queue & batching ---
-    private int  queueCapacity          = 10_000;
+    /** Total in-memory buffer, split evenly across {@link #writerShards}.
+     *  Default 40,000 since 0.8.0 — 10,000 a shard at the default four,
+     *  which is what the benchmark's accepting configuration used. */
+    private int  queueCapacity          = 40_000;
     private int  batchSize              = 1_000;
     private long flushIntervalMs        = 1_000L;
     /** {@code batch.linger-ms}: after a head sample arrives, how long a
      *  flusher waits for the batch to reach batch.size before sending.
-     *  0 (default) sends on first arrival. Queue mode only. */
-    private long batchLingerMs          = 0L;
+     *  Default 100 since 0.8.0: at four shards on an 11,000-device fleet a
+     *  linger of 0 produced 3,300 requests a second of 19 samples each, so
+     *  this trades a tenth of a second of latency for full batches. */
+    private long batchLingerMs          = 100L;
     private int  retryMaxAttempts       = 5;
     private long retryInitialBackoffMs  = 250L;
     private long retryMaxBackoffMs      = 10_000L;
@@ -209,8 +214,12 @@ public class PrometheusRemoteWriterConfig {
      *  with at most one request in flight — so the Remote Write
      *  in-order-per-series rule holds structurally while shards flush in
      *  parallel. Each shard also owns its own overflow bucket, so sharding
-     *  and durability combine. */
-    private int writerShards = 1;
+     *  and durability combine.
+     *  <p>Default 4 since 0.8.0, from the benchmark: one shard at the old
+     *  defaults lost 7.5% of samples over eight hours with the backend idle.
+     *  Note that this is four concurrent streams to the backend where there
+     *  was one — mind per-tenant ingest limits. */
+    private int writerShards = 4;
 
     /** Segments per shard bucket. Drop-oldest evicts a whole segment, so a
      *  bucket needs several for eviction to be a partial loss rather than a
@@ -331,6 +340,16 @@ public class PrometheusRemoteWriterConfig {
      *  (default, so silent loss is always a deliberate choice);
      *  {@code drop-oldest} — evict the oldest whole segment and accept. */
     private OverflowBucket.FullPolicy overflowFull = OverflowBucket.FullPolicy.REFUSE;
+
+    /** How a shard divides its drain between the two tiers:
+     *  {@code ordered} — the bucket is drained to empty before any memory
+     *  sample, and while it holds anything the shard's memory queue stays
+     *  empty, so per-series order survives the tier boundary (default, correct
+     *  on every backend); {@code concurrent} — memory keeps being used while
+     *  the bucket drains and the two tiers alternate, so fresh samples do not
+     *  queue behind the backlog. Concurrent gives up per-series order across
+     *  the boundary and needs a backend that accepts out-of-order writes. */
+    private OverflowBucket.DrainPolicy overflowDrain = OverflowBucket.DrainPolicy.ORDERED;
 
     /** Fsync policy for bucket segments: {@code always} (fsync every
      *  append; tightest RPO, lowest throughput), {@code batch} (fsync at
@@ -1352,6 +1371,24 @@ public class PrometheusRemoteWriterConfig {
         overflowFull = v == null ? OverflowBucket.FullPolicy.REFUSE : v;
     }
 
+    public void setOverflowDrain(String v) {
+        if (isBlank(v)) {
+            overflowDrain = OverflowBucket.DrainPolicy.ORDERED;
+            return;
+        }
+        String normalized = v.trim().toUpperCase().replace('-', '_');
+        try {
+            overflowDrain = OverflowBucket.DrainPolicy.valueOf(normalized);
+        } catch (IllegalArgumentException e) {
+            throw new IllegalStateException(
+                "overflow.drain must be 'ordered' or 'concurrent', got: " + v);
+        }
+    }
+
+    public void setOverflowDrain(OverflowBucket.DrainPolicy v) {
+        overflowDrain = v == null ? OverflowBucket.DrainPolicy.ORDERED : v;
+    }
+
     public void setWireProtocolVersion(String v) {
         // Treat null, empty, AND whitespace-only as "use default" so an
         // operator config of `wire.protocol-version =   ` doesn't throw.
@@ -1444,6 +1481,7 @@ public class PrometheusRemoteWriterConfig {
     public String getOverflowDir()                       { return overflowDir; }
     public long   getOverflowMaxSizeBytes()              { return overflowMaxSizeBytes; }
     public OverflowBucket.FullPolicy getOverflowFull()   { return overflowFull; }
+    public OverflowBucket.DrainPolicy getOverflowDrain() { return overflowDrain; }
     public WalSegment.FsyncPolicy    getOverflowFsync()  { return overflowFsync; }
 
     /** True when a disk tier is configured; false disables spilling entirely. */

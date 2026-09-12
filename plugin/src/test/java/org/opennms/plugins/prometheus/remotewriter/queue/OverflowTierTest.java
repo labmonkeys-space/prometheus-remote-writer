@@ -51,6 +51,13 @@ class OverflowTierTest {
 
     private static Shards shards(Path dir, int totalCapacity, int shardCount,
                                  long bucketBytes, OverflowBucket.FullPolicy policy) {
+        return shards(dir, totalCapacity, shardCount, bucketBytes, policy,
+                OverflowBucket.DrainPolicy.ORDERED);
+    }
+
+    private static Shards shards(Path dir, int totalCapacity, int shardCount,
+                                 long bucketBytes, OverflowBucket.FullPolicy policy,
+                                 OverflowBucket.DrainPolicy drain) {
         return new Shards(shardCount, totalCapacity, mock(RemoteWriteHttpClient.class),
                 /* batchSize */ 100, /* flushIntervalMs */ 1_000, /* lingerMs */ 0,
                 new PluginMetrics(), RemoteWriteRequestBuilders.forVersion(1),
@@ -62,7 +69,12 @@ class OverflowTierTest {
                     } catch (IOException e) {
                         throw new UncheckedIOException(e);
                     }
-                });
+                }, drain);
+    }
+
+    private static Shards concurrentShards(Path dir, int capacity) {
+        return shards(dir, capacity, 1, 1L << 20, OverflowBucket.FullPolicy.REFUSE,
+                OverflowBucket.DrainPolicy.CONCURRENT);
     }
 
     /** All samples of one series, so a single-shard setup routes them together. */
@@ -289,6 +301,116 @@ class OverflowTierTest {
                     .isEqualTo(Shards.Acceptance.OVERFLOW);
             assertThat(restarted.totalDepth()).isZero();
             assertThat(drainBucket(restarted, 0)).containsExactly(1L, 2L, 3L, 4L, 99L);
+        }
+    }
+
+    // --- overflow.drain = concurrent ----------------------------------------
+
+    @Test
+    void concurrent_keeps_using_memory_while_the_bucket_drains(@TempDir Path dir) {
+        // Under `ordered` a non-empty bucket means the shard yields entirely.
+        // Under `concurrent` fresh samples stay on the fast path, which is the
+        // whole reason to choose it.
+        try (Shards shards = concurrentShards(dir, 3)) {
+            for (long t = 1; t <= 4; t++) shards.accept(sample(t));   // fills, then spills
+            assertThat(shards.totalOverflowPending()).isPositive();
+            // Free a slot, the way a flusher would. The bucket still holds the
+            // spilled sample, which under `ordered` would keep the shard on
+            // disk; concurrent goes back to memory.
+            shards.queuesForTesting().get(0).drain(1);
+
+            assertThat(shards.accept(sample(5)))
+                    .as("memory has room again, and concurrent uses it even though "
+                        + "the bucket is still draining")
+                    .isEqualTo(Shards.Acceptance.MEMORY);
+        }
+    }
+
+    @Test
+    void concurrent_does_not_move_the_backlog_when_the_queue_fills(@TempDir Path dir) {
+        // The backlog move buys ordering across the boundary, and concurrent
+        // has already given that up — moving it would be pure cost.
+        try (Shards shards = concurrentShards(dir, 3)) {
+            for (long t = 1; t <= 3; t++) {
+                assertThat(shards.accept(sample(t))).isEqualTo(Shards.Acceptance.MEMORY);
+            }
+            assertThat(shards.accept(sample(4))).isEqualTo(Shards.Acceptance.OVERFLOW);
+
+            assertThat(shards.totalDepth()).as("the backlog stays in memory").isEqualTo(3);
+            assertThat(shards.totalOverflowPending()).isEqualTo(1);
+            assertThat(shards.totalSamplesSpilled()).isEqualTo(1);
+        }
+    }
+
+    @Test
+    void ordered_still_moves_the_backlog(@TempDir Path dir) {
+        // The default is unchanged by the new knob.
+        try (Shards shards = shards(dir, 3)) {
+            for (long t = 1; t <= 4; t++) shards.accept(sample(t));
+            assertThat(shards.totalDepth()).isZero();
+            assertThat(shards.totalSamplesSpilled()).isEqualTo(4);
+        }
+    }
+
+    // --- recovery gauges -----------------------------------------------------
+
+    @Test
+    void recovering_shards_counts_only_the_shards_with_a_backlog(@TempDir Path dir) {
+        try (Shards shards = shards(dir, 8, 4, 1L << 20, OverflowBucket.FullPolicy.REFUSE)) {
+            assertThat(shards.recoveringShards()).isZero();
+
+            // Two slots a shard; push one series hard enough to spill its shard.
+            Map<String, String> labels = new LinkedHashMap<>();
+            labels.put("__name__", "m");
+            labels.put("node", "hot");
+            for (int i = 0; i < 20; i++) {
+                shards.accept(new MappedSample(labels, i, 1.0));
+            }
+            assertThat(shards.recoveringShards())
+                    .as("only the shard that series hashes to").isEqualTo(1);
+        }
+    }
+
+    @Test
+    void oldest_pending_age_reflects_a_waiting_backlog(@TempDir Path dir) throws Exception {
+        try (Shards shards = shards(dir, 2)) {
+            assertThat(shards.oldestPendingAgeMs()).isZero();
+            for (long t = 1; t <= 4; t++) shards.accept(sample(t));
+            Thread.sleep(120);
+
+            assertThat(shards.oldestPendingAgeMs())
+                    .as("the oldest sample has been waiting at least that long")
+                    .isGreaterThanOrEqualTo(100L);
+        }
+    }
+
+    @Test
+    void oldest_pending_age_is_right_immediately_after_a_restart(@TempDir Path dir)
+            throws Exception {
+        // The window the naive implementation gets wrong: a bucket recovered
+        // with an hour of backlog reads 0 until its first batch is drained,
+        // which is exactly when an operator looks at the gauge.
+        try (Shards first = shards(dir, 2)) {
+            for (long t = 1; t <= 4; t++) first.accept(sample(t));
+        }
+        Thread.sleep(150);
+        try (Shards restarted = shards(dir, 2)) {
+            assertThat(restarted.oldestPendingAgeMs())
+                    .as("seeded by peeking the first frame at open, not left at 0")
+                    .isGreaterThanOrEqualTo(100L);
+        }
+    }
+
+    @Test
+    void oldest_pending_age_returns_to_zero_when_the_tier_drains(@TempDir Path dir)
+            throws IOException {
+        try (Shards shards = shards(dir, 2)) {
+            for (long t = 1; t <= 4; t++) shards.accept(sample(t));
+            assertThat(shards.oldestPendingAgeMs()).isNotNegative();
+            drainBucket(shards, 0);
+
+            assertThat(shards.oldestPendingAgeMs()).isZero();
+            assertThat(shards.recoveringShards()).isZero();
         }
     }
 }

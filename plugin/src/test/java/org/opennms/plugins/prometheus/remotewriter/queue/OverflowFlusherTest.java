@@ -86,6 +86,12 @@ class OverflowFlusherTest {
                 RemoteWriteRequestBuilders.forVersion(1), "test-flusher");
     }
 
+    private Flusher concurrentFlusher(int batchSize) {
+        return new Flusher(queue, bucket, null, http, batchSize, 50, 0, metrics,
+                RemoteWriteRequestBuilders.forVersion(1), "test-flusher",
+                OverflowBucket.DrainPolicy.CONCURRENT);
+    }
+
     private static MappedSample sample(long ts) {
         Map<String, String> labels = new LinkedHashMap<>();
         labels.put("__name__", "test_metric");
@@ -313,5 +319,75 @@ class OverflowFlusherTest {
         assertThat(counter(PluginMetrics.SAMPLE_LATENCY_MS))
                 .as("at least the 500 ms the sample was already old")
                 .isGreaterThanOrEqualTo(500);
+    }
+
+    @Test
+    void concurrent_alternates_the_tiers_it_drains(@TempDir Path dir) throws Exception {
+        // Under `ordered` the bucket is emptied before a single memory sample
+        // goes out, so a fresh sample waits out the whole backlog. Alternating
+        // is what stops that — and alternating rather than memory-first is
+        // what stops the backlog becoming permanent when the offered rate
+        // matches the drain rate.
+        openBucket(dir);
+        for (int i = 1; i <= 6; i++) bucket.append(sample(i));
+        for (int i = 101; i <= 106; i++) queue.tryEnqueue(sample(i));
+
+        for (int i = 0; i < 20; i++) server.enqueue(new MockResponse().setResponseCode(204));
+
+        flusher = concurrentFlusher(2);
+        flusher.start();
+
+        await().atMost(Duration.ofSeconds(15))
+                .until(() -> counter(PluginMetrics.SAMPLES_WRITTEN) >= 12);
+
+        // Both tiers made progress rather than one being drained to empty
+        // first: the disk half is counted separately from the total.
+        assertThat(counter(PluginMetrics.SAMPLES_DRAINED_FROM_OVERFLOW)).isEqualTo(6);
+        assertThat(counter(PluginMetrics.SAMPLES_WRITTEN)).isEqualTo(12);
+        assertThat(bucket.isEmpty()).isTrue();
+        assertThat(queue.depth()).isZero();
+    }
+
+    @Test
+    void concurrent_does_not_starve_the_memory_tier(@TempDir Path dir) throws Exception {
+        // The property that distinguishes alternation from disk-first: with a
+        // deep backlog, memory samples still go out early rather than after
+        // the whole bucket.
+        openBucket(dir);
+        for (int i = 1; i <= 40; i++) bucket.append(sample(i));
+        queue.tryEnqueue(sample(999));
+
+        for (int i = 0; i < 60; i++) server.enqueue(new MockResponse().setResponseCode(204));
+
+        flusher = concurrentFlusher(2);
+        flusher.start();
+
+        // The memory sample is one of the first handful out, not the 21st.
+        await().atMost(Duration.ofSeconds(15)).until(() ->
+                counter(PluginMetrics.SAMPLES_WRITTEN)
+                        - counter(PluginMetrics.SAMPLES_DRAINED_FROM_OVERFLOW) >= 1);
+        assertThat(counter(PluginMetrics.SAMPLES_DRAINED_FROM_OVERFLOW))
+                .as("memory got a turn well before the 40-sample backlog was gone")
+                .isLessThan(40);
+    }
+
+    @Test
+    void ordered_drains_the_bucket_before_any_memory_sample(@TempDir Path dir) throws Exception {
+        // The default, unchanged: the counterpart of the test above.
+        openBucket(dir);
+        for (int i = 1; i <= 40; i++) bucket.append(sample(i));
+        queue.tryEnqueue(sample(999));
+
+        for (int i = 0; i < 60; i++) server.enqueue(new MockResponse().setResponseCode(204));
+
+        flusher = flusher(2);
+        flusher.start();
+
+        await().atMost(Duration.ofSeconds(15))
+                .until(() -> counter(PluginMetrics.SAMPLES_WRITTEN) >= 41);
+
+        assertThat(counter(PluginMetrics.SAMPLES_DRAINED_FROM_OVERFLOW))
+                .as("every disk sample shipped, and only then the memory one")
+                .isEqualTo(40);
     }
 }

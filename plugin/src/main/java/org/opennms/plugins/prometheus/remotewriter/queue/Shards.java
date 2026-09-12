@@ -106,6 +106,7 @@ public final class Shards implements java.io.Closeable {
      *  the writer threads actually reached, not a later sample of it. */
     private final AtomicLong depthHighWater = new AtomicLong();
     private final PluginMetrics metrics;
+    private final OverflowBucket.DrainPolicy drain;
 
     /** No disk tier — the pre-0.8.0 pipeline, where a full shard refuses. */
     public Shards(int shardCount,
@@ -118,6 +119,19 @@ public final class Shards implements java.io.Closeable {
                   Function<Collection<MappedSample>, BuildResult> builder) {
         this(shardCount, totalQueueCapacity, httpClient, batchSize, flushIntervalMs, lingerMs,
                 metrics, builder, null);
+    }
+
+    public Shards(int shardCount,
+                  int totalQueueCapacity,
+                  RemoteWriteHttpClient httpClient,
+                  int batchSize,
+                  long flushIntervalMs,
+                  long lingerMs,
+                  PluginMetrics metrics,
+                  Function<Collection<MappedSample>, BuildResult> builder,
+                  java.util.function.IntFunction<OverflowBucket> bucketFactory) {
+        this(shardCount, totalQueueCapacity, httpClient, batchSize, flushIntervalMs, lingerMs,
+                metrics, builder, bucketFactory, OverflowBucket.DrainPolicy.ORDERED);
     }
 
     /**
@@ -134,8 +148,10 @@ public final class Shards implements java.io.Closeable {
                   long lingerMs,
                   PluginMetrics metrics,
                   Function<Collection<MappedSample>, BuildResult> builder,
-                  java.util.function.IntFunction<OverflowBucket> bucketFactory) {
+                  java.util.function.IntFunction<OverflowBucket> bucketFactory,
+                  OverflowBucket.DrainPolicy drain) {
         if (shardCount < 1) throw new IllegalArgumentException("shardCount must be >= 1");
+        this.drain = drain == null ? OverflowBucket.DrainPolicy.ORDERED : drain;
         Objects.requireNonNull(httpClient);
         Objects.requireNonNull(metrics);
         Objects.requireNonNull(builder);
@@ -184,7 +200,7 @@ public final class Shards implements java.io.Closeable {
                         }
                     },
                     httpClient, batchSize, flushIntervalMs, lingerMs,
-                    metrics, builder, threadName);
+                    metrics, builder, threadName, this.drain);
         }
         } catch (RuntimeException e) {
             // A bucket that failed to open leaves the ones before it holding
@@ -234,15 +250,22 @@ public final class Shards implements java.io.Closeable {
         acceptLocks[shard].lock();
         try {
             OverflowBucket bucket = buckets[shard];
-            if (bucket.isEmpty()) {
+            // Under `concurrent` the memory tier stays in use whatever the
+            // bucket holds: fresh samples are not made to queue behind the
+            // backlog, which is the whole point of the policy. Under
+            // `ordered` a non-empty bucket means the shard is yielding.
+            boolean mayUseMemory = concurrent() || bucket.isEmpty();
+            if (mayUseMemory) {
                 if (queues[shard].tryEnqueue(sample)) {
                     depthHighWater.accumulateAndGet(totalDepth(), Math::max);
                     return Acceptance.MEMORY;
                 }
-                // Memory just filled. Everything in it was offered before
-                // this sample, so it has to go to disk first or this sample
-                // would overtake it.
-                spillBacklog(shard, "memory queue full");
+                // Memory just filled. Under `ordered` everything in it was
+                // offered before this sample, so it has to reach disk first or
+                // this sample would overtake it. Under `concurrent` the
+                // ordering that buys has already been given up, and moving the
+                // backlog would be pure cost.
+                if (!concurrent()) spillBacklog(shard, "memory queue full");
             }
             return appendToBucket(shard, sample);
         } finally {
@@ -429,9 +452,11 @@ public final class Shards implements java.io.Closeable {
                 // flight; it is on disk and will be retried from there.
                 return batch.size();
             }
-            if (!buckets[shard].isEmpty()) {
+            if (!buckets[shard].isEmpty() && !concurrent()) {
                 // The batch is older than what is already on disk, so it
-                // cannot go behind it without reordering a series.
+                // cannot go behind it without reordering a series. Under
+                // `concurrent` that is not a violation, so the rescue applies
+                // there whatever the bucket holds.
                 //
                 // Unreachable for a batch that came through
                 // pollMemoryBatch: draining and registering under this lock
@@ -571,6 +596,44 @@ public final class Shards implements java.io.Closeable {
     public int overflowPending(int shard) {
         return buckets == null ? 0 : buckets[shard].pendingSamples();
     }
+
+    /** True when this shard's bucket holds unacknowledged samples: the
+     *  {@code RECOVERING} half of the per-shard state, {@code NORMAL} being
+     *  the other. Under {@code ordered} a recovering shard's memory queue is
+     *  empty by construction; under {@code concurrent} both tiers can hold
+     *  data at once. */
+    public boolean isRecovering(int shard) {
+        return buckets != null && !buckets[shard].isEmpty();
+    }
+
+    /** How many shards are draining a backlog right now. */
+    public int recoveringShards() {
+        if (buckets == null) return 0;
+        int n = 0;
+        for (int i = 0; i < buckets.length; i++) {
+            if (!buckets[i].isEmpty()) n++;
+        }
+        return n;
+    }
+
+    /**
+     * Milliseconds since the {@code store()} call of the oldest sample on disk
+     * the backend has not taken, across shards; 0 when nothing is pending.
+     * This is the recovery number in the unit the latency budget uses — depth
+     * says how much is waiting, this says how far behind the tier is.
+     */
+    public long oldestPendingAgeMs() {
+        if (buckets == null) return 0L;
+        long oldest = 0L;
+        for (OverflowBucket b : buckets) {
+            oldest = Math.max(oldest, b.oldestPendingAgeMs());
+        }
+        return oldest;
+    }
+
+    boolean concurrent() { return drain == OverflowBucket.DrainPolicy.CONCURRENT; }
+
+    public OverflowBucket.DrainPolicy drainPolicy() { return drain; }
 
     public int totalOverflowPending() {
         if (buckets == null) return 0;

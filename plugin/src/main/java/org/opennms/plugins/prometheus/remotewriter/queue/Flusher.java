@@ -46,6 +46,11 @@ public final class Flusher {
     private final SampleQueue queue;
     /** This shard's disk tier, or null when none is configured. */
     private final OverflowBucket bucket;
+    /** How this shard divides its drain between the tiers. */
+    private final OverflowBucket.DrainPolicy drain;
+    /** Under {@code concurrent}, the tier the last batch came from, so the
+     *  next one comes from the other whenever that other has samples. */
+    private Tier lastTier = Tier.MEMORY;
     /** The shard's memory-tier hooks, or null when there is no disk tier and
      *  so nothing to rescue a failed memory batch into. */
     private final MemoryTier memoryTier;
@@ -166,6 +171,17 @@ public final class Flusher {
                    int batchSize, long flushIntervalMs, long lingerMs, PluginMetrics metrics,
                    Function<Collection<MappedSample>, BuildResult> builder,
                    String threadName) {
+        this(queue, bucket, memoryTier, httpClient, batchSize, flushIntervalMs, lingerMs,
+                metrics, builder, threadName, OverflowBucket.DrainPolicy.ORDERED);
+    }
+
+    public Flusher(SampleQueue queue, OverflowBucket bucket,
+                   MemoryTier memoryTier,
+                   RemoteWriteHttpClient httpClient,
+                   int batchSize, long flushIntervalMs, long lingerMs, PluginMetrics metrics,
+                   Function<Collection<MappedSample>, BuildResult> builder,
+                   String threadName, OverflowBucket.DrainPolicy drain) {
+        this.drain = drain == null ? OverflowBucket.DrainPolicy.ORDERED : drain;
         this.queue            = Objects.requireNonNull(queue);
         this.bucket           = bucket;   // null = no disk tier
         this.memoryTier       = memoryTier;
@@ -346,14 +362,22 @@ public final class Flusher {
      *  memory queue is empty by construction (see {@link Shards}), so this is
      *  a choice between a full tier and an empty one rather than a merge. */
     private Prepared pollAndPrepare() throws InterruptedException {
-        if (bucket != null && !bucket.isEmpty()) {
-            // One disk batch at a time: see the pipeline note on
+        if (bucket != null && !bucket.isEmpty() && shouldDrawFromDisk()) {
+            // One disk batch at a time whatever the policy: the reader is
+            // shared state coupled to send outcomes. See the pipeline note on
             // outstandingPayloads.
             if (!awaitSenderIdle()) return null;
             Prepared fromDisk = pollOverflow();
-            if (fromDisk != null) return fromDisk;
+            if (fromDisk != null) {
+                lastTier = Tier.OVERFLOW;
+                return fromDisk;
+            }
         }
-        if (memoryTier != null) return pollTieredAndPrepare();
+        if (memoryTier != null) {
+            Prepared fromMemory = pollTieredAndPrepare();
+            if (fromMemory != null) lastTier = Tier.MEMORY;
+            return fromMemory;
+        }
         long waitStarted = System.nanoTime();
         SampleQueue.Batch polled = queue.pollBatch(batchSize, flushIntervalMs, TimeUnit.MILLISECONDS, lingerMs);
         metrics.flusherIdleNanos(System.nanoTime() - waitStarted - polled.lingerNanos());
@@ -406,6 +430,22 @@ public final class Flusher {
         BuildResult built = build(token.batch());
         return new Prepared(built, built.samplesWritten(), Tier.MEMORY, 0L,
                 token.batch(), token, 0);
+    }
+
+    /**
+     * Whether this cycle's batch should come off disk.
+     *
+     * <p>Under {@code ordered} the answer is always yes while the bucket has
+     * anything: it drains to empty before any memory sample, and the memory
+     * queue is empty anyway. Under {@code concurrent} the tiers alternate, so
+     * a disk batch follows a memory one and vice versa — unless memory has
+     * nothing, in which case there is nothing to alternate with and disk keeps
+     * going. Alternating rather than draining memory first is what stops a
+     * backlog becoming permanent when the offered rate matches the drain rate.
+     */
+    private boolean shouldDrawFromDisk() {
+        if (drain != OverflowBucket.DrainPolicy.CONCURRENT) return true;
+        return lastTier == Tier.MEMORY || queue.depth() == 0;
     }
 
     /** Read one batch off the disk tier. Null when the bucket turned out to

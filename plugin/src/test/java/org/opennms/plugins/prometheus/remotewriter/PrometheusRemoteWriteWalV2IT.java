@@ -207,6 +207,7 @@ class PrometheusRemoteWriteWalV2IT {
         c.setShutdownGracePeriodMs(2_000);
         // Degenerate tiered configuration: one memory slot, so everything
         // spills and the disk tier is what the test actually exercises.
+        c.setWriterShards(1);   // one queue of one slot, deliberately; 0.8.0 defaults to 4
         c.setQueueCapacity(1);
         c.setOverflowDir(walDir.toString());
         c.setOverflowMaxSizeBytes(1L << 20); // 1 MiB

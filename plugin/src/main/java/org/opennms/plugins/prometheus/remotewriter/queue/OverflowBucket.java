@@ -54,6 +54,27 @@ public final class OverflowBucket implements Closeable {
         DROP_OLDEST
     }
 
+    /**
+     * How a shard divides its drain between its two tiers.
+     *
+     * <p>This is not only an arbiter setting. Under {@link #ORDERED} the
+     * accept path keeps a shard's memory queue empty for as long as its bucket
+     * is non-empty, which is what makes disk-before-memory equal offered
+     * order; leave that in place and {@link #CONCURRENT} would have nothing to
+     * alternate with. The policy therefore reaches both ends.
+     */
+    public enum DrainPolicy {
+        /** Bucket drained to empty before any memory sample, memory unused
+         *  while it holds anything. Per-series order survives the boundary, so
+         *  this works on every backend. */
+        ORDERED,
+        /** Memory keeps being used while the bucket drains, and the tiers
+         *  alternate. Fresh samples do not queue behind the backlog, at the
+         *  cost of per-series order across the boundary — needs a backend that
+         *  accepts out-of-order writes. */
+        CONCURRENT
+    }
+
     /** One drained batch: decoded samples, the offset past them, and any
      *  frames the reader had to skip as corrupted. */
     public record Batch(List<MappedSample> samples, long newOffset, int corruptedFramesSkipped) {
@@ -92,6 +113,21 @@ public final class OverflowBucket implements Closeable {
      */
     private volatile long writeOffset;
 
+    /**
+     * Wall-clock {@code store()} stamp of the oldest sample on disk that the
+     * backend has not taken, or 0 when nothing is pending.
+     *
+     * <p>Set three ways, because each covers a window the others miss. The
+     * first append into an empty bucket records the sample that is now the
+     * oldest — without it a shard that has just spilled reads 0 until its
+     * first batch comes back off disk. Every read refreshes it as the head
+     * advances, which keeps it right through an outage since a rewind
+     * re-reads the same head batch. And opening a recovered bucket peeks its
+     * first frame, for the restart case where nothing in this process
+     * appended. It returns to 0 when the bucket empties.
+     */
+    private volatile long oldestPendingStamp;
+
     private OverflowBucket(Path dir, WalWriter writer, Checkpoint checkpoint,
                            FullPolicy fullPolicy, long maxSizeBytes,
                            int maxPayload, String name,
@@ -107,6 +143,7 @@ public final class OverflowBucket implements Closeable {
         this.pending         = recoveredPending;
         this.writeOffset     = writeOffset;
         pinEvictionFloor();
+        seedOldestPendingStamp();
     }
 
     /**
@@ -161,6 +198,7 @@ public final class OverflowBucket implements Closeable {
         byte[] encoded = WalEntryCodec.encode(sample);
         try {
             WalWriter.AppendResult r = writer.appendWithStats(encoded);
+            if (oldestPendingStamp <= 0L) oldestPendingStamp = sample.enqueuedEpochMs();
             writeOffset = r.offsetAfter();
             pending++;
             if (r.evictedFrames() > 0) {
@@ -238,7 +276,34 @@ public final class OverflowBucket implements Closeable {
         for (byte[] payload : read.payloads()) {
             samples.add(WalEntryCodec.decode(payload));
         }
+        oldestPendingStamp = samples.get(0).enqueuedEpochMs();
         return new Batch(samples, read.newOffset(), read.corruptedFramesSkipped());
+    }
+
+    /**
+     * Read the first unacknowledged frame without disturbing the reader, so
+     * {@link #oldestPendingAgeMs()} is right before anything has been drained.
+     * Best effort: a bucket that cannot be peeked simply reports 0 until its
+     * first real read.
+     */
+    private void seedOldestPendingStamp() {
+        if (isEmpty()) return;
+        try (WalReader peek = new WalReader(dir, checkpoint.lastSentOffset(), maxPayload)) {
+            ReadResult first = peek.nextBatch(1);
+            if (!first.isEmpty()) {
+                oldestPendingStamp = WalEntryCodec.decode(first.payloads().get(0)).enqueuedEpochMs();
+            }
+        } catch (IOException | RuntimeException e) {
+            LOG.debug("{}: could not seed the oldest-pending stamp: {}", name, e.getMessage());
+        }
+    }
+
+    /** Age of the oldest unacknowledged sample, or 0 when the bucket is empty. */
+    public long oldestPendingAgeMs() {
+        if (isEmpty()) return 0L;
+        long stamp = oldestPendingStamp;
+        if (stamp <= 0L) return 0L;
+        return Math.max(0L, System.currentTimeMillis() - stamp);
     }
 
     /**
@@ -264,6 +329,7 @@ public final class OverflowBucket implements Closeable {
             return -1L;
         }
         pending = Math.max(0, pending - samplesAcked);
+        if (isEmpty()) oldestPendingStamp = 0L;
 
         // Best-effort: eviction floor and GC. A failure here only delays
         // reclaim; the next successful batch runs them again.

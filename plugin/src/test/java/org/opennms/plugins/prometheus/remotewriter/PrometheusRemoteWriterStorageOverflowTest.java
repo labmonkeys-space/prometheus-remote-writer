@@ -61,6 +61,7 @@ class PrometheusRemoteWriterStorageOverflowTest {
         c.setWriteUrl(server.url("/api/v1/push").toString());
         c.setReadUrl(server.url("/prometheus").toString());
         c.setQueueCapacity(capacity);
+        c.setWriterShards(1);   // these cases size one queue deliberately; 0.8.0 defaults to 4
         c.setStorePolicy("partial");
         c.setBatchSize(1);
         c.setFlushIntervalMs(50);
@@ -195,6 +196,7 @@ class PrometheusRemoteWriterStorageOverflowTest {
         PrometheusRemoteWriterConfig c = new PrometheusRemoteWriterConfig();
         c.setWriteUrl(server.url("/api/v1/push").toString());
         c.setReadUrl(server.url("/prometheus").toString());
+        c.setWriterShards(1);   // one queue, deliberately tiny; 0.8.0 defaults to 4
         c.setQueueCapacity(1);
         c.setBatchSize(1);
         c.setStorePolicy("partial");

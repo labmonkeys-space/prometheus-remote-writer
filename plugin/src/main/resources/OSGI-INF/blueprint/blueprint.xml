@@ -79,6 +79,7 @@
             <cm:property name="overflow.dir"            value=""/>
             <cm:property name="overflow.max-size-bytes" value="4294967296"/>
             <cm:property name="overflow.full"           value="refuse"/>
+            <cm:property name="overflow.drain"          value="ordered"/>
             <cm:property name="overflow.fsync"          value="batch"/>
         </cm:default-properties>
     </cm:property-placeholder>
@@ -137,6 +138,7 @@
         <property name="overflowDir"             value="${overflow.dir}"/>
         <property name="overflowMaxSizeBytes"    value="${overflow.max-size-bytes}"/>
         <property name="overflowFull"            value="${overflow.full}"/>
+        <property name="overflowDrain"           value="${overflow.drain}"/>
         <property name="overflowFsync"           value="${overflow.fsync}"/>
     </bean>
 
