@@ -7,6 +7,8 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-09-13
+
 ### Removed
 
 - **BREAKING: the `wal.*` configuration keys** (#165, epic #168). `wal.enabled`, `wal.path`, `wal.max-size-bytes`, `wal.segment-size-bytes`, `wal.fsync` and `wal.overflow` are gone, with no aliases, and so is the validation rule that forbade `writer.shards > 1` alongside the WAL. Leftover `wal.*` lines in an existing `.cfg` are inert rather than an error. The mapping: `wal.enabled=true` becomes a non-zero `overflow.max-size-bytes` (now the default) and `wal.enabled=false` becomes `overflow.max-size-bytes=0`; `wal.path` becomes `overflow.dir`; `wal.max-size-bytes` becomes `overflow.max-size-bytes`; `wal.fsync=never` becomes `overflow.fsync=none`; `wal.overflow=backpressure|drop-oldest` becomes `overflow.full=refuse|drop-oldest`. `wal.segment-size-bytes` is removed outright — segment size is derived as an eighth of a shard's slice. `samples_dropped_wal_full_total` is replaced by `samples_dropped_overflow_full_total`.
@@ -1693,6 +1695,7 @@ Go sanitization rules.
   `etc/org.opennms.plugins.tss.prometheusremotewriter.cfg` on install.
 
 [Unreleased]: https://github.com/labmonkeys-space/prometheus-remote-writer/compare/v0.7.0...HEAD
+[0.8.0]: https://github.com/labmonkeys-space/prometheus-remote-writer/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/labmonkeys-space/prometheus-remote-writer/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/labmonkeys-space/prometheus-remote-writer/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/labmonkeys-space/prometheus-remote-writer/compare/v0.5.1...v0.6.0
