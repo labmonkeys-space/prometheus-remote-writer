@@ -25,6 +25,7 @@ import org.opennms.plugins.prometheus.remotewriter.config.PrometheusRemoteWriter
 import org.opennms.plugins.prometheus.remotewriter.metrics.PluginMetrics;
 import org.opennms.plugins.prometheus.remotewriter.sanitize.Sanitizer;
 import org.opennms.plugins.prometheus.remotewriter.wire.MappedSample;
+import org.opennms.plugins.prometheus.remotewriter.wire.SeriesKey;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -338,7 +339,9 @@ public final class LabelMapper {
         return new MappedSample(
                 labels,
                 sample.getTime().toEpochMilli(),
-                sample.getValue());
+                sample.getValue(),
+                SeriesKey.of(labels),
+                System.currentTimeMillis());
     }
 
     // -- defaults -------------------------------------------------------------

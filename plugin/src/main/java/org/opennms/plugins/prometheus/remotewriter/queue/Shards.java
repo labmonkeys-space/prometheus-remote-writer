@@ -82,8 +82,10 @@ public final class Shards {
      * is content-based and iteration-order-independent by the {@code Map}
      * contract — so equal label sets hash identically regardless of how the
      * map was built. This is the same identity the wire builders group
-     * {@code TimeSeries} entries by (map equality on the sorted label set),
-     * which keeps "one series, one shard, one in-flight request" airtight.
+     * {@code TimeSeries} entries by — they key on
+     * {@link org.opennms.plugins.prometheus.remotewriter.wire.SeriesKey},
+     * which is equal exactly when the label maps are — so "one series, one
+     * shard, one in-flight request" stays airtight.
      */
     public static int shardFor(Map<String, String> labels, int shardCount) {
         if (shardCount == 1) return 0;

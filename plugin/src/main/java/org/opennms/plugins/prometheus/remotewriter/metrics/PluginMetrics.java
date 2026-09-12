@@ -80,6 +80,10 @@ public final class PluginMetrics {
     public static final String SAMPLES_DROPPED_SHUTDOWN        = "samples_dropped_shutdown_total";
     /** Maximum total queue depth observed since activation. */
     public static final String QUEUE_DEPTH_HIGH_WATER          = "queue_depth_high_water";
+    /** Sum over written samples of (acknowledgement time - store() time) in ms.
+     *  Over samples_written_total it is the mean end-to-end latency, the unit
+     *  the latency budget is stated in. Includes time on disk for WAL samples. */
+    public static final String SAMPLE_LATENCY_MS               = "sample_latency_ms_total";
 
     /** MBean domain every counter and gauge is published under while the
      *  plugin is active; the metric name is the MBean's {@code name} key. */
@@ -127,6 +131,7 @@ public final class PluginMetrics {
     private final java.util.concurrent.atomic.AtomicLong flusherLingerNanos = new java.util.concurrent.atomic.AtomicLong();
     private final java.util.concurrent.atomic.AtomicLong flusherBuildNanos = new java.util.concurrent.atomic.AtomicLong();
     private final java.util.concurrent.atomic.AtomicLong storeCallNanos = new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong sampleLatencyMs = new java.util.concurrent.atomic.AtomicLong();
     private final Counter storeCalls;
     private final Counter storeCallsFailed;
     private final Counter storeSamplesOffered;
@@ -158,6 +163,7 @@ public final class PluginMetrics {
         registerLongGauge(FLUSHER_LINGER_MS, () -> flusherLingerNanos.get() / 1_000_000L);
         registerLongGauge(FLUSHER_BUILD_MS, () -> flusherBuildNanos.get() / 1_000_000L);
         registerLongGauge(STORE_CALL_DURATION_MS, () -> storeCallNanos.get() / 1_000_000L);
+        registerLongGauge(SAMPLE_LATENCY_MS, sampleLatencyMs::get);
         this.storeCalls                   = registry.counter(STORE_CALLS);
         this.storeCallsFailed             = registry.counter(STORE_CALLS_FAILED);
         this.storeSamplesOffered          = registry.counter(STORE_SAMPLES_OFFERED);
@@ -193,6 +199,18 @@ public final class PluginMetrics {
     public void flusherLingerNanos(long n)             { if (n > 0) flusherLingerNanos.addAndGet(n); }
     public void flusherBuildNanos(long n)              { if (n > 0) flusherBuildNanos.addAndGet(n); }
     public void storeCallNanos(long n)                 { if (n > 0) storeCallNanos.addAndGet(n); }
+    /** Book end-to-end latency for {@code written} samples whose enqueue stamps sum to {@code enqueuedEpochMsSum}. */
+    public void sampleLatency(int written, long enqueuedEpochMsSum) {
+        if (written <= 0) return;
+        // The sum of ages is written × now − enqueuedEpochMsSum, but both
+        // products leave long range past a few million samples in one batch.
+        // Factoring through the mean stamp multiplies only the age, which is
+        // seconds, and stays exact: written×(now−mean) − remainder.
+        long meanStamp = enqueuedEpochMsSum / written;
+        long remainder = enqueuedEpochMsSum % written;
+        long sum = written * (System.currentTimeMillis() - meanStamp) - remainder;
+        if (sum > 0) sampleLatencyMs.addAndGet(sum);
+    }
     public void storeCall()                            { storeCalls.inc(); }
     public void storeCallFailed()                      { storeCallsFailed.inc(); }
     public void storeSamplesOffered(long n)            { if (n > 0) storeSamplesOffered.inc(n); }

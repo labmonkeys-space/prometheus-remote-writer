@@ -280,7 +280,7 @@ public final class WalFlusher implements Closeable {
             // / duplicate). Still advance the checkpoint — the samples
             // were WAL-durable and are now accounted for. samplesWritten
             // is already 0 here, so the success-branch tick is a no-op.
-            advanceAfterBatch(batch.newOffset(), BatchOutcome.success(0));
+            advanceAfterBatch(batch.newOffset(), BatchOutcome.success(0, 0L));
             return;
         }
 
@@ -295,7 +295,7 @@ public final class WalFlusher implements Closeable {
                 // reader rewinds and the batch re-ships next cycle,
                 // and we don't want to double-count.
                 advanceAfterBatch(batch.newOffset(),
-                        BatchOutcome.success(built.samplesWritten()));
+                        BatchOutcome.success(built.samplesWritten(), built.enqueuedEpochMsSum()));
             }
             case DROPPED_4XX -> {
                 LOG.warn("wal-dropped batch of {} samples after 4xx: status={}",
@@ -324,9 +324,9 @@ public final class WalFlusher implements Closeable {
      * on a transient advance failure that triggers a reader-rewind +
      * retry — same samples would re-ship, counters would tick again.
      */
-    private record BatchOutcome(boolean success, int samplesWritten, int samplesDropped4xx) {
-        static BatchOutcome success(int n)    { return new BatchOutcome(true,  n, 0); }
-        static BatchOutcome dropped4xx(int n) { return new BatchOutcome(false, 0, n); }
+    private record BatchOutcome(boolean success, int samplesWritten, int samplesDropped4xx, long enqueuedEpochMsSum) {
+        static BatchOutcome success(int n, long enqueuedEpochMsSum) { return new BatchOutcome(true, n, 0, enqueuedEpochMsSum); }
+        static BatchOutcome dropped4xx(int n) { return new BatchOutcome(false, 0, n, 0L); }
     }
 
     /**
@@ -378,6 +378,7 @@ public final class WalFlusher implements Closeable {
         // counters and clear the pending-sample tracker.
         if (outcome.success()) {
             metrics.samplesWritten(outcome.samplesWritten());
+            metrics.sampleLatency(outcome.samplesWritten(), outcome.enqueuedEpochMsSum());
         } else {
             metrics.samplesDropped4xx(outcome.samplesDropped4xx());
             metrics.walBatchesDropped4xx(1);

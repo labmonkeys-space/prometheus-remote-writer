@@ -135,4 +135,22 @@ class WalEntryCodecTest {
     private static MappedSample sample(Map<String, String> labels, long ts, double value) {
         return new MappedSample(new LinkedHashMap<>(labels), ts, value);
     }
+
+    @Test
+    void round_trip_preserves_series_key_and_enqueue_stamp() {
+        MappedSample in = new MappedSample(java.util.Map.of("__name__", "m", "node", "n1"), 1_000L, 1.5, 123_456L);
+        MappedSample out = WalEntryCodec.decode(WalEntryCodec.encode(in));
+        assertThat(out.key()).isEqualTo(in.key());
+        assertThat(out.enqueuedEpochMs()).isEqualTo(123_456L);
+    }
+
+    @Test
+    void legacy_frame_without_stamp_decodes_with_replay_time() {
+        // A frame written before the stamp existed carries 0 in the field.
+        byte[] legacy = org.opennms.plugins.prometheus.remotewriter.wal.proto.WalEntry.newBuilder()
+                .setTimestampMs(1_000L).setMetricName("m").setValue(1.0).putLabels("node", "n1").build().toByteArray();
+        long before = System.currentTimeMillis();
+        MappedSample out = WalEntryCodec.decode(legacy);
+        assertThat(out.enqueuedEpochMs()).isBetween(before, System.currentTimeMillis());
+    }
 }

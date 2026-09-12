@@ -41,4 +41,9 @@ message WalEntry {
   // round-trip (protobuf map iteration is deterministic in google-java
   // runtime output).
   map<string, string> labels = 4;
+  // Wall-clock time (ms since epoch) the sample entered store(). Summed at
+  // acknowledgement into sample_latency_ms_total, so a replayed sample's
+  // latency counts from its original arrival. 0 in frames written before
+  // this field existed; the decoder then stamps replay time.
+  int64 enqueued_epoch_ms = 5;
 }
