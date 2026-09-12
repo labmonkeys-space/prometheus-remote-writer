@@ -31,15 +31,13 @@ import org.slf4j.LoggerFactory;
  *
  * <p>The flush thread wakes on either of:
  * <ul>
- *   <li>A sample arriving in the queue — the {@link SampleQueue#pollBatch}
- *       call returns as soon as the first sample is available, then drains
- *       up to {@code batch.size - 1} more without blocking.</li>
+ *   <li>A sample arriving in the queue — {@link SampleQueue#pollBatch(int, long, TimeUnit, long)}
+ *       takes it, drains what is queued behind it and, when a linger is
+ *       configured, waits up to {@code batch.linger-ms} for the batch to
+ *       reach {@code batch.size}, returning early the moment it does.</li>
  *   <li>The flush interval elapsing with an empty queue — the poll returns
- *       an empty list and the iteration becomes a no-op.</li>
+ *       an empty batch and the iteration becomes a no-op.</li>
  * </ul>
- * This gives us timer-driven flushing when idle and throughput-driven
- * flushing under load, without the complexity of a separate size-triggered
- * condition variable.
  */
 public final class Flusher {
 
@@ -49,6 +47,7 @@ public final class Flusher {
     private final RemoteWriteHttpClient httpClient;
     private final int batchSize;
     private final long flushIntervalMs;
+    private final long lingerMs;
     private final PluginMetrics metrics;
     private final Function<Collection<MappedSample>, BuildResult> builder;
     private final String threadName;
@@ -79,14 +78,17 @@ public final class Flusher {
     public Flusher(SampleQueue queue, RemoteWriteHttpClient httpClient,
                    int batchSize, long flushIntervalMs, PluginMetrics metrics,
                    Function<Collection<MappedSample>, BuildResult> builder) {
-        this(queue, httpClient, batchSize, flushIntervalMs, metrics, builder,
+        this(queue, httpClient, batchSize, flushIntervalMs, 0L, metrics, builder,
                 "prometheus-remote-writer-flusher");
     }
 
     /** Full constructor — {@code threadName} keeps per-shard flushers
      *  distinguishable in thread dumps ({@code …-flusher-0}, {@code …-flusher-1}). */
+    /** Full constructor. {@code lingerMs} is how long to wait for a batch
+     *  to fill after a head sample arrived (batch.linger-ms; 0 = send on
+     *  first arrival). See {@link SampleQueue#pollBatch(int, long, TimeUnit, long)}. */
     public Flusher(SampleQueue queue, RemoteWriteHttpClient httpClient,
-                   int batchSize, long flushIntervalMs, PluginMetrics metrics,
+                   int batchSize, long flushIntervalMs, long lingerMs, PluginMetrics metrics,
                    Function<Collection<MappedSample>, BuildResult> builder,
                    String threadName) {
         this.queue          = Objects.requireNonNull(queue);
@@ -98,6 +100,8 @@ public final class Flusher {
         if (flushIntervalMs < 1) throw new IllegalArgumentException("flushIntervalMs must be >= 1");
         this.batchSize       = batchSize;
         this.flushIntervalMs = flushIntervalMs;
+        if (lingerMs < 0) throw new IllegalArgumentException("lingerMs must be >= 0");
+        this.lingerMs        = lingerMs;
     }
 
     public synchronized void start() {
@@ -154,16 +158,18 @@ public final class Flusher {
     }
 
     private void run() {
-        LOG.info("flusher started (batchSize={}, flushIntervalMs={})", batchSize, flushIntervalMs);
+        LOG.info("flusher started (batchSize={}, flushIntervalMs={}, lingerMs={})", batchSize, flushIntervalMs, lingerMs);
         while (running) {
             try {
                 long waitStarted = System.nanoTime();
-                List<MappedSample> batch = queue.pollBatch(batchSize, flushIntervalMs, TimeUnit.MILLISECONDS);
-                // Everything up to the return is time with nothing to send,
-                // whether the poll timed out or a head sample finally arrived.
-                metrics.flusherIdleNanos(System.nanoTime() - waitStarted);
-                if (batch.isEmpty()) continue;
-                flushBatch(batch);
+                SampleQueue.Batch polled = queue.pollBatch(batchSize, flushIntervalMs, TimeUnit.MILLISECONDS, lingerMs);
+                // Idle is time with nothing to send: the head wait. The linger
+                // that may follow is time with something to send, by choice,
+                // and is booked separately (#162).
+                metrics.flusherIdleNanos(System.nanoTime() - waitStarted - polled.lingerNanos());
+                metrics.flusherLingerNanos(polled.lingerNanos());
+                if (polled.samples().isEmpty()) continue;
+                flushBatch(polled.samples());
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 break;

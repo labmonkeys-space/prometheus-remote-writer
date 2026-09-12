@@ -66,6 +66,43 @@ class FlusherTest {
     }
 
     @Test
+    void linger_turns_a_trickle_into_one_request() throws Exception {
+        server.enqueue(new MockResponse().setResponseCode(204));
+        server.enqueue(new MockResponse().setResponseCode(204));
+        flusher = new Flusher(queue, http, 100, 1000, 300, metrics,
+                org.opennms.plugins.prometheus.remotewriter.wire.RemoteWriteRequestBuilders.forVersion(1),
+                "test-flusher");
+        flusher.start();
+        for (int i = 0; i < 10; i++) {
+            queue.tryEnqueue(sample(i));
+            Thread.sleep(10);
+        }
+        await().atMost(Duration.ofSeconds(3)).until(() -> http.getWritesSuccessful() >= 1);
+        Thread.sleep(400); // longer than the linger: a split second batch would have landed by now
+        assertThat(server.getRequestCount()).isEqualTo(1);
+        assertThat(queue.depth()).isZero();
+        assertThat(metrics.snapshot().get(PluginMetrics.SAMPLES_WRITTEN).longValue()).isEqualTo(10L);
+        assertThat(metrics.snapshot().get(PluginMetrics.FLUSHER_LINGER_MS).longValue()).isGreaterThanOrEqualTo(200L);
+    }
+
+    @Test
+    void linger_time_is_not_idle_time() throws Exception {
+        server.enqueue(new MockResponse().setResponseCode(204));
+        flusher = new Flusher(queue, http, 100, 10_000, 200, metrics,
+                org.opennms.plugins.prometheus.remotewriter.wire.RemoteWriteRequestBuilders.forVersion(1),
+                "test-flusher");
+        long started = System.nanoTime();
+        flusher.start();
+        Thread.sleep(100); // idle: nothing queued
+        queue.tryEnqueue(sample(1));
+        long headWaitMs = (System.nanoTime() - started) / 1_000_000; // upper bound on legitimate idle
+        await().atMost(Duration.ofSeconds(3)).until(() -> http.getWritesSuccessful() == 1);
+        long idle = metrics.snapshot().get(PluginMetrics.FLUSHER_IDLE_MS).longValue();
+        assertThat(metrics.snapshot().get(PluginMetrics.FLUSHER_LINGER_MS).longValue()).isGreaterThanOrEqualTo(150L);
+        assertThat(idle).as("idle is the head wait only; the 200 ms linger must not be in it").isLessThanOrEqualTo(headWaitMs + 50);
+    }
+
+    @Test
     void waiting_on_an_empty_queue_counts_as_idle_time() throws Exception {
         flusher = new Flusher(queue, http, 100, 100, metrics);
         flusher.start();

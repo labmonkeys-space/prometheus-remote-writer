@@ -28,6 +28,8 @@ and prints them through the Karaf shell command
 | `store_samples_offered_total`              | Samples handed to `store()` before label mapping. Over a window, `offered = written + Σ dropped_* + queue_depth (+ WAL pending)`; the identity does not hold across a restart, since WAL replay writes in the new process what was offered in the old.
 | `samples_dropped_unmapped_total`           | Samples the label mapper could not map because the metric had no name. Never offered to a queue or the WAL. Only a non-OpenNMS caller of the TimeSeriesStorage API produces these.
 | `http_write_duration_ms_total`             | Wall milliseconds spent inside remote-write HTTP calls, retries and backoff included. Mean round-trip: `rate(http_write_duration_ms_total) / rate(http_writes_successful_total + http_writes_failed_total)`. Flusher utilisation: `rate(http_write_duration_ms_total) / (1000 × writer.shards)`. Samples per write: `rate(samples_written_total) / rate(http_writes_successful_total)`.
+| `store_call_duration_ms_total`             | Wall milliseconds OpenNMS's writer threads spent inside `store()`. Mean call time: `rate(store_call_duration_ms_total) / rate(store_calls_total)`. A rising mean is the first sign the plugin is holding the persister, which shows on the OpenNMS side as ring-buffer drops.
+| `flusher_linger_ms_total`                  | Milliseconds queue-mode flushers spent waiting for a batch to fill after a first sample arrived (`batch.linger-ms`). Not idle: there was something to send. Per shard, `idle + linger + build + http ≈ 1000 ms/s`.
 | `flusher_idle_ms_total`                    | Milliseconds the queue-mode flushers spent waiting for a sample with an empty queue. Idle fraction: `rate(flusher_idle_ms_total) / (1000 × writer.shards)`. Near 1 with a rising `samples_dropped_queue_full_total` means arrivals are bursty, not that the flusher is slow.
 |===
 
@@ -102,6 +104,15 @@ slow batch visibly stalls the drain.
   `http.max-connections`.
 * Queue mode only — `wal.enabled = true` requires `writer.shards = 1`
   (the WAL is a single ordered log).
+* Shards deliver their ceiling only with full batches. With the queue
+  usually empty each flusher wakes on the first sample and sends what is
+  there; at four shards on an 11,000-device fleet that was 3,300
+  requests/s of 19 samples, 40 µs of flusher time per sample against
+  5 µs at a full batch. Set `batch.linger-ms` (50–200 ms) so flushers
+  wait for batches to fill; `http_writes_successful_total` should fall
+  by one to two orders of magnitude and
+  `samples_written_total / http_writes_successful_total` approach
+  `batch.size` under load.
 * A full shard does not block samples bound for other shards. Under
   `queue.store-policy = partial` a `store()` call is attempted sample by
   sample; refused samples are counted and the call throws once at the end

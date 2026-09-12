@@ -39,6 +39,7 @@
             <cm:property name="queue.store-policy"        value="auto"/>
             <cm:property name="batch.size"                value="1000"/>
             <cm:property name="flush.interval-ms"         value="1000"/>
+            <cm:property name="batch.linger-ms"           value="0"/>
             <cm:property name="retry.max-attempts"        value="5"/>
             <cm:property name="retry.initial-backoff-ms"  value="250"/>
             <cm:property name="retry.max-backoff-ms"      value="10000"/>
@@ -106,6 +107,7 @@
         <property name="storePolicy"             value="${queue.store-policy}"/>
         <property name="batchSize"               value="${batch.size}"/>
         <property name="flushIntervalMs"         value="${flush.interval-ms}"/>
+        <property name="batchLingerMs"           value="${batch.linger-ms}"/>
         <property name="retryMaxAttempts"        value="${retry.max-attempts}"/>
         <property name="retryInitialBackoffMs"   value="${retry.initial-backoff-ms}"/>
         <property name="retryMaxBackoffMs"       value="${retry.max-backoff-ms}"/>

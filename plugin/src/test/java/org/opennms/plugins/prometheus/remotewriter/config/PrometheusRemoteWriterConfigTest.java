@@ -763,6 +763,23 @@ class PrometheusRemoteWriterConfigTest {
             .isInstanceOf(IllegalStateException.class);
     }
 
+    // ---------- batch.linger-ms -----------------------------------------------
+
+    @Test
+    void batch_linger_default_is_zero() {
+        assertThat(minimal().getBatchLingerMs()).isZero();
+    }
+
+    @Test
+    void batch_linger_rejects_negative_and_is_independent_of_flush_interval() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setBatchLingerMs(-1);
+        assertThatThrownBy(c::validate).isInstanceOf(IllegalStateException.class).hasMessageContaining("batch.linger-ms");
+        c.setFlushIntervalMs(100);
+        c.setBatchLingerMs(150); // a fast idle wake and a longer fill wait measure different things
+        c.validate();
+    }
+
     // ---------- queue.store-policy ------------------------------------------
 
     private static final String BUFFER_TYPE_PROPERTY = "org.opennms.timeseries.config.buffer_type";

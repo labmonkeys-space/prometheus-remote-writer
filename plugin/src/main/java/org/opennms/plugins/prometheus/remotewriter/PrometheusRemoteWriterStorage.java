@@ -333,7 +333,7 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
             wc = new RemoteWriteHttpClient(config, httpHeadersConfig);
             rc = new PrometheusReadClient(config, m, httpHeadersConfig);
             sh = new Shards(config.getWriterShards(), config.getQueueCapacity(), wc,
-                    config.getBatchSize(), config.getFlushIntervalMs(), m,
+                    config.getBatchSize(), config.getFlushIntervalMs(), config.getBatchLingerMs(), m,
                     org.opennms.plugins.prometheus.remotewriter.wire.RemoteWriteRequestBuilders
                             .forVersion(config.getWireProtocolVersion()));
 
@@ -366,6 +366,10 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
                     + "the WAL replaces the in-memory queue as source of truth. "
                     + "Size the WAL via wal.max-size-bytes instead.",
                     config.getQueueCapacity());
+        }
+        if (config.getBatchLingerMs() != 0) {
+            LOG.warn("batch.linger-ms={} is ignored when wal.enabled=true; the WAL flusher sends "
+                    + "what the reader returns and has no linger.", config.getBatchLingerMs());
         }
         if (config.getStorePolicy() != PrometheusRemoteWriterConfig.StorePolicy.AUTO) {
             LOG.warn("queue.store-policy={} is ignored when wal.enabled=true; "
@@ -519,20 +523,26 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
                     + "(plugin is stopped or not yet started)");
         }
         // Caller-side accounting before anything else, so offered, written
-        // and dropped reconcile from the plugin's own counters (#155).
+        // and dropped reconcile from the plugin's own counters (#155). The
+        // duration is the RED signal for this request type: it is what
+        // OpenNMS's writer threads pay per call (#162).
+        long started = System.nanoTime();
         a.metrics().storeCall();
-        if (samples == null || samples.isEmpty()) return;
-        a.metrics().storeSamplesOffered(samples.size());
-
         try {
-            if (a.walEnabled()) {
-                storeToWal(a, samples);
-            } else {
-                storeToQueue(a, samples);
+            if (samples == null || samples.isEmpty()) return;
+            a.metrics().storeSamplesOffered(samples.size());
+            try {
+                if (a.walEnabled()) {
+                    storeToWal(a, samples);
+                } else {
+                    storeToQueue(a, samples);
+                }
+            } catch (StorageException | RuntimeException e) {
+                a.metrics().storeCallFailed();
+                throw e;
             }
-        } catch (StorageException | RuntimeException e) {
-            a.metrics().storeCallFailed();
-            throw e;
+        } finally {
+            a.metrics().storeCallNanos(System.nanoTime() - started);
         }
     }
 

@@ -184,6 +184,10 @@ public class PrometheusRemoteWriterConfig {
     private int  queueCapacity          = 10_000;
     private int  batchSize              = 1_000;
     private long flushIntervalMs        = 1_000L;
+    /** {@code batch.linger-ms}: after a head sample arrives, how long a
+     *  flusher waits for the batch to reach batch.size before sending.
+     *  0 (default) sends on first arrival. Queue mode only. */
+    private long batchLingerMs          = 0L;
     private int  retryMaxAttempts       = 5;
     private long retryInitialBackoffMs  = 250L;
     private long retryMaxBackoffMs      = 10_000L;
@@ -456,6 +460,9 @@ public class PrometheusRemoteWriterConfig {
         }
         if (flushIntervalMs < 1) {
             throw new IllegalStateException("flush.interval-ms must be >= 1");
+        }
+        if (batchLingerMs < 0) {
+            throw new IllegalStateException("batch.linger-ms must be >= 0 (got " + batchLingerMs + ")");
         }
         if (retryMaxAttempts < 0) {
             throw new IllegalStateException("retry.max-attempts must be >= 0");
@@ -1010,6 +1017,7 @@ public class PrometheusRemoteWriterConfig {
         diffInt(out, "queue.capacity",            other.queueCapacity,         queueCapacity);
         diffInt(out, "batch.size",                other.batchSize,             batchSize);
         diffLong(out, "flush.interval-ms",        other.flushIntervalMs,       flushIntervalMs);
+        diffLong(out, "batch.linger-ms",          other.batchLingerMs,         batchLingerMs);
         diffInt(out, "retry.max-attempts",        other.retryMaxAttempts,      retryMaxAttempts);
         diffLong(out, "retry.initial-backoff-ms", other.retryInitialBackoffMs, retryInitialBackoffMs);
         diffLong(out, "retry.max-backoff-ms",     other.retryMaxBackoffMs,     retryMaxBackoffMs);
@@ -1062,6 +1070,7 @@ public class PrometheusRemoteWriterConfig {
     public void setQueueCapacity(int v)            { queueCapacity = v; }
     public void setBatchSize(int v)                { batchSize = v; }
     public void setFlushIntervalMs(long v)         { flushIntervalMs = v; }
+    public void setBatchLingerMs(long v)           { batchLingerMs = v; }
     public void setRetryMaxAttempts(int v)         { retryMaxAttempts = v; }
     public void setRetryInitialBackoffMs(long v)   { retryInitialBackoffMs = v; }
     public void setRetryMaxBackoffMs(long v)       { retryMaxBackoffMs = v; }
@@ -1403,6 +1412,7 @@ public class PrometheusRemoteWriterConfig {
     public int     getQueueCapacity()         { return queueCapacity; }
     public int     getBatchSize()             { return batchSize; }
     public long    getFlushIntervalMs()       { return flushIntervalMs; }
+    public long    getBatchLingerMs()         { return batchLingerMs; }
     public int     getRetryMaxAttempts()      { return retryMaxAttempts; }
     public long    getRetryInitialBackoffMs() { return retryInitialBackoffMs; }
     public long    getRetryMaxBackoffMs()     { return retryMaxBackoffMs; }

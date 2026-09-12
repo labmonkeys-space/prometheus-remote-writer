@@ -34,6 +34,9 @@ WAL replaces the in-memory `queue.capacity` buffer as source of truth.
 .Knobs that change meaning when `wal.enabled=true`
 ====
 * `queue.capacity` is *ignored* — a WARN is logged at startup if explicitly set.
+* `batch.linger-ms` and `queue.store-policy` are *ignored* — the WAL flusher
+  sends what the reader returns and a full WAL refuses every later append. A
+  WARN is logged at startup if either is set.
 * `shutdown.grace-period-ms` no longer bounds a drain window — the WAL is
   durable, so unflushed samples persist across restart. Instead the knob
   bounds the in-flight HTTP request wait at shutdown.

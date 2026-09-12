@@ -99,7 +99,7 @@ class ShardsTest {
 
     @Test
     void capacity_is_split_across_shards_without_losing_slots() {
-        shards = new Shards(3, 100, http, 10, 10_000, metrics, batch -> failBuild());
+        shards = new Shards(3, 100, http, 10, 10_000, 0L, metrics, batch -> failBuild());
         int total = 0;
         for (SampleQueue q : shards.queuesForTesting()) {
             total += q.capacity();
@@ -109,7 +109,7 @@ class ShardsTest {
 
     @Test
     void try_enqueue_reports_a_full_shard_without_throwing_and_siblings_still_accept() throws Exception {
-        shards = new Shards(2, 2, http, 1, 10_000, metrics, batch -> failBuild());
+        shards = new Shards(2, 2, http, 1, 10_000, 0L, metrics, batch -> failBuild());
         Map<String, String> shard0 = null;
         Map<String, String> shard1 = null;
         for (int i = 0; i < 64 && (shard0 == null || shard1 == null); i++) {
@@ -128,7 +128,7 @@ class ShardsTest {
     @Test
     void shard_overflow_is_refused_without_touching_siblings() throws Exception {
         // Two shards, tiny capacity, flushers never started — queues only.
-        shards = new Shards(2, 4, http, 2, 10_000, metrics, batch -> failBuild());
+        shards = new Shards(2, 4, http, 2, 10_000, 0L, metrics, batch -> failBuild());
         // Find two label sets landing on different shards.
         Map<String, String> shard0 = null;
         Map<String, String> shard1 = null;
@@ -151,7 +151,7 @@ class ShardsTest {
 
     @Test
     void skew_is_100_when_empty_and_maximal_when_one_shard_owns_everything() throws Exception {
-        shards = new Shards(4, 400, http, 10, 10_000, metrics, batch -> failBuild());
+        shards = new Shards(4, 400, http, 10, 10_000, 0L, metrics, batch -> failBuild());
         assertThat(shards.skewPct()).isEqualTo(100);
 
         // Enqueue several samples of ONE series — all land on one shard.
@@ -186,7 +186,7 @@ class ShardsTest {
             }
         });
 
-        shards = new Shards(2, 100, http, 1, 20, metrics,
+        shards = new Shards(2, 100, http, 1, 20, 0L, metrics,
                 org.opennms.plugins.prometheus.remotewriter.wire.RemoteWriteRequestBuilders.forVersion(1));
 
         Map<String, String> s0 = null;
@@ -221,7 +221,7 @@ class ShardsTest {
                 return new MockResponse().setResponseCode(204);
             }
         });
-        shards = new Shards(2, 100, http, 10, 10_000, metrics,
+        shards = new Shards(2, 100, http, 10, 10_000, 0L, metrics,
                 org.opennms.plugins.prometheus.remotewriter.wire.RemoteWriteRequestBuilders.forVersion(1));
         for (int i = 0; i < 10; i++) {
             shards.tryEnqueue(new MappedSample(Map.of("__name__", "m", "node", "n" + i), i, 1.0));
