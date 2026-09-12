@@ -893,6 +893,15 @@ class PrometheusRemoteWriterStorageTest {
                 assertThat(metric(s, PluginMetrics.STORE_CALLS) - calls).isEqualTo(2L);
                 assertThat(metric(s, PluginMetrics.STORE_CALLS_FAILED) - failed).isEqualTo(1L);
                 assertThat(metric(s, PluginMetrics.STORE_SAMPLES_OFFERED) - offered).isEqualTo(5L);
+
+                // Duration: one large call maps thousands of samples before the
+                // queue refuses, which takes measurable wall time.
+                long duration0 = metric(s, PluginMetrics.STORE_CALL_DURATION_MS);
+                java.util.List<org.opennms.integration.api.v1.timeseries.Sample> big = new java.util.ArrayList<>();
+                for (int i = 0; i < 20_000; i++) big.add(sample("big" + i, "m" + (i % 50)));
+                assertThatThrownBy(() -> s.store(big)).isInstanceOf(StorageException.class);
+                assertThat(metric(s, PluginMetrics.STORE_CALL_DURATION_MS) - duration0)
+                        .as("mapping 20k samples inside store() is milliseconds, not zero").isGreaterThanOrEqualTo(1L);
             } finally {
                 s.stop();
             }

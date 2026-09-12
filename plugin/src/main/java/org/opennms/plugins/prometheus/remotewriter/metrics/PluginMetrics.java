@@ -50,6 +50,13 @@ public final class PluginMetrics {
     /** Milliseconds the queue-mode flushers spent waiting in pollBatch with
      *  nothing to send. Under writer.shards > 1 every flusher adds to it. */
     public static final String FLUSHER_IDLE_MS                 = "flusher_idle_ms_total";
+    /** Milliseconds queue-mode flushers spent waiting for a batch to fill
+     *  after a head sample arrived (batch.linger-ms). Not idle: there was
+     *  something to send. */
+    public static final String FLUSHER_LINGER_MS               = "flusher_linger_ms_total";
+    /** Wall milliseconds OpenNMS's writer threads spent inside store().
+     *  Over store_calls_total it is the mean call time. */
+    public static final String STORE_CALL_DURATION_MS          = "store_call_duration_ms_total";
     public static final String STORE_CALLS                     = "store_calls_total";
     public static final String STORE_CALLS_FAILED              = "store_calls_failed_total";
     /** Samples handed to store() before mapping: the caller's view of offered load. */
@@ -102,6 +109,8 @@ public final class PluginMetrics {
     /** Nanoseconds, summed exactly; exposed as a millisecond gauge so sub-ms
      *  polls do not round to zero and vanish. */
     private final java.util.concurrent.atomic.AtomicLong flusherIdleNanos = new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong flusherLingerNanos = new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong storeCallNanos = new java.util.concurrent.atomic.AtomicLong();
     private final Counter storeCalls;
     private final Counter storeCallsFailed;
     private final Counter storeSamplesOffered;
@@ -129,6 +138,8 @@ public final class PluginMetrics {
         this.findMetricsTwoPhase          = registry.counter(FIND_METRICS_TWO_PHASE_TOTAL);
         this.findMetricsPhase2Batches     = registry.counter(FIND_METRICS_PHASE2_BATCHES_TOTAL);
         registerLongGauge(FLUSHER_IDLE_MS, () -> flusherIdleNanos.get() / 1_000_000L);
+        registerLongGauge(FLUSHER_LINGER_MS, () -> flusherLingerNanos.get() / 1_000_000L);
+        registerLongGauge(STORE_CALL_DURATION_MS, () -> storeCallNanos.get() / 1_000_000L);
         this.storeCalls                   = registry.counter(STORE_CALLS);
         this.storeCallsFailed             = registry.counter(STORE_CALLS_FAILED);
         this.storeSamplesOffered          = registry.counter(STORE_SAMPLES_OFFERED);
@@ -160,6 +171,8 @@ public final class PluginMetrics {
     public void findMetricsPhase2Batches(long n)       { if (n > 0) findMetricsPhase2Batches.inc(n); }
 
     public void flusherIdleNanos(long n)               { if (n > 0) flusherIdleNanos.addAndGet(n); }
+    public void flusherLingerNanos(long n)             { if (n > 0) flusherLingerNanos.addAndGet(n); }
+    public void storeCallNanos(long n)                 { if (n > 0) storeCallNanos.addAndGet(n); }
     public void storeCall()                            { storeCalls.inc(); }
     public void storeCallFailed()                      { storeCallsFailed.inc(); }
     public void storeSamplesOffered(long n)            { if (n > 0) storeSamplesOffered.inc(n); }

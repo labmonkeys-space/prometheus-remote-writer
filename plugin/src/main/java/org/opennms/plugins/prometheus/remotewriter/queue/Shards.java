@@ -51,6 +51,7 @@ public final class Shards {
                   RemoteWriteHttpClient httpClient,
                   int batchSize,
                   long flushIntervalMs,
+                  long lingerMs,
                   PluginMetrics metrics,
                   Function<Collection<MappedSample>, BuildResult> builder) {
         if (shardCount < 1) throw new IllegalArgumentException("shardCount must be >= 1");
@@ -70,7 +71,7 @@ public final class Shards {
             String threadName = shardCount == 1
                     ? "prometheus-remote-writer-flusher"
                     : "prometheus-remote-writer-flusher-" + i;
-            flushers[i] = new Flusher(queues[i], httpClient, batchSize, flushIntervalMs,
+            flushers[i] = new Flusher(queues[i], httpClient, batchSize, flushIntervalMs, lingerMs,
                     metrics, builder, threadName);
         }
     }

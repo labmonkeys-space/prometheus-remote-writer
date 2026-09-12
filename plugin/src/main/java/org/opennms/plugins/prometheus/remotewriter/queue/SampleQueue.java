@@ -57,23 +57,55 @@ public final class SampleQueue {
         return true;
     }
 
+    /** What {@link #pollBatch(int, long, TimeUnit, long)} hands back: the
+     *  samples and how long the call spent lingering for the batch to fill
+     *  (zero when it returned on a full batch or with linger disabled). */
+    public record Batch(List<MappedSample> samples, long lingerNanos) {
+        static final Batch EMPTY = new Batch(List.of(), 0L);
+    }
+
     /**
-     * Wait up to {@code timeout} for a sample; on arrival, additionally drain
-     * up to {@code maxBatch - 1} more samples without blocking. Returns the
-     * accumulated list, which is empty when the timeout elapses with an
-     * empty queue.
+     * Wait up to {@code timeout} for a head sample, drain what is queued
+     * behind it, then, once a head sample has arrived, wait up to
+     * {@code lingerMs} for the batch to reach
+     * {@code maxBatch}, draining at every arrival and returning early the
+     * moment it is full. {@code lingerMs == 0} sends on the first arrival
+     * as before. The linger wait is reported separately from the head wait
+     * because it is time with something to send, by choice (#162).
      */
-    public List<MappedSample> pollBatch(int maxBatch, long timeout, TimeUnit unit)
+    public Batch pollBatch(int maxBatch, long timeout, TimeUnit unit, long lingerMs)
             throws InterruptedException {
         if (maxBatch < 1) throw new IllegalArgumentException("maxBatch must be >= 1");
         MappedSample head = queue.poll(timeout, unit);
-        if (head == null) return List.of();
+        if (head == null) return Batch.EMPTY;
 
         List<MappedSample> batch = new java.util.ArrayList<>(maxBatch);
         batch.add(head);
         queue.drainTo(batch, maxBatch - 1);
+
+        long lingerNanos = 0L;
+        if (lingerMs > 0 && batch.size() < maxBatch) {
+            long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(lingerMs);
+            long started = System.nanoTime();
+            try {
+                while (batch.size() < maxBatch) {
+                    long remaining = deadline - System.nanoTime();
+                    if (remaining <= 0) break;
+                    MappedSample next = queue.poll(remaining, TimeUnit.NANOSECONDS);
+                    if (next == null) break;          // linger elapsed
+                    batch.add(next);
+                    queue.drainTo(batch, maxBatch - batch.size());
+                }
+            } catch (InterruptedException e) {
+                // Shutdown interrupt mid-linger: the samples already taken
+                // off the queue must still be sent, so return the partial
+                // batch and leave the flag set for the caller's next poll.
+                Thread.currentThread().interrupt();
+            }
+            lingerNanos = System.nanoTime() - started;
+        }
         samplesDequeued.addAndGet(batch.size());
-        return batch;
+        return new Batch(batch, lingerNanos);
     }
 
     /** Drain up to {@code maxBatch} samples without blocking. */

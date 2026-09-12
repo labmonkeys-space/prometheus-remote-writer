@@ -7,6 +7,16 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`batch.linger-ms`** (#162, epic #168). After a first sample arrives, a queue-mode flusher can wait up to this long for the batch to reach `batch.size`, draining at every arrival and sending early when full. Default `0` keeps send-on-first-arrival. Queue mode only.
+  On the benchmark fleet, four shards at an empty queue sent 3,300 requests a second of 19 samples each; a linger of 50–200 ms trades that much latency for full batches.
+- **`flusher_linger_ms_total`** and **`store_call_duration_ms_total`**. The first keeps the per-shard time budget complete (idle, linger, build, HTTP). The second is the wall time OpenNMS's writer threads spend inside `store()`, the caller-facing duration that was missing from the plugin's metrics.
+
+### Fixed
+
+- The shipped cfg comment and the configuration reference described `flush.interval-ms` as "flush whenever the batch fills or this interval elapses". The code never did that: the interval is the wait for a first sample on an empty queue, and a flusher sent as soon as one arrived. Both now say what the code does, and `batch.linger-ms` is the knob that provides the batch-fill wait.
+
 ## [0.7.0] — 2026-09-12
 
 ### Added
