@@ -30,7 +30,8 @@ public final class WalEntryCodec {
     public static byte[] encode(MappedSample sample) {
         WalEntry.Builder b = WalEntry.newBuilder()
                 .setTimestampMs(sample.timestampMs())
-                .setValue(sample.value());
+                .setValue(sample.value())
+                .setEnqueuedEpochMs(sample.enqueuedEpochMs());
         for (Map.Entry<String, String> e : sample.labels().entrySet()) {
             if (MappedSample.METRIC_NAME_LABEL.equals(e.getKey())) {
                 b.setMetricName(e.getValue());
@@ -75,6 +76,9 @@ public final class WalEntryCodec {
         Map<String, String> labels = new LinkedHashMap<>(entry.getLabelsCount() + 1);
         labels.put(MappedSample.METRIC_NAME_LABEL, entry.getMetricName());
         labels.putAll(entry.getLabelsMap());
-        return new MappedSample(labels, entry.getTimestampMs(), entry.getValue());
+        long enqueued = entry.getEnqueuedEpochMs();
+        // Legacy frame (field absent): count latency from replay, not from 1970.
+        if (enqueued == 0L) enqueued = System.currentTimeMillis();
+        return new MappedSample(labels, entry.getTimestampMs(), entry.getValue(), enqueued);
     }
 }

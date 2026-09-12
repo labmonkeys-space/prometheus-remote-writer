@@ -322,6 +322,7 @@ public final class Flusher {
         switch (result.outcome()) {
             case SUCCESS -> {
                 metrics.samplesWritten(built.samplesWritten());
+                metrics.sampleLatency(built.samplesWritten(), built.enqueuedEpochMsSum());
                 LOG.debug("flushed {} samples in {} bytes on attempt {}",
                         built.samplesWritten(), built.compressedPayload().length, result.attemptsMade());
             }

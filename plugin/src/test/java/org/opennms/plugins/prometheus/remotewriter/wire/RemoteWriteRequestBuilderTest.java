@@ -181,4 +181,28 @@ class RemoteWriteRequestBuilderTest {
     private static WriteRequest parse(BuildResult r) throws Exception {
         return WriteRequest.parseFrom(Snappy.uncompress(r.compressedPayload()));
     }
+
+    @Test
+    void build_result_sums_the_enqueue_stamps_of_written_samples() {
+        MappedSample a = new MappedSample(java.util.Map.of("__name__", "m", "i", "1"), 1_000L, 1.0, 5_000L);
+        MappedSample b = new MappedSample(java.util.Map.of("__name__", "m", "i", "2"), 1_000L, 2.0, 7_000L);
+        MappedSample nan = new MappedSample(java.util.Map.of("__name__", "m", "i", "3"), 1_000L, Double.NaN, 9_000L);
+        RemoteWriteRequestBuilder.BuildResult r = RemoteWriteRequestBuilder.build(java.util.List.of(a, b, nan));
+        assertThat(r.samplesWritten()).isEqualTo(2);
+        assertThat(r.enqueuedEpochMsSum()).as("dropped samples are not in the latency sum").isEqualTo(12_000L);
+    }
+
+    @Test
+    void samples_with_equal_labels_in_different_orders_share_one_series() throws Exception {
+        java.util.Map<String, String> l1 = new java.util.LinkedHashMap<>(); l1.put("__name__", "m"); l1.put("node", "n");
+        java.util.Map<String, String> l2 = new java.util.LinkedHashMap<>(); l2.put("node", "n"); l2.put("__name__", "m");
+        RemoteWriteRequestBuilder.BuildResult r = RemoteWriteRequestBuilder.build(java.util.List.of(
+                new MappedSample(l1, 1_000L, 1.0), new MappedSample(l2, 2_000L, 2.0)));
+        org.opennms.plugins.prometheus.remotewriter.wire.proto.WriteRequest req =
+                org.opennms.plugins.prometheus.remotewriter.wire.proto.WriteRequest.parseFrom(
+                        org.xerial.snappy.Snappy.uncompress(r.compressedPayload()));
+        assertThat(req.getTimeseriesCount()).isEqualTo(1);
+        assertThat(req.getTimeseries(0).getSamplesCount()).isEqualTo(2);
+        assertThat(req.getTimeseries(0).getLabels(0).getName()).isEqualTo("__name__");
+    }
 }

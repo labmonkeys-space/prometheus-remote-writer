@@ -13,7 +13,6 @@ import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.TreeMap;
 
 import org.opennms.plugins.prometheus.remotewriter.wire.proto.Label;
 import org.opennms.plugins.prometheus.remotewriter.wire.proto.Sample;
@@ -38,7 +37,8 @@ public final class RemoteWriteRequestBuilder {
             int seriesCount,
             int samplesWritten,
             int samplesDroppedNonfinite,
-            int samplesDroppedDuplicate) {
+            int samplesDroppedDuplicate,
+            long enqueuedEpochMsSum) {
         public boolean hasContent() { return samplesWritten > 0; }
     }
 
@@ -50,25 +50,26 @@ public final class RemoteWriteRequestBuilder {
 
         // Group by canonical (sorted) label set. LinkedHashMap preserves
         // first-seen series order, which gives stable output for tests.
-        Map<SortedLabels, List<MappedSample>> bySeries = new LinkedHashMap<>();
+        Map<SeriesKey, List<MappedSample>> bySeries = new LinkedHashMap<>();
         for (MappedSample s : samples) {
             if (!Double.isFinite(s.value())) {
                 dropped++;
                 continue;
             }
-            SortedLabels key = SortedLabels.from(s.labels());
-            bySeries.computeIfAbsent(key, k -> new ArrayList<>()).add(s);
+            bySeries.computeIfAbsent(s.key(), k -> new ArrayList<>()).add(s);
         }
 
         WriteRequest.Builder req = WriteRequest.newBuilder();
         int written = 0;
 
-        for (Map.Entry<SortedLabels, List<MappedSample>> entry : bySeries.entrySet()) {
+        long enqueuedSum = 0L;
+        for (Map.Entry<SeriesKey, List<MappedSample>> entry : bySeries.entrySet()) {
             TimeSeries.Builder ts = TimeSeries.newBuilder();
-            for (Map.Entry<String, String> l : entry.getKey().sorted.entrySet()) {
+            SeriesKey key = entry.getKey();
+            for (int i = 0; i < key.size(); i++) {
                 ts.addLabels(Label.newBuilder()
-                        .setName(l.getKey())
-                        .setValue(l.getValue())
+                        .setName(key.names()[i])
+                        .setValue(key.values()[i])
                         .build());
             }
             List<MappedSample> seriesSamples = entry.getValue();
@@ -93,6 +94,7 @@ public final class RemoteWriteRequestBuilder {
                         .setTimestamp(s.timestampMs())
                         .build());
                 written++;
+                enqueuedSum += s.enqueuedEpochMs();
             }
             req.addTimeseries(ts.build());
         }
@@ -110,13 +112,8 @@ public final class RemoteWriteRequestBuilder {
                 bySeries.size(),
                 written,
                 dropped,
-                duplicates);
+                duplicates,
+                enqueuedSum);
     }
 
-    /** Canonicalised (sorted) label set used as a grouping key. */
-    private record SortedLabels(TreeMap<String, String> sorted) {
-        static SortedLabels from(Map<String, String> labels) {
-            return new SortedLabels(new TreeMap<>(labels));
-        }
-    }
 }

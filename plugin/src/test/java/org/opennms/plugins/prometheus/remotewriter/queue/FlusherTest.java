@@ -244,6 +244,17 @@ class FlusherTest {
         assertThat(queue.depth()).isZero();
     }
 
+    @Test
+    void end_to_end_latency_includes_the_time_waiting_in_the_queue() throws Exception {
+        server.enqueue(new MockResponse().setResponseCode(204));
+        queue.tryEnqueue(sample(1));
+        Thread.sleep(220);                      // sample waits before any flusher exists
+        flusher = new Flusher(queue, http, 10, 10_000, 0L, metrics, V1, "test-flusher");
+        flusher.start();
+        await().atMost(Duration.ofSeconds(3)).until(() -> http.getWritesSuccessful() == 1);
+        assertThat(metrics.snapshot().get(PluginMetrics.SAMPLE_LATENCY_MS).longValue()).isGreaterThanOrEqualTo(200L);
+    }
+
     private static MappedSample sample(int i) {
         return new MappedSample(
                 Map.of("__name__", "t", "i", Integer.toString(i)),

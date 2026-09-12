@@ -13,7 +13,6 @@ import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.TreeMap;
 
 import org.opennms.plugins.prometheus.remotewriter.wire.RemoteWriteRequestBuilder.BuildResult;
 import org.opennms.plugins.prometheus.remotewriter.wire.v2.proto.Request;
@@ -57,15 +56,15 @@ public final class RemoteWriteV2RequestBuilder {
 
         // Group by canonical (sorted) label set. LinkedHashMap preserves
         // first-seen series order, mirroring v1's stable test output.
-        Map<SortedLabels, List<MappedSample>> bySeries = new LinkedHashMap<>();
+        Map<SeriesKey, List<MappedSample>> bySeries = new LinkedHashMap<>();
         for (MappedSample s : samples) {
             if (!Double.isFinite(s.value())) {
                 dropped++;
                 continue;
             }
-            SortedLabels key = SortedLabels.from(s.labels());
-            bySeries.computeIfAbsent(key, k -> new ArrayList<>()).add(s);
+            bySeries.computeIfAbsent(s.key(), k -> new ArrayList<>()).add(s);
         }
+        long enqueuedSum = 0L;
 
         // Symbol table — seeded with "" at index 0 per v2 spec.
         List<String> symbols = new ArrayList<>();
@@ -76,15 +75,15 @@ public final class RemoteWriteV2RequestBuilder {
         Request.Builder req = Request.newBuilder();
         int written = 0;
 
-        for (Map.Entry<SortedLabels, List<MappedSample>> entry : bySeries.entrySet()) {
+        for (Map.Entry<SeriesKey, List<MappedSample>> entry : bySeries.entrySet()) {
             TimeSeries.Builder ts = TimeSeries.newBuilder();
 
-            // Pack each label as (name_idx, value_idx) into labels_refs.
-            // The TreeMap iteration is in label-name-sorted order so the
-            // refs come out in a deterministic pattern.
-            for (Map.Entry<String, String> l : entry.getKey().sorted().entrySet()) {
-                ts.addLabelsRefs(intern(l.getKey(), symbols, symbolIndex));
-                ts.addLabelsRefs(intern(l.getValue(), symbols, symbolIndex));
+            // Pack each label as (name_idx, value_idx) into labels_refs, in
+            // the key's name-sorted order so the refs are deterministic.
+            SeriesKey key = entry.getKey();
+            for (int i = 0; i < key.size(); i++) {
+                ts.addLabelsRefs(intern(key.names()[i], symbols, symbolIndex));
+                ts.addLabelsRefs(intern(key.values()[i], symbols, symbolIndex));
             }
 
             List<MappedSample> seriesSamples = entry.getValue();
@@ -102,6 +101,7 @@ public final class RemoteWriteV2RequestBuilder {
                         .setTimestamp(s.timestampMs())
                         .build());
                 written++;
+                enqueuedSum += s.enqueuedEpochMs();
             }
             req.addTimeseries(ts.build());
         }
@@ -122,7 +122,8 @@ public final class RemoteWriteV2RequestBuilder {
                 bySeries.size(),
                 written,
                 dropped,
-                duplicates);
+                duplicates,
+                enqueuedSum);
     }
 
     /**
@@ -137,12 +138,5 @@ public final class RemoteWriteV2RequestBuilder {
         symbols.add(s);
         idx.put(s, next);
         return next;
-    }
-
-    /** Canonicalised (sorted) label set — same shape as v1's helper. */
-    private record SortedLabels(TreeMap<String, String> sorted) {
-        static SortedLabels from(Map<String, String> labels) {
-            return new SortedLabels(new TreeMap<>(labels));
-        }
     }
 }
