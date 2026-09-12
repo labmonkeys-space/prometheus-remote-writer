@@ -26,10 +26,14 @@ and prints them through the Karaf shell command
 | `store_calls_total`                        | Calls to `store()`. With `store_calls_failed_total` this is the caller-side failure rate that #154 had to borrow from OpenNMS's own timers.
 | `store_calls_failed_total`                 | `store()` calls that threw. Under `queue.store-policy = partial` a call that was partially accepted still counts as failed.
 | `store_samples_offered_total`              | Samples handed to `store()` before label mapping. Over a window, `offered = written + Σ dropped_* + queue_depth (+ WAL pending)`; the identity does not hold across a restart, since WAL replay writes in the new process what was offered in the old.
+| `samples_dropped_shutdown_total`           | Samples that had left the queue (built, or in the builder's hand) when a forced shutdown interrupted the flusher before they could be sent. Non-zero only when `shutdown.grace-period-ms` expired.
 | `samples_dropped_unmapped_total`           | Samples the label mapper could not map because the metric had no name. Never offered to a queue or the WAL. Only a non-OpenNMS caller of the TimeSeriesStorage API produces these.
-| `http_write_duration_ms_total`             | Wall milliseconds spent inside remote-write HTTP calls, retries and backoff included. Mean round-trip: `rate(http_write_duration_ms_total) / rate(http_writes_successful_total + http_writes_failed_total)`. Flusher utilisation: `rate(http_write_duration_ms_total) / (1000 × writer.shards)`. Samples per write: `rate(samples_written_total) / rate(http_writes_successful_total)`.
+| `http_write_duration_ms_total`             | Wall milliseconds spent inside remote-write HTTP calls, retries and backoff included. Mean round-trip: `rate(http_write_duration_ms_total) / rate(http_writes_successful_total + http_writes_failed_total)`. Sender utilisation per shard: `rate(http_write_duration_ms_total) / (1000 × writer.shards)`; the builder's share is `flusher_build_ms_total`. Samples per write: `rate(samples_written_total) / rate(http_writes_successful_total)`.
 | `store_call_duration_ms_total`             | Wall milliseconds OpenNMS's writer threads spent inside `store()`. Mean call time: `rate(store_call_duration_ms_total) / rate(store_calls_total)`. A rising mean is the first sign the plugin is holding the persister, which shows on the OpenNMS side as ring-buffer drops.
-| `flusher_linger_ms_total`                  | Milliseconds queue-mode flushers spent waiting for a batch to fill after a first sample arrived (`batch.linger-ms`). Not idle: there was something to send. Per shard, `idle + linger + build + http ≈ 1000 ms/s`.
+| `flusher_build_ms_total`                   | Milliseconds queue-mode flushers spent building requests (grouping, protobuf, snappy). Build and HTTP now overlap per shard, so per-shard builder utilisation is `rate(flusher_build_ms_total) / (1000 × writer.shards)` and sender utilisation is `rate(http_write_duration_ms_total) / (1000 × writer.shards)`; headroom is whichever is lower.
+| `http_writes_4xx_total`, `http_writes_5xx_total`, `http_writes_transport_total` | Failed writes by cause, as request counts. Error rate: their sum over `http_writes_successful_total + http_writes_failed_total`. The `samples_dropped_*` counters carry the same failures in samples.
+| `http_write_duration_bucket_le_{5,10,25,50,100,250,1000,inf}` | Cumulative count of writes whose wall time was at or below the bound in milliseconds, retries and backoff included. The exporter rule below maps them to a Prometheus histogram, so `histogram_quantile` works on the backend's round-trip; a bimodal backend shows here and not in the mean.
+| `flusher_linger_ms_total`                  | Milliseconds queue-mode flushers spent waiting for a batch to fill after a first sample arrived (`batch.linger-ms`). Not idle: there was something to send. Per shard the builder's time is `idle + linger + build ≈ 1000 ms/s` and the sender's is `http`, since the two overlap.
 | `flusher_idle_ms_total`                    | Milliseconds the queue-mode flushers spent waiting for a sample with an empty queue. Idle fraction: `rate(flusher_idle_ms_total) / (1000 × writer.shards)`. Near 1 with a rising `samples_dropped_queue_full_total` means arrivals are bursty, not that the flusher is slow.
 |===
 
@@ -55,6 +59,8 @@ and prints them through the Karaf shell command
 | `http_bytes_written_total`         | Total payload bytes (post-snappy) sent.
 | `http_writes_successful_total`     | 2xx responses.
 | `http_writes_failed_total`         | Non-2xx + transport failures.
+| `http_writes_4xx_total`, `http_writes_5xx_total`, `http_writes_transport_total` | Failed writes by cause, as request counts; see the write-path table above.
+| `http_write_duration_bucket_le_*`          | Cumulative duration buckets; see the write-path table above.
 |===
 
 === Other
@@ -104,6 +110,15 @@ slow batch visibly stalls the drain.
   `http.max-connections`.
 * Queue mode only — `wal.enabled = true` requires `writer.shards = 1`
   (the WAL is a single ordered log).
+* Each shard runs two threads, `prometheus-remote-writer-flusher-<i>`
+  (builder: drains the queue, builds the payload) and
+  `prometheus-remote-writer-flusher-<i>-sender` (one request in flight).
+  Building the next request overlaps the previous round-trip, so a
+  shard's cycle is the larger of build and round-trip rather than their
+  sum. While a shard's sender is blocked the shard holds two built
+  batches beyond its queue slice (the handoff and the batch in the
+  builder's hand), so the shutdown drain and the memory budget count
+  `queue.capacity / writer.shards + 2 × batch.size` samples per shard.
 * Shards deliver their ceiling only with full batches. With the queue
   usually empty each flusher wakes on the first sample and sends what is
   there; at four shards on an 11,000-device fleet that was 3,300
@@ -199,6 +214,11 @@ Karaf JVM turns them into time series. One rule covers all of them:
 [source,yaml]
 ----
 rules:
+  - pattern: 'org.opennms.plugins.prometheus.remotewriter<name=http_write_duration_bucket_le_(.+), type=gauges><>Value'
+    name: prometheus_remote_writer_http_write_duration_ms_bucket
+    labels:
+      le: '$1'
+    type: COUNTER
   - pattern: 'org.opennms.plugins.prometheus.remotewriter<name=(.+), type=(counters|gauges)><>(Count|Value)'
     name: prometheus_remote_writer_$1
     type: UNTYPED

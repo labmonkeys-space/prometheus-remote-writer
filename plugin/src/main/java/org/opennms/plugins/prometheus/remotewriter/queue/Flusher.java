@@ -53,7 +53,15 @@ public final class Flusher {
     private final String threadName;
 
     private volatile boolean running;
-    private Thread thread;
+    private Thread thread;   // builder: drains the queue, builds payloads
+    private Thread sender;   // sends payloads, one request in flight
+
+    /** A built payload on its way from the builder to the sender; {@code built == null} is the stop sentinel. */
+    private record Prepared(BuildResult built, int sampleCount) {}
+    private static final Prepared STOP = new Prepared(null, 0);
+    /** Depth one: the builder may run at most one payload ahead of the sender,
+     *  which is the whole benefit and bounds memory to one extra payload. */
+    private final java.util.concurrent.ArrayBlockingQueue<Prepared> handoff = new java.util.concurrent.ArrayBlockingQueue<>(1);
 
     /**
      * Test-only convenience constructor — hard-codes the v1 builder.
@@ -107,6 +115,10 @@ public final class Flusher {
     public synchronized void start() {
         if (running) return;
         running = true;
+        handoff.clear();
+        sender = new Thread(this::send, threadName + "-sender");
+        sender.setDaemon(true);
+        sender.start();
         thread = new Thread(this::run, threadName);
         thread.setDaemon(true);
         thread.start();
@@ -128,23 +140,44 @@ public final class Flusher {
      * no-op when the thread never started or already completed a stop.
      */
     public synchronized void awaitStop(long graceMs) {
-        Thread t = thread;
-        if (t == null) return;
-        try {
-            t.join(Math.max(1, graceMs));
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        }
-        if (t.isAlive()) {
-            LOG.warn("flusher {} did not stop within {}ms, interrupting", threadName, graceMs);
-            t.interrupt();
-            try {
-                t.join(1_000);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
+        Thread b = thread, snd = sender;
+        if (b == null && snd == null) return;
+        long deadline = System.nanoTime() + Math.max(1, graceMs) * 1_000_000L;
+        // The sender exits after the builder's stop sentinel, so it normally
+        // finishes last; the second join closes the window in which the
+        // sender has taken STOP but the builder has not yet left its finally.
+        join(snd, deadline);
+        join(b, deadline);
+        boolean forced = false;
+        for (Thread t : new Thread[] {b, snd}) {
+            if (t != null && t.isAlive()) {
+                LOG.warn("flusher thread {} did not stop within {}ms, interrupting", t.getName(), graceMs);
+                t.interrupt();
+                forced = true;
             }
         }
+        if (forced) {
+            for (Thread t : new Thread[] {b, snd}) {
+                if (t != null) { try { t.join(1_000); } catch (InterruptedException e) { Thread.currentThread().interrupt(); } }
+            }
+            // Whatever the sender never took cannot be sent now; account for it.
+            Prepared orphan;
+            while ((orphan = handoff.poll()) != null) dropAtShutdown(orphan);
+        }
         thread = null;
+        sender = null;
+    }
+
+    private void dropAtShutdown(Prepared p) {
+        if (p == null || p == STOP || p.sampleCount() == 0) return;
+        metrics.samplesDroppedShutdown(p.sampleCount());
+        LOG.warn("forced shutdown: {} built sample(s) could not be sent", p.sampleCount());
+    }
+
+    private static void join(Thread t, long deadlineNanos) {
+        if (t == null) return;
+        long remainingMs = Math.max(1, (deadlineNanos - System.nanoTime()) / 1_000_000L);
+        try { t.join(remainingMs); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
     }
 
     /**
@@ -157,56 +190,131 @@ public final class Flusher {
         awaitStop(graceMs);
     }
 
+    /** Builder loop: poll, build, hand off. Never touches the network. */
     private void run() {
         LOG.info("flusher started (batchSize={}, flushIntervalMs={}, lingerMs={})", batchSize, flushIntervalMs, lingerMs);
-        while (running) {
-            try {
-                long waitStarted = System.nanoTime();
-                SampleQueue.Batch polled = queue.pollBatch(batchSize, flushIntervalMs, TimeUnit.MILLISECONDS, lingerMs);
-                // Idle is time with nothing to send: the head wait. The linger
-                // that may follow is time with something to send, by choice,
-                // and is booked separately (#162).
-                metrics.flusherIdleNanos(System.nanoTime() - waitStarted - polled.lingerNanos());
-                metrics.flusherLingerNanos(polled.lingerNanos());
-                if (polled.samples().isEmpty()) continue;
-                flushBatch(polled.samples());
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                break;
-            } catch (Exception unexpected) {
-                LOG.error("flusher caught unexpected exception", unexpected);
-            }
-        }
-
-        // Drain all residual samples so stop() with a non-zero grace can get
-        // them out — loop, not a single drain(batchSize), because the queue
-        // may hold more than batchSize samples.
-        //
-        // Clear the interrupt flag first: a stop-path interrupt would
-        // otherwise short-circuit Thread.sleep() inside the HTTP retry
-        // backoff and abort the residual flushes. Shutdown is cooperative;
-        // the caller's grace window bounds total time.
-        boolean wasInterrupted = Thread.interrupted();
         try {
-            while (true) {
-                List<MappedSample> tail = queue.drain(batchSize);
-                if (tail.isEmpty()) break;
-                LOG.info("flushing {} residual sample(s) during shutdown", tail.size());
-                flushBatch(tail);
+            while (running) {
+                try {
+                    handOff(pollAndPrepare());
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    break;
+                } catch (Exception unexpected) {
+                    LOG.error("flusher caught unexpected exception", unexpected);
+                }
+            }
+            // Residual drain so stop() with a non-zero grace gets everything
+            // out: build each remaining batch and hand it to the sender, then
+            // the sentinel. A stop-path interrupt is cleared first so the puts
+            // are not short-circuited; if we are interrupted again (grace
+            // expired) the batch in hand is accounted for and we leave. The
+            // sentinel goes in the slot whenever it is free so the sender can
+            // exit on its own.
+            boolean wasInterrupted = Thread.interrupted();
+            try {
+                while (true) {
+                    List<MappedSample> tail = queue.drain(batchSize);
+                    if (tail.isEmpty()) break;
+                    LOG.info("building {} residual sample(s) during shutdown", tail.size());
+                    Prepared p;
+                    try {
+                        p = prepare(tail);
+                    } catch (RuntimeException e) {
+                        LOG.error("could not build {} residual sample(s) during shutdown; dropping them", tail.size(), e);
+                        metrics.samplesDroppedShutdown(tail.size());
+                        continue;
+                    }
+                    try {
+                        handoff.put(p);
+                    } catch (InterruptedException e) {
+                        wasInterrupted = true;
+                        dropAtShutdown(p);
+                        break;
+                    }
+                }
+            } finally {
+                try {
+                    if (wasInterrupted) {
+                        // Forced: the sender may be dead, so never block. If
+                        // the slot is full, awaitStop accounts for the orphan.
+                        if (!handoff.offer(STOP)) LOG.debug("handoff full at forced builder exit");
+                    } else {
+                        // Orderly: wait for the sender to free the slot, then
+                        // hand it the sentinel so it exits on its own.
+                        handoff.put(STOP);
+                    }
+                } catch (InterruptedException e) {
+                    wasInterrupted = true;
+                }
+                if (wasInterrupted) Thread.currentThread().interrupt();
             }
         } finally {
-            if (wasInterrupted) {
-                Thread.currentThread().interrupt();
-            }
+            LOG.info("flusher builder stopped");
         }
-        LOG.info("flusher stopped");
     }
 
-    /** Package-private for unit tests — runs one flush iteration synchronously. */
-    void flushBatch(List<MappedSample> batch) {
+    /** One builder iteration: wait for a batch, book the waits, build it.
+     *  Returns {@code null} when the poll timed out with nothing to send. The
+     *  polled list does not outlive this method, so a builder blocked on the
+     *  handoff holds only the built payload. */
+    private Prepared pollAndPrepare() throws InterruptedException {
+        long waitStarted = System.nanoTime();
+        SampleQueue.Batch polled = queue.pollBatch(batchSize, flushIntervalMs, TimeUnit.MILLISECONDS, lingerMs);
+        metrics.flusherIdleNanos(System.nanoTime() - waitStarted - polled.lingerNanos());
+        metrics.flusherLingerNanos(polled.lingerNanos());
+        if (polled.samples().isEmpty()) return null;
+        return prepare(polled.samples());
+    }
+
+    private void handOff(Prepared p) throws InterruptedException {
+        if (p == null) return;
+        try {
+            handoff.put(p);
+        } catch (InterruptedException e) {
+            dropAtShutdown(p); // interrupted while blocked: this payload cannot be sent
+            throw e;
+        }
+    }
+
+    /** Sender loop: take a built payload, write it, account for it. One request in flight. */
+    private void send() {
+        try {
+            while (true) {
+                Prepared p = handoff.take();
+                if (p == STOP) break;
+                try {
+                    dispatch(p.built());
+                } catch (RuntimeException unexpected) {
+                    // Keep the sender alive: a dead sender leaves the builder
+                    // parked on a full handoff and the shard silently stops.
+                    LOG.error("sender caught unexpected exception; {} sample(s) not sent", p.sampleCount(), unexpected);
+                }
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        } finally {
+            LOG.info("flusher sender stopped");
+        }
+    }
+
+    /** Build one batch into a payload and account for what the build dropped. */
+    private Prepared prepare(List<MappedSample> batch) {
+        long started = System.nanoTime();
         BuildResult built = builder.apply(batch);
+        metrics.flusherBuildNanos(System.nanoTime() - started);
         metrics.samplesDroppedNonfinite(built.samplesDroppedNonfinite());
         metrics.samplesDroppedDuplicate(built.samplesDroppedDuplicate());
+        return new Prepared(built, built.samplesWritten());
+    }
+
+    /** Package-private for unit tests. Builds and sends one batch synchronously. */
+    void flushBatch(List<MappedSample> batch) {
+        dispatch(prepare(batch).built());
+    }
+
+    /** Write one built payload and account for the outcome. */
+    private void dispatch(BuildResult built) {
         if (!built.hasContent()) {
             return;
         }

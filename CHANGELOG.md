@@ -7,10 +7,15 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **Each shard builds the next request while the previous one is in flight** (#163, epic #168). The queue-mode flusher is now a builder step and a sender step per shard with a depth-one handoff; one request in flight per shard and per-series order are unchanged. On the benchmark fleet a shard's cycle was about 11 µs of build plus 5 µs of round-trip per sample, serial; it is now the larger of the two. Thread dumps show `…-flusher-<i>` and `…-flusher-<i>-sender`.
+
 ### Added
 
 - **`batch.linger-ms`** (#162, epic #168). After a first sample arrives, a queue-mode flusher can wait up to this long for the batch to reach `batch.size`, draining at every arrival and sending early when full. Default `0` keeps send-on-first-arrival. Queue mode only.
   On the benchmark fleet, four shards at an empty queue sent 3,300 requests a second of 19 samples each; a linger of 50–200 ms trades that much latency for full batches.
+- **`flusher_build_ms_total`**, **`http_writes_4xx_total`**, **`http_writes_5xx_total`**, **`http_writes_transport_total`** and the cumulative buckets **`http_write_duration_bucket_le_{5,10,25,50,100,250,1000,inf}`** (#163). Build time completes the per-shard budget now that build and HTTP overlap; the error counts make HTTP error rate a ratio of requests; the buckets give the round-trip a distribution the exporter turns into a histogram. `samples_dropped_shutdown_total` counts samples that had left the queue when a forced shutdown interrupted the flusher, so the reconciliation identity holds through a hard stop.
 - **`flusher_linger_ms_total`** and **`store_call_duration_ms_total`**. The first keeps the per-shard time budget complete (idle, linger, build, HTTP). The second is the wall time OpenNMS's writer threads spend inside `store()`, the caller-facing duration that was missing from the plugin's metrics.
 
 ### Fixed

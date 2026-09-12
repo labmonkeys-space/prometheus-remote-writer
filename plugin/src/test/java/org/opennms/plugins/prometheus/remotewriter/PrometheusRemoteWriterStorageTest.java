@@ -961,7 +961,7 @@ class PrometheusRemoteWriterStorageTest {
                 s.store(List.of(nameless, sample("b")));
 
                 assertThat(metric(s, PluginMetrics.SAMPLES_DROPPED_UNMAPPED)).isEqualTo(1L);
-                assertThat(metric(s, PluginMetrics.STORE_SAMPLES_OFFERED)).isEqualTo(3L); // a, nameless, b
+                assertThat(metric(s, PluginMetrics.STORE_SAMPLES_OFFERED)).isEqualTo(5L); // a, a2, a3 (fixture), nameless, b
                 assertThat(depth(s)).isEqualTo(1L);
             } finally {
                 s.stop();
@@ -986,6 +986,27 @@ class PrometheusRemoteWriterStorageTest {
             s.stop();
             assertThat(mbs.queryNames(depth, null)).as("removed after stop").isEmpty();
             assertThat(mbs.queryNames(all, null)).as("domain empty after stop").isEmpty();
+        }
+    }
+
+    @Test
+    void http_error_counts_and_duration_buckets_are_exported() throws Exception {
+        try (MockWebServer server = new MockWebServer()) {
+            server.start();
+            server.enqueue(new okhttp3.mockwebserver.MockResponse().setResponseCode(204));
+            PrometheusRemoteWriterStorage s = new PrometheusRemoteWriterStorage(stalledFlusherConfig(server, 10));
+            s.start();
+            try {
+                s.store(List.of(sample("a")));
+                await().atMost(Duration.ofSeconds(3)).until(() -> metric(s, PluginMetrics.SAMPLES_WRITTEN) == 1L);
+                java.util.Map<String, Number> snap = s.getMetrics().snapshot();
+                assertThat(snap).containsKeys(PluginMetrics.HTTP_WRITES_4XX, PluginMetrics.HTTP_WRITES_5XX,
+                        PluginMetrics.HTTP_WRITES_TRANSPORT, PluginMetrics.FLUSHER_BUILD_MS,
+                        "http_write_duration_bucket_le_5", "http_write_duration_bucket_le_inf");
+                assertThat(snap.get("http_write_duration_bucket_le_inf").longValue()).isEqualTo(1L);
+            } finally {
+                s.stop();
+            }
         }
     }
 
@@ -1038,7 +1059,11 @@ class PrometheusRemoteWriterStorageTest {
         s.store(List.of(s1));
         assertThat(server.takeRequest(5, TimeUnit.SECONDS)).as("flusher 0 never parked").isNotNull();
         assertThat(server.takeRequest(5, TimeUnit.SECONDS)).as("flusher 1 never parked").isNotNull();
-        assertThat(depth(s)).as("both flushers should have drained their sample").isZero();
+        // Two more per shard: each builder's handoff and its in-hand batch (see parkFlusher).
+        s.store(List.of(s0, s1));
+        await().atMost(Duration.ofSeconds(3)).alias("both builders should take their handoff batch").until(() -> depth(s) == 0L);
+        s.store(List.of(s0, s1));
+        await().atMost(Duration.ofSeconds(3)).alias("both builders should hold their in-hand batch").until(() -> depth(s) == 0L);
         return new TwoShardSamples(s0, s1);
     }
 
@@ -1050,8 +1075,16 @@ class PrometheusRemoteWriterStorageTest {
      *  parked inside the NO_RESPONSE write. Fails loudly instead of letting
      *  a slow runner turn into a confusing off-by-one on the counter. */
     private static void parkFlusher(PrometheusRemoteWriterStorage s, MockWebServer server) throws Exception {
+        // Sender parks on the first (unanswered) request. The builder then
+        // fills its depth-one handoff with a second batch and blocks holding
+        // a third. Feed both, so the queue is empty and every later sample
+        // counts against capacity.
         s.store(List.of(sample("a")));
         assertThat(server.takeRequest(5, TimeUnit.SECONDS)).as("flusher never parked").isNotNull();
+        s.store(List.of(sample("a2")));
+        await().atMost(Duration.ofSeconds(3)).alias("builder should take the handoff batch").until(() -> depth(s) == 0L);
+        s.store(List.of(sample("a3")));
+        await().atMost(Duration.ofSeconds(3)).alias("builder should hold the in-hand batch").until(() -> depth(s) == 0L);
     }
 
     /** Config whose flusher parks forever on its first write (NO_RESPONSE

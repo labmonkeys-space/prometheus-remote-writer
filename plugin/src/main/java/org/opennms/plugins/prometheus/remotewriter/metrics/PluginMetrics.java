@@ -42,6 +42,18 @@ public final class PluginMetrics {
     public static final String HTTP_BYTES_WRITTEN              = "http_bytes_written_total";
     public static final String HTTP_WRITES_SUCCESSFUL          = "http_writes_successful_total";
     public static final String HTTP_WRITES_FAILED              = "http_writes_failed_total";
+    /** Failed writes by cause, as request counts (the samples_dropped_* counters carry the sample counts). */
+    public static final String HTTP_WRITES_4XX                 = "http_writes_4xx_total";
+    public static final String HTTP_WRITES_5XX                 = "http_writes_5xx_total";
+    public static final String HTTP_WRITES_TRANSPORT           = "http_writes_transport_total";
+    /** Upper bounds in ms of the cumulative write-duration buckets; the last is +Inf. */
+    public static final int[] HTTP_WRITE_DURATION_BUCKETS_MS   = {5, 10, 25, 50, 100, 250, 1000, Integer.MAX_VALUE};
+    /** Gauge name for one cumulative bucket: {@code http_write_duration_bucket_le_<ms|inf>}. */
+    public static String httpWriteDurationBucketName(int leMs) {
+        return "http_write_duration_bucket_le_" + (leMs == Integer.MAX_VALUE ? "inf" : Integer.toString(leMs));
+    }
+    /** Milliseconds queue-mode flushers spent building requests (protobuf, snappy). */
+    public static final String FLUSHER_BUILD_MS                = "flusher_build_ms_total";
     public static final String HTTP_IN_FLIGHT                  = "http_in_flight";
     /** Wall milliseconds spent inside remote-write HTTP calls, retries and
      *  backoff included. Over http_writes_successful_total + http_writes_failed_total
@@ -63,6 +75,9 @@ public final class PluginMetrics {
     public static final String STORE_SAMPLES_OFFERED           = "store_samples_offered_total";
     /** Samples the label mapper could not map (no metric name); never offered to a queue or the WAL. */
     public static final String SAMPLES_DROPPED_UNMAPPED        = "samples_dropped_unmapped_total";
+    /** Samples that had left the queue (built or in the builder's hand) when a
+     *  forced shutdown interrupted the flusher before they could be sent. */
+    public static final String SAMPLES_DROPPED_SHUTDOWN        = "samples_dropped_shutdown_total";
     /** Maximum total queue depth observed since activation. */
     public static final String QUEUE_DEPTH_HIGH_WATER          = "queue_depth_high_water";
 
@@ -110,11 +125,13 @@ public final class PluginMetrics {
      *  polls do not round to zero and vanish. */
     private final java.util.concurrent.atomic.AtomicLong flusherIdleNanos = new java.util.concurrent.atomic.AtomicLong();
     private final java.util.concurrent.atomic.AtomicLong flusherLingerNanos = new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.atomic.AtomicLong flusherBuildNanos = new java.util.concurrent.atomic.AtomicLong();
     private final java.util.concurrent.atomic.AtomicLong storeCallNanos = new java.util.concurrent.atomic.AtomicLong();
     private final Counter storeCalls;
     private final Counter storeCallsFailed;
     private final Counter storeSamplesOffered;
     private final Counter samplesDroppedUnmapped;
+    private final Counter samplesDroppedShutdown;
 
     private static final Logger LOG = LoggerFactory.getLogger(PluginMetrics.class);
     private JmxReporter jmxReporter;
@@ -139,11 +156,13 @@ public final class PluginMetrics {
         this.findMetricsPhase2Batches     = registry.counter(FIND_METRICS_PHASE2_BATCHES_TOTAL);
         registerLongGauge(FLUSHER_IDLE_MS, () -> flusherIdleNanos.get() / 1_000_000L);
         registerLongGauge(FLUSHER_LINGER_MS, () -> flusherLingerNanos.get() / 1_000_000L);
+        registerLongGauge(FLUSHER_BUILD_MS, () -> flusherBuildNanos.get() / 1_000_000L);
         registerLongGauge(STORE_CALL_DURATION_MS, () -> storeCallNanos.get() / 1_000_000L);
         this.storeCalls                   = registry.counter(STORE_CALLS);
         this.storeCallsFailed             = registry.counter(STORE_CALLS_FAILED);
         this.storeSamplesOffered          = registry.counter(STORE_SAMPLES_OFFERED);
         this.samplesDroppedUnmapped       = registry.counter(SAMPLES_DROPPED_UNMAPPED);
+        this.samplesDroppedShutdown       = registry.counter(SAMPLES_DROPPED_SHUTDOWN);
     }
 
     public MetricRegistry registry() { return registry; }
@@ -172,11 +191,13 @@ public final class PluginMetrics {
 
     public void flusherIdleNanos(long n)               { if (n > 0) flusherIdleNanos.addAndGet(n); }
     public void flusherLingerNanos(long n)             { if (n > 0) flusherLingerNanos.addAndGet(n); }
+    public void flusherBuildNanos(long n)              { if (n > 0) flusherBuildNanos.addAndGet(n); }
     public void storeCallNanos(long n)                 { if (n > 0) storeCallNanos.addAndGet(n); }
     public void storeCall()                            { storeCalls.inc(); }
     public void storeCallFailed()                      { storeCallsFailed.inc(); }
     public void storeSamplesOffered(long n)            { if (n > 0) storeSamplesOffered.inc(n); }
     public void samplesDroppedUnmapped(long n)         { if (n > 0) samplesDroppedUnmapped.inc(n); }
+    public void samplesDroppedShutdown(long n)         { if (n > 0) samplesDroppedShutdown.inc(n); }
 
     // ---- JMX exposure ------------------------------------------------------
 

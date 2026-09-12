@@ -849,6 +849,13 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
                     + a.writeClient().getWritesTransportError());
         m.registerLongGauge(PluginMetrics.HTTP_IN_FLIGHT,           () -> (long) a.writeClient().getInFlightCalls());
         m.registerLongGauge(PluginMetrics.HTTP_WRITE_DURATION_MS,   a.writeClient()::getWriteDurationMs);
+        m.registerLongGauge(PluginMetrics.HTTP_WRITES_4XX,          a.writeClient()::getWrites4xx);
+        m.registerLongGauge(PluginMetrics.HTTP_WRITES_5XX,          a.writeClient()::getWrites5xxExhausted);
+        m.registerLongGauge(PluginMetrics.HTTP_WRITES_TRANSPORT,    a.writeClient()::getWritesTransportError);
+        for (int le : PluginMetrics.HTTP_WRITE_DURATION_BUCKETS_MS) {
+            m.registerLongGauge(PluginMetrics.httpWriteDurationBucketName(le),
+                    () -> a.writeClient().getWriteDurationBucketCount(le));
+        }
         m.registerLongGauge(PluginMetrics.DELETE_NOOP,              this::getDeleteNoopTotal);
         m.registerLongGauge(PluginMetrics.METADATA_DENYLIST_BLOCKED, a.labelMapper()::getMetadataDenylistBlockedCount);
 

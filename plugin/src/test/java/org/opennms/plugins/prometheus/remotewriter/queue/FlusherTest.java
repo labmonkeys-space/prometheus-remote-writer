@@ -162,6 +162,88 @@ class FlusherTest {
         assertThat(http.getWritesSuccessful()).isEqualTo(1);
     }
 
+    // ---------- #163: pipelined builder ------------------------------------
+
+    private static final java.util.function.Function<java.util.Collection<MappedSample>,
+            org.opennms.plugins.prometheus.remotewriter.wire.RemoteWriteRequestBuilder.BuildResult> V1 =
+            org.opennms.plugins.prometheus.remotewriter.wire.RemoteWriteRequestBuilders.forVersion(1);
+
+    /** First response held until released; every later one immediate 204. */
+    private static okhttp3.mockwebserver.Dispatcher holdFirst(java.util.concurrent.CountDownLatch release) {
+        java.util.concurrent.atomic.AtomicBoolean first = new java.util.concurrent.atomic.AtomicBoolean(true);
+        return new okhttp3.mockwebserver.Dispatcher() {
+            @Override public MockResponse dispatch(okhttp3.mockwebserver.RecordedRequest r) {
+                if (first.getAndSet(false)) {
+                    try { release.await(10, java.util.concurrent.TimeUnit.SECONDS); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+                }
+                return new MockResponse().setResponseCode(204);
+            }
+        };
+    }
+
+    @Test
+    void next_batch_is_built_while_the_previous_request_is_in_flight() throws Exception {
+        java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
+        server.setDispatcher(holdFirst(release));
+        for (int i = 0; i < 4; i++) queue.tryEnqueue(sample(i)); // two batches of two
+        flusher = new Flusher(queue, http, 2, 10_000, 0L, metrics, V1, "test-flusher");
+        flusher.start();
+        try {
+            assertThat(server.takeRequest(5, java.util.concurrent.TimeUnit.SECONDS)).as("first request sent").isNotNull();
+            // With the first response held, a serial flusher leaves the second
+            // batch in the queue; a pipelined one has taken and built it.
+            await().atMost(Duration.ofSeconds(2)).until(() -> queue.depth() == 0);
+            assertThat(server.getRequestCount()).as("second request must wait for the first response").isEqualTo(1);
+            assertThat(metrics.snapshot().get(PluginMetrics.FLUSHER_BUILD_MS)).isNotNull();
+        } finally {
+            release.countDown();
+        }
+        await().atMost(Duration.ofSeconds(3)).until(() -> http.getWritesSuccessful() == 2);
+    }
+
+    @Test
+    void per_series_order_holds_across_the_handoff() throws Exception {
+        for (int i = 0; i < 40; i++) server.enqueue(new MockResponse().setResponseCode(204));
+        flusher = new Flusher(queue, http, 3, 10_000, 0L, metrics, V1, "test-flusher");
+        flusher.start();
+        for (int t = 1; t <= 30; t++) {
+            queue.tryEnqueue(new MappedSample(Map.of("__name__", "s", "k", "v"), 1_000_000L + t, t));
+            if (t % 7 == 0) Thread.sleep(15);
+        }
+        await().atMost(Duration.ofSeconds(5)).until(() -> metrics.snapshot().get(PluginMetrics.SAMPLES_WRITTEN).longValue() == 30L);
+        long last = 0; int requests = server.getRequestCount();
+        for (int r = 0; r < requests; r++) {
+            okhttp3.mockwebserver.RecordedRequest rr = server.takeRequest(1, java.util.concurrent.TimeUnit.SECONDS);
+            org.opennms.plugins.prometheus.remotewriter.wire.proto.WriteRequest wr =
+                    org.opennms.plugins.prometheus.remotewriter.wire.proto.WriteRequest.parseFrom(
+                            org.xerial.snappy.Snappy.uncompress(rr.getBody().readByteArray()));
+            for (var ts : wr.getTimeseriesList()) for (var s : ts.getSamplesList()) {
+                assertThat(s.getTimestamp()).as("monotonic across requests").isGreaterThan(last);
+                last = s.getTimestamp();
+            }
+        }
+        assertThat(last).isEqualTo(1_000_030L);
+    }
+
+    @Test
+    void stop_sends_the_built_payload_and_the_queued_remainder() throws Exception {
+        java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
+        server.setDispatcher(holdFirst(release));
+        for (int i = 0; i < 6; i++) queue.tryEnqueue(sample(i)); // three batches of two
+        flusher = new Flusher(queue, http, 2, 10_000, 0L, metrics, V1, "test-flusher");
+        flusher.start();
+        assertThat(server.takeRequest(5, java.util.concurrent.TimeUnit.SECONDS)).isNotNull();
+        await().atMost(Duration.ofSeconds(2)).until(() -> queue.depth() <= 2); // second batch built and handed off
+        Thread stopper = new Thread(() -> flusher.stop(5_000));
+        stopper.start();
+        Thread.sleep(100);
+        release.countDown();
+        stopper.join(10_000);
+        assertThat(stopper.isAlive()).as("stop returned").isFalse();
+        assertThat(metrics.snapshot().get(PluginMetrics.SAMPLES_WRITTEN).longValue()).isEqualTo(6L);
+        assertThat(queue.depth()).isZero();
+    }
+
     private static MappedSample sample(int i) {
         return new MappedSample(
                 Map.of("__name__", "t", "i", Integer.toString(i)),
