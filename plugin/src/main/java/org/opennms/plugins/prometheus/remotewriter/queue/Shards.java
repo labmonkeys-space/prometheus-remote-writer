@@ -476,7 +476,13 @@ public final class Shards implements java.io.Closeable {
                 }
                 LOG.warn("shard {}: the backend would not take {} sample(s); returned them to the "
                         + "overflow bucket to retry instead of dropping them", shard, taken);
-                spillBacklog(shard, "a batch came back from the backend");
+                // Only under `ordered`. The backlog follows the rescued batch
+                // to keep it from overtaking older samples — an ordering
+                // argument `concurrent` has already given up, so there it
+                // would just be a bulk transfer of up to a whole queue,
+                // re-creating the fresh-sample-behind-the-backlog latency the
+                // policy was chosen to avoid.
+                if (!concurrent()) spillBacklog(shard, "a batch came back from the backend");
             }
             return taken;
         } finally {

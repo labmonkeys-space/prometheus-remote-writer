@@ -35,11 +35,11 @@
             <cm:property name="tls.ca-file"               value=""/>
             <cm:property name="tls.insecure-skip-verify"  value="false"/>
             <!-- Write pipeline -->
-            <cm:property name="queue.capacity"            value="10000"/>
+            <cm:property name="queue.capacity"            value="40000"/>
             <cm:property name="queue.store-policy"        value="auto"/>
             <cm:property name="batch.size"                value="1000"/>
             <cm:property name="flush.interval-ms"         value="1000"/>
-            <cm:property name="batch.linger-ms"           value="0"/>
+            <cm:property name="batch.linger-ms"           value="100"/>
             <cm:property name="retry.max-attempts"        value="5"/>
             <cm:property name="retry.initial-backoff-ms"  value="250"/>
             <cm:property name="retry.max-backoff-ms"      value="10000"/>
@@ -51,7 +51,7 @@
             <!-- Shutdown -->
             <cm:property name="shutdown.grace-period-ms"  value="10000"/>
 
-            <cm:property name="writer.shards"             value="1"/>
+            <cm:property name="writer.shards"             value="4"/>
             <!-- Read path -->
             <cm:property name="max-series-lookback-seconds" value="7776000"/>
             <cm:property name="read.discovery-strategy"     value="single-pass"/>

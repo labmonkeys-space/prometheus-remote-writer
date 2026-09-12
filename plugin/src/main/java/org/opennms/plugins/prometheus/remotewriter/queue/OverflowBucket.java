@@ -240,6 +240,12 @@ public final class OverflowBucket implements Closeable {
         }
         pinEvictionFloor();
         rewind("after-eviction");
+        // The evicted frames may include the one the stamp described. Leaving
+        // it would have overflow_oldest_pending_age_ms — the documented
+        // recovery alert — report the age of data that was deliberately
+        // discarded, firing precisely in the mode where dropping is the point.
+        oldestPendingStamp = 0L;
+        seedOldestPendingStamp();
     }
 
     /** Lowest start offset still on disk, or the checkpoint when none remain. */
@@ -329,7 +335,12 @@ public final class OverflowBucket implements Closeable {
             return -1L;
         }
         pending = Math.max(0, pending - samplesAcked);
-        if (isEmpty()) oldestPendingStamp = 0L;
+        // The stamp still describes the batch just acknowledged. Clear it so
+        // the next read sets it from what is actually oldest; until then the
+        // gauge reports 0 rather than something too old, which is the safer
+        // direction for an alert.
+        oldestPendingStamp = 0L;
+        if (!isEmpty()) seedOldestPendingStamp();
 
         // Best-effort: eviction floor and GC. A failure here only delays
         // reclaim; the next successful batch runs them again.

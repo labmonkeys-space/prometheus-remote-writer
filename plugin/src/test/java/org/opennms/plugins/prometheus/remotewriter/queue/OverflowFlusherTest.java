@@ -390,4 +390,45 @@ class OverflowFlusherTest {
                 .as("every disk sample shipped, and only then the memory one")
                 .isEqualTo(40);
     }
+
+    @Test
+    void concurrent_alternates_through_the_shipped_wiring(@TempDir Path dir) throws Exception {
+        // The other concurrent cases here build a Flusher directly, which
+        // leaves memoryTier null — a combination Shards never produces. That
+        // path took a different branch, so those tests were asserting totals
+        // over a flusher that did not actually alternate. This one goes
+        // through Shards, so it covers what ships.
+        for (int i = 0; i < 60; i++) server.enqueue(new MockResponse().setResponseCode(204));
+
+        try (Shards shards = new Shards(1, 40, http, 2, 50, 0, metrics,
+                RemoteWriteRequestBuilders.forVersion(1),
+                shard -> {
+                    try {
+                        return OverflowBucket.open(dir.resolve("shard-" + shard), 1L << 20,
+                                1 << 17, OverflowBucket.FullPolicy.REFUSE, FsyncPolicy.BATCH,
+                                MAX_PAYLOAD, "shard-" + shard);
+                    } catch (IOException e) {
+                        throw new java.io.UncheckedIOException(e);
+                    }
+                }, OverflowBucket.DrainPolicy.CONCURRENT)) {
+
+            // A deep disk backlog and a little memory. Under ordered the
+            // memory sample goes last; under concurrent it goes early.
+            OverflowBucket bucket = shards.bucketForTesting(0);
+            for (int i = 1; i <= 30; i++) bucket.append(sample(i));
+            for (int i = 900; i <= 903; i++) shards.accept(sample(i));
+
+            shards.start();
+
+            await().atMost(Duration.ofSeconds(20)).until(() ->
+                    counter(PluginMetrics.SAMPLES_WRITTEN)
+                            - counter(PluginMetrics.SAMPLES_DRAINED_FROM_OVERFLOW) >= 4);
+
+            assertThat(counter(PluginMetrics.SAMPLES_DRAINED_FROM_OVERFLOW))
+                    .as("the memory samples went out well before the 30-sample "
+                        + "disk backlog was exhausted")
+                    .isLessThan(30);
+            shards.stop(2_000);
+        }
+    }
 }

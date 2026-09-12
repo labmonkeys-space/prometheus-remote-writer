@@ -413,4 +413,47 @@ class OverflowTierTest {
             assertThat(shards.recoveringShards()).isZero();
         }
     }
+
+    @Test
+    void concurrent_does_not_dump_the_backlog_when_a_batch_comes_back(@TempDir Path dir) {
+        // The rescue puts a refused memory batch on disk, and under `ordered`
+        // the backlog follows it so it cannot be overtaken. Under `concurrent`
+        // that ordering argument is already given up, so following it would
+        // just bulk-transfer a whole queue to disk — re-creating the very
+        // fresh-sample-behind-the-backlog latency this policy is chosen for.
+        try (Shards shards = concurrentShards(dir, 6)) {
+            for (long t = 1; t <= 4; t++) {
+                assertThat(shards.accept(sample(t))).isEqualTo(Shards.Acceptance.MEMORY);
+            }
+            // Stand in for the flusher: a batch left the queue and the backend
+            // refused it.
+            List<MappedSample> refused = shards.queuesForTesting().get(0).drain(2);
+            assertThat(refused).hasSize(2);
+            Shards.InFlight token = shards.memoryBatchInFlight(0, refused);
+
+            assertThat(shards.returnToOverflow(0, token, refused)).isEqualTo(2);
+
+            assertThat(shards.totalOverflowPending())
+                    .as("only the returned batch reached disk").isEqualTo(2);
+            assertThat(shards.totalDepth())
+                    .as("the rest of the queue stays in memory under concurrent")
+                    .isEqualTo(2);
+        }
+    }
+
+    @Test
+    void ordered_does_dump_the_backlog_when_a_batch_comes_back(@TempDir Path dir) {
+        // The counterpart: under `ordered` the backlog must follow, or the
+        // rescued batch would be overtaken by what is still in memory.
+        try (Shards shards = shards(dir, 6)) {
+            for (long t = 1; t <= 4; t++) shards.accept(sample(t));
+            List<MappedSample> refused = shards.queuesForTesting().get(0).drain(2);
+            Shards.InFlight token = shards.memoryBatchInFlight(0, refused);
+
+            shards.returnToOverflow(0, token, refused);
+
+            assertThat(shards.totalDepth()).as("memory is emptied behind it").isZero();
+            assertThat(shards.totalOverflowPending()).isEqualTo(4);
+        }
+    }
 }

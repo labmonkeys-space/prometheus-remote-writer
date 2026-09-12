@@ -383,6 +383,7 @@ public final class Flusher {
         metrics.flusherIdleNanos(System.nanoTime() - waitStarted - polled.lingerNanos());
         metrics.flusherLingerNanos(polled.lingerNanos());
         if (polled.samples().isEmpty()) return null;
+        lastTier = Tier.MEMORY;
         return prepareMemory(polled.samples());
     }
 

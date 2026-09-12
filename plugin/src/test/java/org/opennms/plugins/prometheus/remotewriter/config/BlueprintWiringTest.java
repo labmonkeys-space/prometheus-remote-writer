@@ -221,6 +221,62 @@ class BlueprintWiringTest {
 
     /** Collect {@code name} attributes from every {@code <cm:property>}
      *  element (cm namespace) under the property-placeholder defaults. */
+    /**
+     * The placeholder default and the Java field default must agree.
+     *
+     * <p>Blueprint hands the {@code <cm:property>} value to the setter
+     * whenever the key is absent from ConfigAdmin, so the Java field default
+     * is never seen in OSGi — it only shows up in unit tests that construct
+     * the bean directly. That is exactly how 0.8.0's headline default change
+     * (writer.shards 1 to 4, queue.capacity 10000 to 40000, batch.linger-ms
+     * 0 to 100) was briefly a no-op in a real deployment while every unit
+     * test, the docs and the CHANGELOG asserted the new numbers — and
+     * {@code logEffectiveWritePath} would have faithfully printed the old
+     * ones.
+     */
+    @Test
+    void blueprint_defaults_match_the_java_defaults() throws Exception {
+        Document doc = loadBlueprint();
+        Map<String, String> cmDefaults = collectCmPropertyDefaults(doc);
+        PrometheusRemoteWriterConfig javaDefaults = new PrometheusRemoteWriterConfig();
+
+        // Keys whose Java default is a plain value the placeholder can state.
+        // Deliberately not exhaustive: this pins the write-path numbers the
+        // release notes make promises about.
+        Map<String, String> expected = new LinkedHashMap<>();
+        expected.put("writer.shards",           String.valueOf(javaDefaults.getWriterShards()));
+        expected.put("queue.capacity",          String.valueOf(javaDefaults.getQueueCapacity()));
+        expected.put("batch.linger-ms",         String.valueOf(javaDefaults.getBatchLingerMs()));
+        expected.put("batch.size",              String.valueOf(javaDefaults.getBatchSize()));
+        expected.put("flush.interval-ms",       String.valueOf(javaDefaults.getFlushIntervalMs()));
+        expected.put("overflow.max-size-bytes", String.valueOf(javaDefaults.getOverflowMaxSizeBytes()));
+
+        for (Map.Entry<String, String> e : expected.entrySet()) {
+            assertThat(cmDefaults)
+                    .as("blueprint.xml has no <cm:property> default for %s", e.getKey())
+                    .containsKey(e.getKey());
+            assertThat(cmDefaults.get(e.getKey()))
+                    .as("<cm:property name=\"%s\"> is %s but the Java default is %s — the "
+                        + "placeholder wins in OSGi, so the Java default would never apply",
+                        e.getKey(), cmDefaults.get(e.getKey()), e.getValue())
+                    .isEqualTo(e.getValue());
+        }
+    }
+
+    private static Map<String, String> collectCmPropertyDefaults(Document doc) {
+        Map<String, String> out = new LinkedHashMap<>();
+        NodeList props = doc.getElementsByTagNameNS("*", "property");
+        for (int i = 0; i < props.getLength(); i++) {
+            Element el = (Element) props.item(i);
+            String ns = el.getNamespaceURI();
+            if (ns != null && ns.contains("blueprint-cm")) {
+                String name = el.getAttribute("name");
+                if (!name.isEmpty()) out.put(name, el.getAttribute("value"));
+            }
+        }
+        return out;
+    }
+
     private static Set<String> collectCmPropertyNames(Document doc) {
         Set<String> out = new LinkedHashSet<>();
         // Namespace-scoped — cm:property lives in the Aries CM namespace, not
