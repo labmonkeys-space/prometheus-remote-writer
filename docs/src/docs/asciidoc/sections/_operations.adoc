@@ -152,19 +152,31 @@ slow batch visibly stalls the drain.
 
 == Log levels
 
-Set in `etc/org.ops4j.pax.logging.cfg` or via the Karaf shell
-(`log:set DEBUG org.opennms.plugins.prometheus.remotewriter`).
+Set in `etc/org.ops4j.pax.logging.cfg` or via the Karaf shell (`log:set DEBUG org.opennms.plugins.prometheus.remotewriter`).
+
+A stock OpenNMS Horizon sets `log4j2.logger.opennms.level = WARN` in `etc/org.ops4j.pax.logging.cfg`.
+That covers the plugin's package, so none of its `INFO` lines appear by default, including the `write path:` line.
+To see them, run this in the Karaf shell:
+
+[source,console]
+----
+log:set INFO org.opennms.plugins.prometheus.remotewriter
+----
+
+Or add these lines to `etc/org.ops4j.pax.logging.cfg`:
+
+[source,properties]
+----
+log4j2.logger.prw.name = org.opennms.plugins.prometheus.remotewriter
+log4j2.logger.prw.level = INFO
+----
 
 [cols="1,4",options="header"]
 |===
 | Level | What you see
 
-| `INFO`  | Plugin lifecycle (start / stop), config-change diff, WAL
-            startup recovery summary, `wire.protocol-version=2` startup
-            WARN message.
-| `WARN`  | 4xx response bodies (truncated), `instance.id` unset on
-            startup, unknown `labels.copy` source, WAL torn-tail
-            truncation, `tls.insecure-skip-verify=true` reminder.
+| `INFO`  | Plugin lifecycle (start / stop), config-change diff, the `write path:` line naming the resolved shards, queue, batch, linger and overflow settings, overflow bucket recovery at start (`shard N: recovered ... pending sample(s)`), a bucket draining back to empty (`overflow bucket is empty again`), `wire.protocol-version=2` startup WARN message.
+| `WARN`  | 4xx response bodies (truncated), `instance.id` unset on startup, unknown `labels.copy` source, WAL torn-tail truncation, `tls.insecure-skip-verify=true` reminder, a shard starting to spill to disk (`shard N is spilling to disk`), an overflow drain that waited its full bound for the sender (`the overflow drain waited ...`). That last line is expected while a write is retrying against a slow backend. It points at a stuck drain only when `http_writes_successful_total` and the dropped-write counters are all flat.
 | `DEBUG` | Per-batch flush results, retry timing, label-pipeline
             diff for the first sample after a config reload. Verbose —
             use sparingly.
