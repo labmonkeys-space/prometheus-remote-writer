@@ -209,15 +209,14 @@ The budget is a stated outage tolerance. Divide it by the offered byte rate:
 outage_window = overflow.max-size-bytes / (samples_per_second × bytes_per_sample)
 ----
 
-A sample costs roughly 30–80 bytes on disk pre-snappy — the wire format is
-compressed, the bucket is not — so budget about 60 bytes. At 64,000
-samples/sec that is ~3.8 MB/s, and the default 4 GiB buys on the order of 15
-to 20 minutes. Halving the offered rate doubles the window.
+`bytes_per_sample` depends on your label set, because the bucket stores every sample's metric name and labels uncompressed.
+On a native-profile OpenNMS fleet of SNMP interface data it measured about 340 bytes, so at 64,000 samples/sec the default 4 GiB buys about 3 to 4 minutes.
+Halving the offered rate doubles the window.
+Measure your own figure from `overflow_bytes` and `overflow_pending_samples`; <<overflow-sizing,Sizing the disk tier>> explains how, including the baseline to subtract.
 
-The budget is split evenly across `writer.shards` at startup, so hash skew
-across shards applies to disk exactly as it does to memory: one hot shard
-exhausts its slice while its siblings idle. Watch
-`overflow_pending_samples_shard_<i>`, not just the total.
+The budget is split evenly across `writer.shards` at startup, so hash skew across shards applies to disk exactly as it does to memory.
+The hottest shard exhausts its slice while its siblings idle, and that slice sets the window.
+Watch `overflow_pending_samples_shard_<i>`, not just the total.
 
 `overflow.full` decides what happens when a bucket does run out. `refuse`
 (the default) pushes the decision back to OpenNMS and counts the loss in

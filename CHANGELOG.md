@@ -7,6 +7,11 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **The disk-tier sizing guidance overstated the outage window nearly six times** (#181). The docs, the shipped `.cfg` comment and the 0.8.0 release notes said a sample takes about 60 bytes on disk, so the default 4 GiB would buy 15 to 20 minutes at 64,000 samples/sec. A bucket stores every sample's metric name and labels uncompressed, so the figure depends on the label set: a native-profile OpenNMS fleet measured about 340 bytes, which makes the default about 3 to 4 minutes at that rate. The sizing sections now give the measured figure and say how to measure your own from `overflow_bytes` and `overflow_pending_samples`, subtracting the `overflow_bytes` baseline a drained bucket keeps. They also say that baseline counts against the budget, so after an earlier spill the next outage window can be up to an eighth shorter.
+  **If you sized `overflow.max-size-bytes` from the old figure**, re-check it: your outage window may be under a fifth of what you planned. Tolerating 15 minutes at 64,000 samples/sec and 340 bytes needs about 18 GiB.
+
 ## [0.8.1] — 2026-09-13
 
 ### Fixed
