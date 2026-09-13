@@ -27,6 +27,10 @@ public final class PluginMetrics {
 
     public static final String SAMPLES_WRITTEN                 = "samples_written_total";
     public static final String SAMPLES_DROPPED_4XX             = "samples_dropped_4xx_total";
+    /** Samples in 2xx-acknowledged requests that the receiver's own
+     *  written-count header says it did not write. Not a term of the
+     *  reconciliation identity: they are already in samples_written_total. */
+    public static final String SAMPLES_UNCONFIRMED_BY_RECEIVER = "samples_unconfirmed_by_receiver_total";
     public static final String SAMPLES_DROPPED_5XX             = "samples_dropped_5xx_total";
     public static final String SAMPLES_DROPPED_TRANSPORT       = "samples_dropped_transport_total";
     public static final String SAMPLES_DROPPED_QUEUE_FULL      = "samples_dropped_queue_full_total";
@@ -130,6 +134,7 @@ public final class PluginMetrics {
     private final MetricRegistry registry = new MetricRegistry();
     private final Counter samplesWritten;
     private final Counter samplesDropped4xx;
+    private final Counter samplesUnconfirmedByReceiver;
     private final Counter samplesDropped5xx;
     private final Counter samplesDroppedTransport;
     private final Counter samplesDroppedNonfinite;
@@ -167,6 +172,7 @@ public final class PluginMetrics {
     public PluginMetrics() {
         this.samplesWritten               = registry.counter(SAMPLES_WRITTEN);
         this.samplesDropped4xx            = registry.counter(SAMPLES_DROPPED_4XX);
+        this.samplesUnconfirmedByReceiver = registry.counter(SAMPLES_UNCONFIRMED_BY_RECEIVER);
         this.samplesDropped5xx            = registry.counter(SAMPLES_DROPPED_5XX);
         this.samplesDroppedTransport      = registry.counter(SAMPLES_DROPPED_TRANSPORT);
         this.samplesDroppedNonfinite      = registry.counter(SAMPLES_DROPPED_NONFINITE);
@@ -200,6 +206,8 @@ public final class PluginMetrics {
 
     public void samplesWritten(long n)                 { if (n > 0) samplesWritten.inc(n); }
     public void samplesDropped4xx(long n)              { if (n > 0) samplesDropped4xx.inc(n); }
+    public void samplesUnconfirmedByReceiver(long n)   { if (n > 0) samplesUnconfirmedByReceiver.inc(n); }
+    public long samplesUnconfirmedByReceiverTotal()    { return samplesUnconfirmedByReceiver.getCount(); }
     public void samplesDropped5xx(long n)              { if (n > 0) samplesDropped5xx.inc(n); }
     public void samplesDroppedTransport(long n)        { if (n > 0) samplesDroppedTransport.inc(n); }
     public void samplesDroppedNonfinite(long n)        { if (n > 0) samplesDroppedNonfinite.inc(n); }
