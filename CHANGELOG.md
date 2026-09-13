@@ -7,6 +7,10 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`samples_unconfirmed_by_receiver_total`: samples a backend acknowledged but did not confirm writing** (#187). Remote Write 2.0 receivers report what they wrote in `X-Prometheus-Remote-Write-Samples-Written`, and must not answer 2xx on a partial write. The plugin now reads that header on every 2xx that carries it; when it reports fewer samples than the request held, the difference is counted here and a WARN names both counts, at most once a minute per shard. Nothing else changes: `samples_written_total` still counts every sample in a 2xx request, nothing is retried, and a response without the header is taken at its word. The v2 integration tests now assert it stays at 0, and a read-back timeout fails with what Prometheus holds for the test, the plugin's counters and the Prometheus log, so the flaky failure in #187 names its cause the next time it happens.
+
 ## [0.8.2] — 2026-09-13
 
 ### Changed

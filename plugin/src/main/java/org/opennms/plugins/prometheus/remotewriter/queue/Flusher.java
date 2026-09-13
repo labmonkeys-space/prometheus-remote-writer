@@ -686,11 +686,15 @@ public final class Flusher {
                     // the advance fails the batch re-ships, and it must not be
                     // counted twice.
                     if (acknowledgeOverflow(p, built.samplesWritten())) {
+                        // Before samples_written: a reader that has seen the
+                        // written count has then seen any shortfall too.
+                        noteReceiverShortfall(result, built.samplesWritten());
                         metrics.samplesWritten(built.samplesWritten());
                         metrics.sampleLatency(built.samplesWritten(), built.enqueuedEpochMsSum());
                         metrics.samplesDrainedFromOverflow(built.samplesWritten());
                     }
                 } else {
+                    noteReceiverShortfall(result, built.samplesWritten());
                     metrics.samplesWritten(built.samplesWritten());
                     metrics.sampleLatency(built.samplesWritten(), built.enqueuedEpochMsSum());
                 }
@@ -744,6 +748,33 @@ public final class Flusher {
                 }
             }
         }
+    }
+
+    /** At most one shortfall WARN a minute per flusher: a receiver that
+     *  under-writes every request would otherwise log once per request. */
+    private static final long SHORTFALL_WARN_INTERVAL_NANOS = TimeUnit.MINUTES.toNanos(1);
+    /** Sender thread only. Starts one interval back so the first shortfall logs. */
+    private long lastShortfallWarnNanos = System.nanoTime() - SHORTFALL_WARN_INTERVAL_NANOS;
+
+    /**
+     * A 2xx whose written-count header reports fewer samples than the request
+     * carried: the receiver contradicting its own acknowledgement, which the
+     * Remote Write 2.0 spec forbids. Counted, and logged for a human; nothing
+     * is retried or re-counted, because the request was acknowledged as a
+     * unit and re-sending it would duplicate what did land (#187).
+     */
+    private void noteReceiverShortfall(WriteResult result, int sent) {
+        int reported = result.samplesWrittenReported();
+        if (reported < 0 || reported >= sent) return;
+        metrics.samplesUnconfirmedByReceiver(sent - reported);
+        long now = System.nanoTime();
+        if (now - lastShortfallWarnNanos < SHORTFALL_WARN_INTERVAL_NANOS) return;
+        lastShortfallWarnNanos = now;
+        LOG.warn("{}: the receiver answered {} but reported writing {} of {} sample(s); a 2xx must "
+                + "mean all were written, so some may be missing at the backend "
+                + "({} unconfirmed in total, see samples_unconfirmed_by_receiver_total)",
+                threadName, result.httpStatus(), reported, sent,
+                metrics.samplesUnconfirmedByReceiverTotal());
     }
 
     /**

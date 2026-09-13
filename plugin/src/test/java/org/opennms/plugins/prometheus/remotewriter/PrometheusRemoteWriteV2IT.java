@@ -9,10 +9,17 @@ package org.opennms.plugins.prometheus.remotewriter;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 
+import java.net.URI;
+import java.net.URLEncoder;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 
+import org.awaitility.core.ConditionTimeoutException;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -111,6 +118,7 @@ class PrometheusRemoteWriteV2IT {
         PluginMetrics m = storage.getMetrics();
         await().atMost(Duration.ofSeconds(20))
                .until(() -> m.snapshot().get(PluginMetrics.SAMPLES_WRITTEN).longValue() >= 1L);
+        assertReceiverConfirmedEverything(m);
 
         // Verify the sample is queryable through the read path (which
         // uses the standard Prometheus query API, independent of the
@@ -121,9 +129,7 @@ class PrometheusRemoteWriteV2IT {
                 .value(metricName)
                 .build();
 
-        List<Metric> found = await().atMost(Duration.ofSeconds(20))
-                .until(() -> storage.findMetrics(List.of(nameMatcher)),
-                       list -> !list.isEmpty());
+        List<Metric> found = awaitSeries(nameMatcher, "onms_v2_it_", "{foreign_id=\"v2-it\"}");
         assertThat(found).hasSize(1);
 
         // Default labels must round-trip — confirms label interning
@@ -159,6 +165,7 @@ class PrometheusRemoteWriteV2IT {
         PluginMetrics m = storage.getMetrics();
         await().atMost(Duration.ofSeconds(20))
                .until(() -> m.snapshot().get(PluginMetrics.SAMPLES_WRITTEN).longValue() >= 5L);
+        assertReceiverConfirmedEverything(m);
 
         // Confirm each series exists in Prometheus (each via its unique name).
         for (int i = 0; i < 5; i++) {
@@ -168,10 +175,77 @@ class PrometheusRemoteWriteV2IT {
                     .key("name")
                     .value(metricName)
                     .build();
-            List<Metric> found = await().atMost(Duration.ofSeconds(20))
-                    .until(() -> storage.findMetrics(List.of(nameMatcher)),
-                           list -> !list.isEmpty());
+            List<Metric> found = awaitSeries(nameMatcher, prefix, "{foreign_id=~\"v2-i[0-4]\"}");
             assertThat(found).hasSize(1);
         }
+    }
+
+    // --- diagnostics (#187) -------------------------------------------------
+    //
+    // v2_multiple_series_with_shared_labels_all_land failed twice on CI with
+    // every write acknowledged and a series missing from the read for 20 s,
+    // and the bare timeout said nothing about why. These make the next
+    // failure name its cause instead of being retried away.
+
+    /**
+     * Prometheus answered 2xx; a written-count header below what was sent
+     * means it wrote less than it acknowledged. Fail as that, with the counts,
+     * rather than as a read-back timeout 20 s later.
+     */
+    private static void assertReceiverConfirmedEverything(PluginMetrics m) {
+        assertThat(m.snapshot().get(PluginMetrics.SAMPLES_UNCONFIRMED_BY_RECEIVER).longValue())
+                .as("Prometheus reported writing fewer samples than it acknowledged; counters: %s",
+                        counters(m))
+                .isZero();
+    }
+
+    /**
+     * Wait for {@code findMetrics} to return the series, as before. On timeout,
+     * fail with what Prometheus holds under the test's name prefix and under a
+     * label that does not depend on the name, the plugin's counters, and the
+     * tail of the Prometheus log: a series stored under a wrong name shows in
+     * the second query only, an absent one in neither, a stored one the read
+     * misses in both.
+     */
+    private List<Metric> awaitSeries(TagMatcher nameMatcher, String namePrefix, String nameIndependent) {
+        try {
+            return await().atMost(Duration.ofSeconds(20))
+                    .until(() -> storage.findMetrics(List.of(nameMatcher)), list -> !list.isEmpty());
+        } catch (ConditionTimeoutException timeout) {
+            String logs = prometheus.getLogs();
+            String[] lines = logs.split("\n");
+            String tail = String.join("\n",
+                    java.util.Arrays.copyOfRange(lines, Math.max(0, lines.length - 50), lines.length));
+            throw new AssertionError("findMetrics did not return " + nameMatcher.getValue()
+                    + " within 20 s\n"
+                    + "Prometheus series by name prefix " + namePrefix + ": "
+                    + series("{__name__=~\"" + namePrefix + ".*\"}") + "\n"
+                    + "Prometheus series by " + nameIndependent + ": " + series(nameIndependent) + "\n"
+                    + "plugin counters: " + counters(storage.getMetrics()) + "\n"
+                    + "Prometheus log tail:\n" + tail, timeout);
+        }
+    }
+
+    /** Raw {@code /api/v1/series} answer for {@code selector}, straight from the container. */
+    private static String series(String selector) {
+        String url = "http://" + prometheus.getHost() + ":" + prometheus.getMappedPort(9090)
+                + "/api/v1/series?match[]=" + URLEncoder.encode(selector, StandardCharsets.UTF_8);
+        try {
+            HttpResponse<String> r = HttpClient.newHttpClient().send(
+                    HttpRequest.newBuilder(URI.create(url)).timeout(Duration.ofSeconds(5)).build(),
+                    HttpResponse.BodyHandlers.ofString());
+            return r.statusCode() + " " + r.body();
+        } catch (Exception e) {
+            return "query failed: " + e;
+        }
+    }
+
+    /** The plugin's write, drop and receiver counters. */
+    private static String counters(PluginMetrics m) {
+        StringBuilder b = new StringBuilder();
+        m.snapshot().forEach((k, v) -> {
+            if (k.startsWith("samples_") || k.startsWith("http_writes")) b.append(k).append('=').append(v).append(' ');
+        });
+        return b.toString().trim();
     }
 }

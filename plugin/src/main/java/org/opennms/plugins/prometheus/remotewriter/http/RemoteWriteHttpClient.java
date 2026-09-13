@@ -65,7 +65,23 @@ public final class RemoteWriteHttpClient {
         TRANSPORT_ERROR
     }
 
-    public record WriteResult(WriteOutcome outcome, int httpStatus, int attemptsMade, String detail) {}
+    /**
+     * @param samplesWrittenReported the receiver's own count of samples it
+     *        wrote, from {@value #SAMPLES_WRITTEN_HEADER} on a successful
+     *        response; -1 when the response did not carry a usable one
+     */
+    public record WriteResult(WriteOutcome outcome, int httpStatus, int attemptsMade, String detail,
+                              int samplesWrittenReported) {
+        public WriteResult(WriteOutcome outcome, int httpStatus, int attemptsMade, String detail) {
+            this(outcome, httpStatus, attemptsMade, detail, -1);
+        }
+    }
+
+    /**
+     * Remote Write 2.0 receivers report what they wrote here, and must not
+     * answer 2xx if they wrote less than they were sent (#187).
+     */
+    public static final String SAMPLES_WRITTEN_HEADER = "X-Prometheus-Remote-Write-Samples-Written";
 
     private final OkHttpClient http;
     private final PrometheusRemoteWriterConfig config;
@@ -157,7 +173,8 @@ public final class RemoteWriteHttpClient {
                 if (resp.isSuccessful()) {
                     writesSuccessful.incrementAndGet();
                     bytesWritten.addAndGet(snappyCompressedPayload.length);
-                    return new WriteResult(WriteOutcome.SUCCESS, code, attempt, null);
+                    return new WriteResult(WriteOutcome.SUCCESS, code, attempt, null,
+                            samplesWrittenReported(resp));
                 }
                 if (code >= 400 && code < 500) {
                     String body = readBodyQuiet(resp);
@@ -193,6 +210,18 @@ public final class RemoteWriteHttpClient {
         }
         writes5xxExhausted.incrementAndGet();
         return new WriteResult(WriteOutcome.DROPPED_5XX_EXHAUSTED, lastStatus, maxAttempts, lastBody);
+    }
+
+    /** The receiver's written count, or -1 when absent or not a non-negative integer. */
+    private static int samplesWrittenReported(Response resp) {
+        String v = resp.header(SAMPLES_WRITTEN_HEADER);
+        if (v == null) return -1;
+        try {
+            int n = Integer.parseInt(v.trim());
+            return n >= 0 ? n : -1;
+        } catch (NumberFormatException e) {
+            return -1;
+        }
     }
 
     public void shutdown() {
