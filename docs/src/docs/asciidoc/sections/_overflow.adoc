@@ -97,6 +97,10 @@ both ends.
 | behind the whole backlog
 | roughly one batch
 
+| `store()` cost during a drain
+| disk path until the bucket is empty
+| memory path while memory has room
+
 | Time to clear the backlog
 | baseline
 | about twice as long
@@ -135,6 +139,27 @@ offered rate matches the drain rate: the backlog becomes permanent and the
 outage window quietly shrinks to nothing. Alternating bounds how long the
 backlog lives and keeps `overflow_oldest_pending_age_ms` a number that
 comes back down.
+
+[#overflow-caller-cost]
+=== What an outage costs the writer threads
+
+A sample bound for disk costs `store()` more than one bound for memory, because it is written to the bucket while its shard's lock is held.
+So a spilling shard slows the OpenNMS writer threads that call it, and when they cannot keep up, OpenNMS discards samples before they reach the plugin.
+None of the plugin's counters include those; <<operations,Operations>> names the OpenNMS counter that does.
+
+During the outage itself both policies spill, since memory cannot drain either.
+The difference is the drain.
+Under `ordered`, every new sample for a recovering shard keeps going to disk until its bucket is empty, so the slow path lasts until the backlog is gone, not until the backend returns.
+The cost outlasts the outage by the length of the drain.
+
+#182 measured this on 0.8.1: 11,000 devices offering about 64,000 samples/sec, a backend cut off for 5 minutes, shipped defaults.
+Mean `store()` time was 0.7 ms before the outage, 4.7 ms during it and 7.7 ms during the drain.
+OpenNMS's ring buffer discarded 12.9 million samples, 21 times the 612,639 the plugin refused, and the writer threads stayed slow for 8.5 minutes.
+The disk path has been made cheaper since, but it is still slower than memory, so the shape holds.
+
+If your writer threads cannot absorb that, and your backend accepts out-of-order writes, use `concurrent`.
+It keeps new samples on the memory path while the bucket drains, so `store()` returns to its normal cost as soon as memory has room rather than when the backlog is gone.
+The price is per-series order across the tier boundary, as the table above says.
 
 == Configuration
 
@@ -184,6 +209,8 @@ Those leftover bytes also count against the budget, so after an earlier spill th
 
 Do not take the reading while a bucket drains.
 Pending samples fall as batches are acknowledged, but a segment is released only once the backend has taken all of it, so the ratio reads high.
+
+The window bounds what the plugin refuses, not what the caller loses: a spilling shard also slows `store()`, and OpenNMS discards what its writer threads cannot hand over (<<overflow-caller-cost,What an outage costs the writer threads>>).
 
 The budget is split evenly across shards, so hash skew applies to disk just as it does to memory.
 The hottest shard fills its slice first, and it is that shard's slice and its share of the rate that set the window.

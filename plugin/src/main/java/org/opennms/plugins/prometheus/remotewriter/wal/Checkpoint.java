@@ -130,6 +130,17 @@ public final class Checkpoint {
      * @return the cumulative bytes reclaimed
      */
     public static long gcSegments(Path dir, long checkpointOffset) throws IOException {
+        return gcSegments(dir, checkpointOffset, bytes -> { });
+    }
+
+    /**
+     * {@link #gcSegments(Path, long)}, telling {@code onDeleted} the bytes of
+     * each segment as soon as it is gone. A writer that tracks its footprint
+     * learns of the room at once, rather than after the whole pass and its
+     * directory fsync, during which a full bucket would still refuse.
+     */
+    public static long gcSegments(Path dir, long checkpointOffset,
+                                  java.util.function.LongConsumer onDeleted) throws IOException {
         List<Long> starts = listSegmentStartOffsets(dir);
         if (starts.size() <= 1) return 0L; // nothing to GC; keep the newest
         long bytesReclaimed = 0L;
@@ -142,8 +153,12 @@ public final class Checkpoint {
             long size = Files.exists(segPath) ? Files.size(segPath) : 0L;
             long endOffset = s + size;
             if (endOffset <= checkpointOffset) {
-                bytesReclaimed += size;
-                Files.deleteIfExists(segPath);
+                // Counted only if this delete removed it: a drop-oldest
+                // eviction may reach the same segment and counts its own.
+                if (Files.deleteIfExists(segPath)) {
+                    bytesReclaimed += size;
+                    onDeleted.accept(size);
+                }
                 Files.deleteIfExists(idxPath);
             }
         }

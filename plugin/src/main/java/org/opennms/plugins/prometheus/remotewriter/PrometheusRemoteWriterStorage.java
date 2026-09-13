@@ -541,11 +541,10 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
      *  per refused sample: under overload that is tens of thousands of stack
      *  traces a second saved. */
     private static void acceptAll(Active a, List<MappedSample> mapped) throws StorageException {
-        int refused = 0;
+        int refused;
         try {
-            for (MappedSample m : mapped) {
-                if (a.shards().accept(m) == Shards.Acceptance.REFUSED) refused++;
-            }
+            // One accept lock per shard per call, not one per sample (#182).
+            refused = a.shards().acceptAll(mapped);
         } catch (java.io.UncheckedIOException io) {
             // The disk tier could not be written. Surface it as a typed error
             // rather than an unchecked one, so OpenNMS backs off instead of

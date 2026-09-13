@@ -51,10 +51,20 @@ public final class SampleQueue {
      * (issue #156).
      */
     public boolean tryEnqueue(MappedSample sample) {
+        if (!tryEnqueueQuietly(sample)) return false;
+        signalArrival();
+        return true;
+    }
+
+    /**
+     * {@link #tryEnqueue} without waking the consumer. For a producer placing
+     * several samples in one step, which then calls {@link #signalArrival()}
+     * once rather than taking the arrival monitor per sample.
+     */
+    boolean tryEnqueueQuietly(MappedSample sample) {
         Objects.requireNonNull(sample, "sample");
         if (!queue.offer(sample)) return false;
         samplesEnqueued.incrementAndGet();
-        signalArrival();
         return true;
     }
 
@@ -69,7 +79,7 @@ public final class SampleQueue {
      */
     private final Object arrival = new Object();
 
-    private void signalArrival() {
+    void signalArrival() {
         synchronized (arrival) {
             arrival.notifyAll();
         }

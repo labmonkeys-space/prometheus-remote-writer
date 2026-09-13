@@ -8,6 +8,7 @@ package org.opennms.plugins.prometheus.remotewriter.queue;
 
 import java.io.Closeable;
 import java.io.IOException;
+import java.nio.ByteBuffer;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
@@ -184,8 +185,21 @@ public final class OverflowBucket implements Closeable {
                         ? WalWriter.OverflowPolicy.DROP_OLDEST
                         : WalWriter.OverflowPolicy.BACKPRESSURE,
                 fsync, maxPayload);
+        // The one directory listing for the byte count, before any flusher
+        // can run segment GC on this bucket. From here it is tracked.
+        writer.initTotalBytes();
         return new OverflowBucket(dir, writer, recovered.checkpoint(), fullPolicy, maxSizeBytes,
                 maxPayload, name, (int) recovered.pendingSampleCount(), writer.currentOffset());
+    }
+
+    /**
+     * The frame {@link #append(MappedSample, ByteBuffer)} would write for
+     * {@code sample}: the encoded entry, its length header and its CRC. Built
+     * by the calling thread before it takes the shard's accept lock, so the
+     * lock covers only the write.
+     */
+    public static ByteBuffer encodeFrame(MappedSample sample) {
+        return org.opennms.plugins.prometheus.remotewriter.wal.Frame.encode(WalEntryCodec.encode(sample));
     }
 
     /**
@@ -195,9 +209,18 @@ public final class OverflowBucket implements Closeable {
      * result carries how many samples were evicted for it.
      */
     public AppendResult append(MappedSample sample) throws IOException {
-        byte[] encoded = WalEntryCodec.encode(sample);
+        return append(sample, null);
+    }
+
+    /**
+     * {@link #append(MappedSample)} with the frame already built by
+     * {@link #encodeFrame}, or null to build it here. Consumes the frame.
+     */
+    public AppendResult append(MappedSample sample, ByteBuffer frame) throws IOException {
+        ByteBuffer f = frame != null ? frame : encodeFrame(sample);
+        long frameBytes = f.remaining();
         try {
-            WalWriter.AppendResult r = writer.appendWithStats(encoded);
+            WalWriter.AppendResult r = writer.appendWithStats(f);
             if (oldestPendingStamp <= 0L) oldestPendingStamp = sample.enqueuedEpochMs();
             writeOffset = r.offsetAfter();
             pending++;
@@ -205,9 +228,7 @@ public final class OverflowBucket implements Closeable {
                 pending = Math.max(0, pending - r.evictedFrames());
                 repositionAfterEviction();
             }
-            return new AppendResult(true, r.evictedFrames(),
-                    org.opennms.plugins.prometheus.remotewriter.wal.Frame.HEADER_BYTES
-                            + encoded.length);
+            return new AppendResult(true, r.evictedFrames(), frameBytes);
         } catch (WalFullException full) {
             // Under drop-oldest this only happens when a single frame cannot
             // fit the whole budget, which is a configuration error, not
@@ -346,12 +367,21 @@ public final class OverflowBucket implements Closeable {
         // reclaim; the next successful batch runs them again.
         try {
             pinEvictionFloor();
-            long reclaimed = Checkpoint.gcSegments(dir, newOffset);
+            // Each deletion reaches the writer's byte count as it happens.
+            long reclaimed = Checkpoint.gcSegments(dir, newOffset, writer::reclaimed);
             if (reclaimed > 0) {
                 LOG.debug("{}: reclaimed {} bytes at checkpoint {}", name, reclaimed, newOffset);
             }
         } catch (IOException e) {
             LOG.warn("{}: segment GC failed (non-fatal — checkpoint advanced cleanly)", name, e);
+            // What the GC deleted before it failed is unknown, so the byte
+            // count re-reads the directory. Safe here: this is the thread
+            // that runs GC, and it has stopped.
+            try {
+                writer.rederiveTotalBytes();
+            } catch (IOException again) {
+                LOG.warn("{}: could not re-read the bucket size after a failed GC", name, again);
+            }
         }
         return Math.max(0L, newOffset - previousOffset);
     }
@@ -390,10 +420,15 @@ public final class OverflowBucket implements Closeable {
         return Math.max(0, pending);
     }
 
-    /** Total bytes this bucket currently occupies on disk. */
+    /**
+     * Total bytes this bucket currently occupies on disk. Tracked, not listed:
+     * this is read by every gauge scrape and every all-or-nothing room check,
+     * and a listing would hold the writer's lock and stall this shard's
+     * appends for as long as it took.
+     */
     public long bytes() {
         try {
-            return writer.currentTotalBytes();
+            return writer.totalBytes();
         } catch (IOException e) {
             return 0L;
         }

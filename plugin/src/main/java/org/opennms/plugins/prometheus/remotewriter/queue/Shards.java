@@ -247,30 +247,119 @@ public final class Shards implements java.io.Closeable {
             depthHighWater.accumulateAndGet(totalDepth(), Math::max);
             return Acceptance.MEMORY;
         }
+        Acceptance placed;
         acceptLocks[shard].lock();
         try {
-            OverflowBucket bucket = buckets[shard];
-            // Under `concurrent` the memory tier stays in use whatever the
-            // bucket holds: fresh samples are not made to queue behind the
-            // backlog, which is the whole point of the policy. Under
-            // `ordered` a non-empty bucket means the shard is yielding.
-            boolean mayUseMemory = concurrent() || bucket.isEmpty();
-            if (mayUseMemory) {
-                if (queues[shard].tryEnqueue(sample)) {
-                    depthHighWater.accumulateAndGet(totalDepth(), Math::max);
-                    return Acceptance.MEMORY;
-                }
-                // Memory just filled. Under `ordered` everything in it was
-                // offered before this sample, so it has to reach disk first or
-                // this sample would overtake it. Under `concurrent` the
-                // ordering that buys has already been given up, and moving the
-                // backlog would be pure cost.
-                if (!concurrent()) spillBacklog(shard, "memory queue full");
-            }
-            return appendToBucket(shard, sample);
+            placed = place(shard, sample, null);
         } finally {
             acceptLocks[shard].unlock();
         }
+        if (placed == Acceptance.MEMORY) {
+            queues[shard].signalArrival();
+            depthHighWater.accumulateAndGet(totalDepth(), Math::max);
+        }
+        return placed;
+    }
+
+    /**
+     * Place every sample of one {@code store()} call, taking each shard's
+     * accept lock once for all of the call's samples bound to it (#182).
+     *
+     * <p>Each sample is placed by exactly the rule {@link #accept} applies,
+     * in offered order within its shard, so the outcome is the one-at-a-time
+     * outcome. What changes is the cost. A spilling shard's writer threads
+     * used to queue behind the lock for a protobuf encode, a CRC and four
+     * syscalls per sample. Now the calling thread encodes a group's frames
+     * before it takes the lock, the lock is taken once per group, and the
+     * flusher is woken once per group rather than per sample.
+     *
+     * @return how many samples neither tier had room for
+     */
+    public int acceptAll(List<MappedSample> samples) {
+        if (buckets == null) {
+            int refused = 0;
+            for (MappedSample s : samples) {
+                if (accept(s) == Acceptance.REFUSED) refused++;
+            }
+            return refused;
+        }
+        if (samples.size() == 1) {
+            return accept(samples.get(0)) == Acceptance.REFUSED ? 1 : 0;
+        }
+        @SuppressWarnings("unchecked")
+        List<MappedSample>[] groups = new List[queues.length];
+        for (MappedSample s : samples) {
+            int shard = shardOf(s);
+            if (groups[shard] == null) groups[shard] = new java.util.ArrayList<>();
+            groups[shard].add(s);
+        }
+        int refused = 0;
+        boolean anyMemory = false;
+        for (int shard = 0; shard < groups.length; shard++) {
+            List<MappedSample> group = groups[shard];
+            if (group == null) continue;
+            java.nio.ByteBuffer[] frames = likelySpilling(shard, group.size())
+                    ? encodeFrames(group) : null;
+            boolean memory = false;
+            acceptLocks[shard].lock();
+            try {
+                for (int i = 0; i < group.size(); i++) {
+                    Acceptance a = place(shard, group.get(i), frames == null ? null : frames[i]);
+                    if (a == Acceptance.MEMORY) memory = true;
+                    else if (a == Acceptance.REFUSED) refused++;
+                }
+            } finally {
+                acceptLocks[shard].unlock();
+            }
+            if (memory) {
+                queues[shard].signalArrival();
+                anyMemory = true;
+            }
+        }
+        if (anyMemory) depthHighWater.accumulateAndGet(totalDepth(), Math::max);
+        return refused;
+    }
+
+    /**
+     * Whether a group bound for {@code shard} will probably go to disk, so its
+     * frames are worth encoding before the lock. A racy read: a wrong answer
+     * costs one wasted encode or one encode under the lock, never a wrong
+     * placement.
+     */
+    private boolean likelySpilling(int shard, int groupSize) {
+        boolean memoryShort = queues[shard].remainingCapacity() < groupSize;
+        return concurrent() ? memoryShort : memoryShort || !buckets[shard].isEmpty();
+    }
+
+    private static java.nio.ByteBuffer[] encodeFrames(List<MappedSample> group) {
+        java.nio.ByteBuffer[] frames = new java.nio.ByteBuffer[group.size()];
+        for (int i = 0; i < frames.length; i++) frames[i] = OverflowBucket.encodeFrame(group.get(i));
+        return frames;
+    }
+
+    /**
+     * The tiering rule for one sample. Caller holds the shard's accept lock
+     * and wakes the flusher after a memory placement.
+     *
+     * @param frame the sample's frame if already encoded, else null
+     */
+    private Acceptance place(int shard, MappedSample sample, java.nio.ByteBuffer frame) {
+        OverflowBucket bucket = buckets[shard];
+        // Under `concurrent` the memory tier stays in use whatever the
+        // bucket holds: fresh samples are not made to queue behind the
+        // backlog, which is the whole point of the policy. Under
+        // `ordered` a non-empty bucket means the shard is yielding.
+        boolean mayUseMemory = concurrent() || bucket.isEmpty();
+        if (mayUseMemory) {
+            if (queues[shard].tryEnqueueQuietly(sample)) return Acceptance.MEMORY;
+            // Memory just filled. Under `ordered` everything in it was
+            // offered before this sample, so it has to reach disk first or
+            // this sample would overtake it. Under `concurrent` the
+            // ordering that buys has already been given up, and moving the
+            // backlog would be pure cost.
+            if (!concurrent()) spillBacklog(shard, "memory queue full");
+        }
+        return appendToBucket(shard, sample, frame);
     }
 
     /**
@@ -503,8 +592,13 @@ public final class Shards implements java.io.Closeable {
 
     /** Append to a shard's bucket, booking spill and eviction counts. */
     private Acceptance appendToBucket(int shard, MappedSample sample) {
+        return appendToBucket(shard, sample, null);
+    }
+
+    /** {@link #appendToBucket(int, MappedSample)} with the frame, if already encoded. */
+    private Acceptance appendToBucket(int shard, MappedSample sample, java.nio.ByteBuffer frame) {
         try {
-            OverflowBucket.AppendResult r = buckets[shard].append(sample);
+            OverflowBucket.AppendResult r = buckets[shard].append(sample, frame);
             if (r.evictedSamples() > 0) samplesEvictedOverflow.addAndGet(r.evictedSamples());
             if (!r.accepted()) return Acceptance.REFUSED;
             metrics.walBytesWritten(r.bytesWritten());

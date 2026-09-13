@@ -41,6 +41,16 @@ and prints them through the Karaf shell command
 | `flusher_idle_ms_total`                    | Milliseconds the queue-mode flushers spent waiting for a sample with an empty queue. Idle fraction: `rate(flusher_idle_ms_total) / (1000 × writer.shards)`. Near 1 with a rising `samples_dropped_queue_full_total` means arrivals are bursty, not that the flusher is slow.
 |===
 
+[#operations-episode-accounting]
+==== Accounting for an outage
+
+The plugin's counters cover only samples that reached `store()`.
+When `store()` slows, for example while a shard spills to disk, Horizon's default ring-buffer writer discards what its writer threads cannot hand over, and those samples never reach the plugin.
+OpenNMS counts them in the Dropwizard meter `ring-buffer.dropped-samples`, exported over JMX in the `org.opennms.timeseries` domain (its `Count` attribute).
+Read it alongside `samples_written_total` and the `samples_dropped_*_total` counters: only the pair accounts for an episode.
+On the plugin side, the early sign is a rising `store_call_duration_ms_total / store_calls_total`.
+See <<overflow-caller-cost,What an outage costs the writer threads>> for why a spill slows `store()`, and how long it lasts under each drain policy.
+
 === Pipeline state
 
 [cols="2,3",options="header"]
