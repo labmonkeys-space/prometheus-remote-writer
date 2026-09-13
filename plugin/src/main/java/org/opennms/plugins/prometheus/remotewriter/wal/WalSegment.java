@@ -46,7 +46,8 @@ import java.util.function.Consumer;
  * durability on clean shutdown).
  *
  * <p>Not thread-safe — the writer enforces single-writer discipline
- * externally.
+ * externally. The one exception is {@link #flush()}, which may run on another
+ * thread than the appends so an fsync does not hold the writer's lock.
  */
 public final class WalSegment implements Closeable {
 
@@ -69,14 +70,21 @@ public final class WalSegment implements Closeable {
 
     private int sampleCount;
     private Status status;
-    private boolean closed;
+    /** Volatile: a flush can run on another thread than the one closing. */
+    private volatile boolean closed;
+    /**
+     * Bytes in the file, kept in step with the writes for a segment opened for
+     * append, so the append path never asks the filesystem. -1 for a segment
+     * opened for read, whose file grows underneath it and has to be queried.
+     */
+    private long size;
 
     /** Status mirrors the .idx file field. */
     public enum Status { OPEN, SEALED, TORN }
 
     private WalSegment(Path segPath, Path idxPath, long startOffset, FileChannel channel,
                        FsyncPolicy fsync, int maxPayload, Instant createdAt, int sampleCount,
-                       Status status) {
+                       Status status, long size) {
         this.segPath = segPath;
         this.idxPath = idxPath;
         this.startOffset = startOffset;
@@ -86,6 +94,7 @@ public final class WalSegment implements Closeable {
         this.createdAt = createdAt;
         this.sampleCount = sampleCount;
         this.status = status;
+        this.size = size;
     }
 
     // --- Factories ---------------------------------------------------------
@@ -102,7 +111,7 @@ public final class WalSegment implements Closeable {
         FileChannel ch = FileChannel.open(segPath,
                 StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE, StandardOpenOption.READ);
         WalSegment seg = new WalSegment(segPath, idxPath, startOffset, ch, fsync, maxPayload,
-                Instant.now(), 0, Status.OPEN);
+                Instant.now(), 0, Status.OPEN, 0L);
         seg.writeIndex();
         // Fsync the directory so the new .seg dirent is durable. Without
         // this, a crash right after rotation can lose the "this segment
@@ -123,9 +132,10 @@ public final class WalSegment implements Closeable {
         Path idxPath = idxPathFor(segPath.getParent(), startOffset);
         FileChannel ch = FileChannel.open(segPath,
                 StandardOpenOption.WRITE, StandardOpenOption.READ);
-        ch.position(ch.size());
+        long size = ch.size();
+        ch.position(size);
         return new WalSegment(segPath, idxPath, startOffset, ch, fsync, maxPayload,
-                Instant.now(), sampleCountFromRecovery, Status.OPEN);
+                Instant.now(), sampleCountFromRecovery, Status.OPEN, size);
     }
 
     /**
@@ -137,7 +147,7 @@ public final class WalSegment implements Closeable {
         Path idxPath = idxPathFor(segPath.getParent(), startOffset);
         FileChannel ch = FileChannel.open(segPath, StandardOpenOption.READ);
         return new WalSegment(segPath, idxPath, startOffset, ch, FsyncPolicy.NEVER, maxPayload,
-                Instant.now(), 0, Status.SEALED);
+                Instant.now(), 0, Status.SEALED, -1L);
     }
 
     // --- Ops ---------------------------------------------------------------
@@ -151,28 +161,53 @@ public final class WalSegment implements Closeable {
      *                     full)
      */
     public long append(byte[] payload) throws IOException {
+        return append(Frame.encode(payload));
+    }
+
+    /**
+     * Append a frame already built by {@link Frame#encode}, so the caller can
+     * do the encoding and the CRC before taking whatever lock serialises
+     * appends. Consumes the buffer.
+     *
+     * <p>The write is positional, at the size this segment tracks, so the
+     * append path makes one syscall: no {@code size()} to find the end and no
+     * {@code position()} to seek to it. A write that fails partway, typically
+     * a full disk, is cut back to the tracked size, so the file never holds
+     * bytes past its logical end: a shorter frame after it, or a rotation
+     * sealing it, would otherwise leave a torn tail inside a sealed segment
+     * and send the reader into the middle of the next one.
+     */
+    public long append(ByteBuffer frame) throws IOException {
         ensureOpen();
+        // Opened for read: no tracked size to write at. The channel would say
+        // the same thing; a read-only segment is a read-only segment.
+        if (size < 0) throw new java.nio.channels.NonWritableChannelException();
         // Reject payloads that Frame.decode would later reject as
         // "torn" on readback — writing them would create unreadable
         // bytes that recovery treats as a torn tail, potentially
         // losing subsequent good frames too. Encode/decode asymmetry
         // guard.
-        if (payload.length > maxPayload) {
+        int payloadLength = frame.remaining() - Frame.HEADER_BYTES;
+        if (payloadLength > maxPayload) {
             throw new IOException(
-                "payload size (" + payload.length + ") exceeds this segment's "
+                "payload size (" + payloadLength + ") exceeds this segment's "
                 + "maxPayload (" + maxPayload + ") — frame would be unreadable");
         }
-        // Defensive: always write at EOF. Nothing in the current code
-        // path repositions the active segment's channel before append,
-        // but seek-before-write is the safe invariant to guarantee
-        // append semantics regardless of what a future caller does.
-        // Cheap (a noop when position already equals size on most JVMs).
-        channel.position(channel.size());
-        ByteBuffer frame = Frame.encode(payload);
-        while (frame.hasRemaining()) channel.write(frame);
+        long at = size;
+        try {
+            while (frame.hasRemaining()) at += channel.write(frame, at);
+        } catch (IOException | RuntimeException e) {
+            try {
+                channel.truncate(size);
+            } catch (IOException | RuntimeException truncate) {
+                e.addSuppressed(truncate);
+            }
+            throw e;
+        }
+        size = at;
         if (fsync == FsyncPolicy.ALWAYS) channel.force(false);
         sampleCount++;
-        return startOffset + channel.size();
+        return startOffset + size;
     }
 
     /**
@@ -181,8 +216,16 @@ public final class WalSegment implements Closeable {
      * rotation. No-op under {@link FsyncPolicy#NEVER}.
      */
     public void flush() throws IOException {
-        ensureOpen();
-        if (fsync != FsyncPolicy.NEVER) channel.force(false);
+        if (closed || fsync == FsyncPolicy.NEVER) return;
+        try {
+            channel.force(false);
+        } catch (java.nio.channels.ClosedChannelException e) {
+            // A rotation closed this segment while the flush was on its way to
+            // it. close() marks the segment closed, forces, then seals, so the
+            // bytes are on disk. Anything else, such as an interrupt closing
+            // the channel under a force, is a real failure and propagates.
+            if (!closed) throw e;
+        }
     }
 
     /**
@@ -272,6 +315,7 @@ public final class WalSegment implements Closeable {
         }
         sampleCount = framesSeen;
         channel.position(channel.size());
+        if (size >= 0) size = channel.size();
         return lastGood;
     }
 
@@ -297,7 +341,7 @@ public final class WalSegment implements Closeable {
 
     public long endOffset() throws IOException {
         ensureOpen();
-        return startOffset + channel.size();
+        return startOffset + (size >= 0 ? size : channel.size());
     }
 
     public int sampleCount() { return sampleCount; }

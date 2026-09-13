@@ -130,9 +130,13 @@ class WalOverflowTest {
             } catch (WalFullException expected) {
                 // fallthrough
             }
-            // Now externally delete a sealed segment and retry.
+            // Now externally delete a sealed segment and retry. The writer
+            // tracks its footprint rather than listing the directory on every
+            // append (#182), so a deletion it did not make has to be told to
+            // it; in production only GC and eviction delete, and both report.
             Files.deleteIfExists(WalSegment.segPathFor(dir, 0));
             Files.deleteIfExists(WalSegment.idxPathFor(dir, 0));
+            w.rederiveTotalBytes();
             // Writer remains usable.
             w.append(payload);
             assertThat(succeeded).isGreaterThan(0);

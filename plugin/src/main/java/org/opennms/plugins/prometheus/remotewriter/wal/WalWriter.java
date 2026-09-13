@@ -8,6 +8,7 @@ package org.opennms.plugins.prometheus.remotewriter.wal;
 
 import java.io.Closeable;
 import java.io.IOException;
+import java.nio.ByteBuffer;
 import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -22,9 +23,11 @@ import org.opennms.plugins.prometheus.remotewriter.wal.WalSegment.FsyncPolicy;
  * {@link WalSegment}, appends incoming payloads, and rotates to a new
  * segment once the active one exceeds the configured size threshold.
  *
- * <p>Thread-safety: {@code append} and {@code flush} are synchronized;
- * callers must still coordinate externally for any invariant that spans
- * more than one append (there is none today). Concurrent reads via
+ * <p>Thread-safety: {@code append} is synchronized; callers must still
+ * coordinate externally for any invariant that spans more than one append
+ * (there is none today). {@link #flush()} takes the lock only to find the
+ * active segment and forces it after releasing it, so an fsync never holds
+ * up an append. Concurrent reads via
  * {@link WalReader} against the same directory are safe — they use
  * independent {@link java.nio.channels.FileChannel}s per segment.
  *
@@ -62,17 +65,29 @@ public final class WalWriter implements Closeable {
     private volatile long readerOffsetFloor;
 
     /**
-     * Running upper bound on the on-disk footprint, so the cap check on the
-     * append path is arithmetic rather than a directory listing. Every append
-     * adds its frame; eviction subtracts what it freed. Segment GC deletes
-     * files behind this class's back and only ever makes the real footprint
-     * smaller, so the tracked value can drift high but never low — which is
-     * why {@link #append} rescans for the truth before acting on a
-     * cap breach rather than trusting the estimate.
+     * The on-disk footprint, kept exact so neither the cap check on the append
+     * path nor the {@code overflow_bytes} gauge ever lists the directory. Read
+     * from the directory once ({@link #initTotalBytes()}), then every append
+     * adds its frame, eviction subtracts what it deleted, and segment GC,
+     * which deletes behind this class's back, reports what it deleted through
+     * {@link #reclaimed(long)}. Eviction and GC each count only the files their
+     * own delete removed, so a segment both reach is subtracted once.
      *
-     * <p>-1 means "not yet known"; the first check computes it.
+     * <p>Until 0.8.1 GC did not report, the value drifted high, and a breach
+     * of the cap re-listed the directory on every append — including every
+     * refused one, while the writer threads queued behind the lock (#182).
+     *
+     * <p>Negative means "not yet known"; the first use reads the directory.
+     * Volatile so the gauge can read it without the lock.
      */
-    private long trackedTotalBytes = -1L;
+    private volatile long trackedTotalBytes = -1L;
+
+    /** Directory listings taken for the byte count. Package-private for tests. */
+    private final java.util.concurrent.atomic.AtomicLong listings =
+            new java.util.concurrent.atomic.AtomicLong();
+
+    /** Test-only: run by {@link #flush()} after it let go of the lock, before the force. */
+    volatile Runnable beforeForceForTesting;
 
     public WalWriter(Path dir, WalSegment initialActiveSegment, long segmentSizeBytes,
                      long maxSizeBytes, OverflowPolicy overflow,
@@ -149,52 +164,8 @@ public final class WalWriter implements Closeable {
      * <p>Rotates to a new segment if the active one crosses
      * {@code segmentSizeBytes} after the append (post-append check).
      */
-    public synchronized long append(byte[] payload) throws IOException {
-        ensureOpen();
-        long frameSize = Frame.HEADER_BYTES + payload.length;
-        if (frameSize > maxSizeBytes) {
-            throw new WalFullException(
-                "single frame (" + frameSize + " bytes) exceeds wal.max-size-bytes ("
-                + maxSizeBytes + ") — increase the cap or reduce the label set", 0);
-        }
-
-        long evictedBytes = 0L;
-        int evictedFrames = 0;
-        while (projectedTotalBytes(frameSize) > maxSizeBytes) {
-            if (overflow == OverflowPolicy.BACKPRESSURE) {
-                throw new WalFullException(
-                    "WAL at cap (" + trackedTotalBytes + "/" + maxSizeBytes
-                    + " bytes); refusing append under backpressure policy", 0);
-            }
-            // DROP_OLDEST: evict the oldest SEALED segment (never the
-            // active one — which is always the newest).
-            long[] evictedStats = evictOldestSegment();
-            if (evictedStats == null) {
-                // No segment available to evict (only the active segment
-                // exists and it alone exceeds the cap). Surfacing this as
-                // wal-full is honest — the operator needs a larger cap.
-                throw new WalFullException(
-                    "WAL at cap with no evictable segments (single active segment "
-                    + "exceeds cap, segmentSizeBytes too close to maxSizeBytes)",
-                    evictedFrames);
-            }
-            evictedBytes += evictedStats[0];
-            evictedFrames += (int) evictedStats[1];
-            trackedTotalBytes -= evictedStats[0];
-        }
-
-        trackedTotalBytes += frameSize;
-        long offsetAfter = active.append(payload);
-        if (active.endOffset() - active.startOffset() >= segmentSizeBytes) {
-            rotate();
-        }
-        // Observability: eviction count propagates up via the returned
-        // EvictionObserver if the caller set one; the metrics layer uses
-        // this to bump samples_dropped_wal_full_total. Simple variant
-        // here — callers track via the return of appendWithEvictionStats
-        // if they need it. For v1, just log eviction at WARN (done by
-        // evictOldestSegment) and return offsetAfter.
-        return offsetAfter;
+    public long append(byte[] payload) throws IOException {
+        return appendWithStats(Frame.encode(payload)).offsetAfter();
     }
 
     /**
@@ -204,9 +175,18 @@ public final class WalWriter implements Closeable {
      * was needed). Used by the storage layer to bump
      * {@code samples_dropped_wal_full_total}.
      */
-    public synchronized AppendResult appendWithStats(byte[] payload) throws IOException {
+    public AppendResult appendWithStats(byte[] payload) throws IOException {
+        return appendWithStats(Frame.encode(payload));
+    }
+
+    /**
+     * {@link #appendWithStats(byte[])} for a frame already built by
+     * {@link Frame#encode}, so the encoding and its CRC happen before the
+     * caller takes the lock that serialises appends. Consumes the buffer.
+     */
+    public synchronized AppendResult appendWithStats(ByteBuffer frame) throws IOException {
         ensureOpen();
-        long frameSize = Frame.HEADER_BYTES + payload.length;
+        long frameSize = frame.remaining();
         if (frameSize > maxSizeBytes) {
             throw new WalFullException(
                 "single frame (" + frameSize + " bytes) exceeds wal.max-size-bytes ("
@@ -231,32 +211,53 @@ public final class WalWriter implements Closeable {
             evictedFrames += (int) stats[1];
             trackedTotalBytes -= stats[0];
         }
+        long offsetAfter = active.append(frame);
         trackedTotalBytes += frameSize;
-        long offsetAfter = active.append(payload);
         if (active.endOffset() - active.startOffset() >= segmentSizeBytes) {
             rotate();
         }
         return new AppendResult(offsetAfter, evictedBytes, evictedFrames);
     }
 
-    /**
-     * The footprint this append would leave, cheap when there is room and
-     * exact when there is not.
-     *
-     * <p>{@link #trackedTotalBytes} is an upper bound: it counts every frame
-     * this writer appended and every eviction it performed, but segment GC
-     * deletes fully-shipped segments from another code path, so the real
-     * footprint can be smaller. Under the cap, an upper bound is enough and
-     * costs nothing. At or over it, the answer decides whether to refuse or
-     * evict, so the tracked value is re-derived from the directory first —
-     * turning a per-append listing into a listing only at the boundary.
-     */
+    /** The footprint this append would leave. Arithmetic, never a listing. */
     private long projectedTotalBytes(long frameSize) throws IOException {
         if (trackedTotalBytes < 0) trackedTotalBytes = currentTotalBytes();
-        if (trackedTotalBytes + frameSize <= maxSizeBytes) return trackedTotalBytes + frameSize;
-        trackedTotalBytes = currentTotalBytes();
         return trackedTotalBytes + frameSize;
     }
+
+    /**
+     * Read the footprint from the directory, once. Call before anything can
+     * run segment GC concurrently: a listing that overlaps a GC could see its
+     * deletions and then have {@link #reclaimed(long)} subtract them again.
+     */
+    public synchronized void initTotalBytes() throws IOException {
+        if (trackedTotalBytes < 0) trackedTotalBytes = currentTotalBytes();
+    }
+
+    /** The on-disk footprint, without the lock once it is known. */
+    public long totalBytes() throws IOException {
+        long t = trackedTotalBytes;
+        if (t >= 0) return t;
+        initTotalBytes();
+        return trackedTotalBytes;
+    }
+
+    /** Segment GC deleted {@code bytes} of this writer's segments. */
+    public synchronized void reclaimed(long bytes) {
+        if (trackedTotalBytes >= 0) trackedTotalBytes -= bytes;
+    }
+
+    /**
+     * Re-read the footprint from the directory. For a GC that failed partway,
+     * whose reclaimed count is therefore unknown. Call it from the thread that
+     * ran the GC, once the GC has stopped.
+     */
+    public synchronized void rederiveTotalBytes() throws IOException {
+        trackedTotalBytes = currentTotalBytes();
+    }
+
+    /** Package-private for tests. */
+    long listingsForTesting() { return listings.get(); }
 
     /**
      * Computes the current total on-disk size of all segments.
@@ -269,6 +270,7 @@ public final class WalWriter implements Closeable {
      * for a sum that's about to feed an overflow check.
      */
     public synchronized long currentTotalBytes() throws IOException {
+        listings.incrementAndGet();
         long total = 0;
         try (DirectoryStream<Path> s = Files.newDirectoryStream(dir, "*" + WalSegment.SEG_EXT)) {
             for (Path p : s) {
@@ -334,10 +336,12 @@ public final class WalWriter implements Closeable {
         if (Files.exists(idx)) {
             samples = extractSampleCount(Files.readString(idx));
         }
-        Files.deleteIfExists(seg);
+        // Counted only if this delete is the one that removed it: segment GC
+        // may reach the same file, and it reports its own deletions.
+        boolean deleted = Files.deleteIfExists(seg);
         Files.deleteIfExists(idx);
         FsUtils.fsyncDirectory(dir);
-        return new long[]{bytes, samples};
+        return deleted ? new long[]{bytes, samples} : new long[]{0L, 0L};
     }
 
     private List<Long> listSegmentStartOffsets() throws IOException {
@@ -371,9 +375,20 @@ public final class WalWriter implements Closeable {
      * {@link FsyncPolicy#NEVER} (by policy). Called at flush-interval
      * boundaries from the flusher thread.
      */
-    public synchronized void flush() throws IOException {
-        ensureOpen();
-        active.flush();
+    public void flush() throws IOException {
+        WalSegment segment;
+        synchronized (this) {
+            ensureOpen();
+            segment = active;
+        }
+        // Outside the lock: a force can take tens of milliseconds on a loaded
+        // disk, and holding the lock would stall every append for that long.
+        // FileChannel.force is safe alongside writes and covers every write
+        // that completed before it. If a rotation seals the segment first,
+        // close() has forced it already and the flush is a no-op.
+        Runnable hook = beforeForceForTesting;
+        if (hook != null) hook.run();
+        segment.flush();
     }
 
     /**
