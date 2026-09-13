@@ -7,6 +7,8 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.8.2] — 2026-09-13
+
 ### Changed
 
 - **`store()` is cheaper while a shard spills to disk** (#182). A spilled sample used to hold its shard's accept lock for a protobuf encode, a CRC and about four syscalls, and near the budget cap for a directory listing on every append, refused ones included. Now a call's samples are grouped by shard and each shard's lock is taken once per call. The calling thread encodes the frames before taking it, and a segment tracks its own size, so an append is one positional write. The bucket's byte count is tracked exactly instead of listed, so neither a refusal at the cap, nor the `overflow_bytes` gauge, nor the all-or-nothing room check lists the directory. A periodic fsync no longer holds the lock appends need. Where each sample lands is unchanged, and a property test compares the batched placement with one-at-a-time placement over generated histories.
@@ -1714,7 +1716,8 @@ Go sanitization rules.
 - Karaf feature `prometheus-remote-writer` shipping a pre-populated
   `etc/org.opennms.plugins.tss.prometheusremotewriter.cfg` on install.
 
-[Unreleased]: https://github.com/labmonkeys-space/prometheus-remote-writer/compare/v0.8.1...HEAD
+[Unreleased]: https://github.com/labmonkeys-space/prometheus-remote-writer/compare/v0.8.2...HEAD
+[0.8.2]: https://github.com/labmonkeys-space/prometheus-remote-writer/compare/v0.8.1...v0.8.2
 [0.8.1]: https://github.com/labmonkeys-space/prometheus-remote-writer/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/labmonkeys-space/prometheus-remote-writer/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/labmonkeys-space/prometheus-remote-writer/compare/v0.6.1...v0.7.0
