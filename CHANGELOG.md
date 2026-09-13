@@ -7,6 +7,12 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **A shard that spilled to disk while running could stop writing until the process restarted** (#177, found by the v0.8.0 benchmark in #176). Its bucket then grew to `overflow.max-size-bytes` and refused, so a full memory queue ended in data loss rather than delay. The shipped defaults reach this through ordinary hash skew. The cause was a race in the flusher's count of payloads between its builder and sender: a payload the sender settled before the builder had counted it left the count stuck at one, and every later disk read waited for a sender that was already idle. The count is now taken before the sender can see the payload, and a restart is no longer what drains a bucket.
+  **On v0.8.0**, the signature is `overflow_recovering_shards` above 0 with `samples_written_total` flat and no `samples_dropped_{4xx,5xx,transport}_total` moving. A restart or a configuration reload drains the stuck bucket. A drain that waits its full bound for the sender (30 s) now logs a WARN instead of waiting silently. The WARN is also expected while a single write is retrying against a slow backend, so read it together with the write counters.
+- The Log levels section of the documentation now says that a stock Horizon sets `org.opennms` to WARN, which hides the plugin's INFO lines, including the `write path:` activation line. It gives the `log:set` command and the `org.ops4j.pax.logging.cfg` lines that show them (#176).
+
 ## [0.8.0] — 2026-09-13
 
 ### Removed

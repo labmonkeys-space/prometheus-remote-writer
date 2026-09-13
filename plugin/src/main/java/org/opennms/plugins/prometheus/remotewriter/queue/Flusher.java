@@ -118,11 +118,32 @@ public final class Flusher {
      * batch 1 and ships its series out of order. The old single-threaded
      * WalFlusher could not hit this; D2's pipelining can, so a disk batch
      * waits for the previous payload to settle.
+     *
+     * <p>The count is exact by ordering, not by correction. A payload is
+     * counted before it enters the handoff, so the sender can never settle one
+     * that is not yet counted. It is uncounted when it settles, when its
+     * handoff is interrupted, or when a forced stop drops it from the handoff.
+     * In 0.8.0 the count was taken after the handoff and clamped at zero on
+     * settle. A payload settled first lost its decrement to the clamp, the
+     * count stuck at one, and every later disk read waited out its bound for
+     * a sender that was already idle (#177).
      */
     private final java.util.concurrent.locks.ReentrantLock pipelineLock =
             new java.util.concurrent.locks.ReentrantLock();
     private final java.util.concurrent.locks.Condition settledCondition = pipelineLock.newCondition();
     private int outstandingPayloads;
+
+    /** How long a disk read waits for the sender to settle what it holds
+     *  before giving up for this cycle. Package-private so a test can shorten it. */
+    volatile long senderIdleBoundMs = TimeUnit.SECONDS.toMillis(30);
+    /** Times a disk read gave up waiting for the sender. Package-private for tests:
+     *  there is no logging binding on the test classpath to assert the WARN with. */
+    final java.util.concurrent.atomic.AtomicLong senderIdleTimeouts =
+            new java.util.concurrent.atomic.AtomicLong();
+    /** Test-only: run on the builder right after a payload entered the handoff. */
+    volatile Runnable afterHandOffForTesting;
+    /** Test-only: run on the sender right after a payload settled. */
+    volatile Runnable afterSettleForTesting;
 
     /**
      * Test-only convenience constructor — hard-codes the v1 builder.
@@ -247,7 +268,10 @@ public final class Flusher {
             }
             // Whatever the sender never took cannot be sent now; account for it.
             Prepared orphan;
-            while ((orphan = handoff.poll()) != null) dropAtShutdown(orphan);
+            while ((orphan = handoff.poll()) != null) {
+                if (orphan != STOP) payloadSettled();   // STOP is never counted
+                dropAtShutdown(orphan);
+            }
         }
         thread = null;
         sender = null;
@@ -323,11 +347,12 @@ public final class Flusher {
                         metrics.samplesDroppedShutdown(tail.size());
                         continue;
                     }
+                    payloadHandedOff();
                     try {
                         handoff.put(p);
-                        payloadHandedOff();
                     } catch (InterruptedException e) {
                         wasInterrupted = true;
+                        payloadSettled();
                         dropAtShutdown(p);
                         break;
                     }
@@ -481,13 +506,16 @@ public final class Flusher {
 
     private void handOff(Prepared p) throws InterruptedException {
         if (p == null) return;
+        payloadHandedOff();   // before the put: once in the handoff the sender may settle it
         try {
             handoff.put(p);
-            payloadHandedOff();
         } catch (InterruptedException e) {
+            payloadSettled();   // never reached the sender
             dropAtShutdown(p); // interrupted while blocked: this payload cannot be sent
             throw e;
         }
+        Runnable hook = afterHandOffForTesting;
+        if (hook != null) hook.run();
     }
 
     private void payloadHandedOff() {
@@ -502,8 +530,18 @@ public final class Flusher {
     private void payloadSettled() {
         pipelineLock.lock();
         try {
-            if (outstandingPayloads > 0) outstandingPayloads--;
+            outstandingPayloads--;
             settledCondition.signalAll();
+        } finally {
+            pipelineLock.unlock();
+        }
+    }
+
+    /** Package-private for tests. */
+    int outstandingPayloadsForTesting() {
+        pipelineLock.lock();
+        try {
+            return outstandingPayloads;
         } finally {
             pipelineLock.unlock();
         }
@@ -519,10 +557,22 @@ public final class Flusher {
     private boolean awaitSenderIdle() throws InterruptedException {
         pipelineLock.lock();
         try {
-            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
+            long boundMs = senderIdleBoundMs;
+            long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(boundMs);
             while (outstandingPayloads > 0 && running) {
                 long remaining = deadline - System.nanoTime();
-                if (remaining <= 0) return false;
+                if (remaining <= 0) {
+                    // Not silent: in 0.8.0 a count stuck here parked a shard's
+                    // drain for as long as the process ran, with nothing logged.
+                    senderIdleTimeouts.incrementAndGet();
+                    // Also expected while one write is retrying against a slow
+                    // backend: the default read timeout alone equals the bound.
+                    LOG.warn("{}: the overflow drain waited {}ms for the sender to settle {} "
+                            + "payload(s) and is retrying. Expected while a write is retrying "
+                            + "against a slow backend; with no write in progress the drain is stuck",
+                            threadName, boundMs, outstandingPayloads);
+                    return false;
+                }
                 settledCondition.awaitNanos(remaining);
             }
             return outstandingPayloads == 0;
@@ -545,6 +595,8 @@ public final class Flusher {
                     LOG.error("sender caught unexpected exception; {} sample(s) not sent", p.sampleCount(), unexpected);
                 } finally {
                     payloadSettled();
+                    Runnable hook = afterSettleForTesting;
+                    if (hook != null) hook.run();
                 }
             }
         } catch (InterruptedException e) {
