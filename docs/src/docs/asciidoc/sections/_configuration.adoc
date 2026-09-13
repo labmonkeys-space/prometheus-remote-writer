@@ -530,8 +530,9 @@ disk    = overflow.max-size-bytes                 (4 GiB  → 1 GiB a shard)
 outage  = overflow.max-size-bytes / (samples_per_second × bytes_per_sample)
 ----
 
-At 64,000 samples/sec and ~60 bytes a sample the shipped defaults buy
-roughly 15 to 20 minutes of backend outage with no loss.
+`bytes_per_sample` depends on the label set.
+On a native-profile OpenNMS fleet it measured about 340 bytes, so at 64,000 samples/sec the shipped defaults buy about 3 to 4 minutes of backend outage with no loss.
+Measure yours from `overflow_bytes` and `overflow_pending_samples`; see <<overflow-sizing,Sizing the disk tier>>.
 
 The activation log names the whole resolved write path on one line, so
 what you actually got after an upgrade is one grep.

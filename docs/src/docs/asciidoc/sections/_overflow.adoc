@@ -153,19 +153,41 @@ Segment size is derived, not configured: each bucket holds eight segments,
 so `drop-oldest` evicts an eighth of a shard's budget rather than the lot,
 and the segment count per shard does not grow with `writer.shards`.
 
+[#overflow-sizing]
 == Sizing
 
 ----
 outage_window = overflow.max-size-bytes / (samples_per_second × bytes_per_sample)
 ----
 
-Budget about 60 bytes a sample on disk — the wire format is snappy-compressed,
-the bucket is not. At 64,000 samples/sec that is ~3.8 MB/s, so the default
-4 GiB buys on the order of 15 to 20 minutes.
+`bytes_per_sample` depends on your label set, so measure it rather than assume it.
+Every frame in a bucket stores one whole sample: an 8-byte header, the timestamp, the value, the metric name, and every label key and value as a string.
+Nothing is shared between frames and nothing is compressed, so the labels are most of the size.
+The snappy-compressed wire payload is no guide to it.
 
-The budget is split evenly across shards, so hash skew applies to disk just
-as it does to memory: one hot shard exhausts its slice while its siblings
-idle. Watch `overflow_pending_samples_shard_<i>`, not only the total.
+Measured on a native-profile OpenNMS fleet of SNMP interface data, a sample takes about 340 bytes on disk.
+At 64,000 samples/sec that is about 22 MB/s, so the default 4 GiB buys about 3 to 4 minutes of backend outage.
+The formula gives 3.3 minutes, and a real outage on that fleet ran 4.2 minutes from cut-off to the first refusal.
+Tolerating 15 minutes at that rate needs about 18 GiB.
+
+To measure your own figure, note `overflow_bytes` while `overflow_pending_samples` is 0, then read both gauges again while a bucket is filling during an outage:
+
+----
+bytes_per_sample = (overflow_bytes - overflow_bytes at 0 pending) / overflow_pending_samples
+----
+
+Both gauges are exported over JMX.
+The baseline matters because a drained bucket keeps its newest segment, acknowledged bytes included, until the writer moves on to a new one.
+That can be up to an eighth of a shard's slice, 128 MiB with the defaults, so a plain ratio early in a spill can read several times too high.
+On a fresh install with empty bucket directories the baseline is 0.
+Those leftover bytes also count against the budget, so after an earlier spill the next outage window can be up to an eighth shorter.
+
+Do not take the reading while a bucket drains.
+Pending samples fall as batches are acknowledged, but a segment is released only once the backend has taken all of it, so the ratio reads high.
+
+The budget is split evenly across shards, so hash skew applies to disk just as it does to memory.
+The hottest shard fills its slice first, and it is that shard's slice and its share of the rate that set the window.
+Watch `overflow_pending_samples_shard_<i>`, not only the total.
 
 == How it works, briefly
 
