@@ -7,6 +7,8 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.8.1] — 2026-09-13
+
 ### Fixed
 
 - **A shard that spilled to disk while running could stop writing until the process restarted** (#177, found by the v0.8.0 benchmark in #176). Its bucket then grew to `overflow.max-size-bytes` and refused, so a full memory queue ended in data loss rather than delay. The shipped defaults reach this through ordinary hash skew. The cause was a race in the flusher's count of payloads between its builder and sender: a payload the sender settled before the builder had counted it left the count stuck at one, and every later disk read waited for a sender that was already idle. The count is now taken before the sender can see the payload, and a restart is no longer what drains a bucket.
@@ -1700,7 +1702,8 @@ Go sanitization rules.
 - Karaf feature `prometheus-remote-writer` shipping a pre-populated
   `etc/org.opennms.plugins.tss.prometheusremotewriter.cfg` on install.
 
-[Unreleased]: https://github.com/labmonkeys-space/prometheus-remote-writer/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/labmonkeys-space/prometheus-remote-writer/compare/v0.8.1...HEAD
+[0.8.1]: https://github.com/labmonkeys-space/prometheus-remote-writer/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/labmonkeys-space/prometheus-remote-writer/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/labmonkeys-space/prometheus-remote-writer/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/labmonkeys-space/prometheus-remote-writer/compare/v0.6.0...v0.6.1
