@@ -1,0 +1,554 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Metadata on the Wire</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+Condensed:wght@600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+
+<style>
+  :root {
+    --ground: #e8ebee;
+    --card:   #fbfcfd;
+    --sunk:   #dfe4e9;
+    --ink:    #14181d;
+    --muted:  #5a646f;
+    --line:   #c9d0d8;
+    --violet: #6d3f9e;
+    --teal:   #0c6461;
+    --teal-band: #d8ebe9;
+    --warn:   #a8281c;
+    --amber:  #86590a;
+
+    --sans: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+    --cond: "IBM Plex Sans Condensed", "IBM Plex Sans", ui-sans-serif, sans-serif;
+    --mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground: #131619;
+      --card:   #1b2024;
+      --sunk:   #0e1114;
+      --ink:    #e6eaee;
+      --muted:  #99a3ad;
+      --line:   #2c333a;
+      --violet: #bb9ae4;
+      --teal:   #52c2b8;
+      --teal-band: #14282a;
+      --warn:   #ef8d82;
+      --amber:  #dcb162;
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --ground: #131619;
+    --card:   #1b2024;
+    --sunk:   #0e1114;
+    --ink:    #e6eaee;
+    --muted:  #99a3ad;
+    --line:   #2c333a;
+    --violet: #bb9ae4;
+    --teal:   #52c2b8;
+    --teal-band: #14282a;
+    --warn:   #ef8d82;
+    --amber:  #dcb162;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 15px;
+    line-height: 1.62;
+    margin: 0;
+    padding: 0 20px;
+    padding-block: 44px 80px;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap { max-width: 1120px; margin: 0 auto; display: flex; flex-direction: column; gap: 40px; }
+
+  /* masthead */
+  .masthead { display: flex; flex-direction: column; gap: 12px; border-bottom: 2px solid var(--ink); padding-bottom: 22px; }
+  .doctype { font-family: var(--mono); font-size: 11px; letter-spacing: 0.08em; color: var(--muted); margin: 0; }
+  h1 {
+    font-family: var(--cond); font-weight: 700;
+    font-size: clamp(34px, 6vw, 52px); line-height: 1;
+    letter-spacing: -0.015em; margin: 0; text-wrap: balance;
+  }
+  .status { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
+  .pill {
+    font-family: var(--mono); font-size: 11px;
+    border: 1px solid var(--line); background: var(--card);
+    padding: 4px 10px;
+  }
+  .pill b { color: var(--warn); font-weight: 500; }
+  .lede { font-size: 17px; line-height: 1.55; color: var(--muted); max-width: 64ch; margin: 0; }
+
+  /* structure */
+  section { display: flex; flex-direction: column; gap: 15px; }
+  h2 {
+    font-family: var(--cond); font-weight: 700; font-size: 28px;
+    letter-spacing: -0.008em; margin: 0; text-wrap: balance;
+  }
+  h2 .num {
+    font-family: var(--mono); font-size: 13px; font-weight: 400;
+    color: var(--muted); margin-right: 12px; vertical-align: 2px;
+  }
+  h3 {
+    font-family: var(--cond); font-weight: 600; font-size: 20px;
+    margin: 10px 0 0; letter-spacing: -0.005em;
+  }
+  p { margin: 0; max-width: 74ch; }
+  .spine { border-left: 3px solid var(--teal); padding-left: 20px; }
+
+  /* figures */
+  figure { margin: 0; }
+  .plate { background: var(--card); border: 1px solid var(--line); overflow-x: auto; padding: 18px 16px 8px; }
+  .plate svg { display: block; min-width: 860px; width: 100%; height: auto; }
+  figcaption { font-size: 13.5px; line-height: 1.55; color: var(--muted); padding: 12px 2px 0; max-width: 78ch; }
+  figcaption strong { color: var(--ink); font-weight: 600; }
+
+  svg .lbl { font-family: var(--mono); font-size: 10.5px; fill: var(--ink); }
+  svg .sub { font-family: var(--sans); font-size: 9px; fill: var(--muted); }
+  svg .warnlbl { font-family: var(--sans); font-size: 10px; font-weight: 600; fill: var(--warn); }
+
+  /* callouts */
+  .rule {
+    background: var(--sunk); border-left: 3px solid var(--ink);
+    padding: 14px 16px; font-size: 14.5px; line-height: 1.55; max-width: 78ch;
+  }
+  .rule.key { border-left-color: var(--teal); background: var(--teal-band); }
+  .rule b { font-weight: 600; }
+
+  .split { display: flex; flex-wrap: wrap; gap: 10px; }
+  .side {
+    flex: 1 1 270px; background: var(--sunk);
+    border-left: 3px solid var(--side-key); padding: 11px 14px;
+    font-size: 13.5px; line-height: 1.5;
+  }
+  .side.v { --side-key: var(--violet); }
+  .side.t { --side-key: var(--teal); }
+  .side.a { --side-key: var(--amber); }
+  .side.w { --side-key: var(--warn); }
+  .side b {
+    display: block; font-family: var(--mono); font-size: 11px;
+    font-weight: 500; color: var(--side-key); margin-bottom: 3px;
+  }
+
+  code { font-family: var(--mono); font-size: 0.88em; background: var(--sunk); padding: 1px 4px; }
+
+  pre.code {
+    background: var(--sunk); border-left: 3px solid var(--line);
+    padding: 13px 15px; margin: 0; overflow-x: auto;
+    font-family: var(--mono); font-size: 12px; line-height: 1.65;
+    white-space: pre; color: var(--ink);
+  }
+  pre.code .c { color: var(--muted); }
+
+  .tbl-wrap { overflow-x: auto; }
+  .tbl { width: 100%; border-collapse: collapse; font-size: 13.5px; min-width: 520px; }
+  .tbl th {
+    text-align: left; font-size: 10.5px; letter-spacing: 0.07em;
+    text-transform: uppercase; color: var(--muted); font-weight: 600;
+    padding: 0 16px 9px 0; border-bottom: 1px solid var(--line);
+  }
+  .tbl td { padding: 11px 16px 11px 0; border-bottom: 1px solid var(--line); vertical-align: top; line-height: 1.5; }
+  .tbl td:first-child { font-family: var(--mono); font-size: 12px; }
+  .tbl .no  { color: var(--warn); font-weight: 600; }
+  .tbl .yes { color: var(--teal); font-weight: 600; }
+  .tbl .num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+  ul.list { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 9px; }
+  ul.list li { padding-left: 22px; position: relative; max-width: 74ch; }
+  ul.list li::before {
+    content: "—"; position: absolute; left: 0; color: var(--muted); font-family: var(--mono);
+  }
+
+  footer {
+    border-top: 1px solid var(--line); padding-top: 18px;
+    font-size: 12.5px; color: var(--muted); max-width: 78ch;
+    display: flex; flex-direction: column; gap: 10px;
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="masthead">
+    <p class="doctype">DESIGN DOCUMENT · prometheus-remote-writer</p>
+    <h1>Metadata on the Wire</h1>
+    <div class="status">
+      <span class="pill">Status: <b>proposed, not implemented</b></span>
+      <span class="pill">Greenfield: <b>no compatibility with the v0.x label schema</b></span>
+      <span class="pill">Removes: <code>labels.attr-mode</code>, <code>labels.attr-include</code>, <code>labels.categories-mode</code>, <code>onms_attr_*</code>, <code>onms_extattr_*</code>, <code>onms_cat_*</code>, <code>_idx*</code></span>
+      <span class="pill">Open questions: resolved 2026-09-14, see §11</span>
+    </div>
+    <p class="lede">OpenNMS resource metadata should travel in Prometheus as two series shapes rather than as labels on the data series. No database, no recording rules, and no rule evaluator are required at any point.</p>
+  </header>
+
+  <!-- 01 PROBLEM -->
+  <section>
+    <h2><span class="num">01</span>The problem</h2>
+    <p>An OpenNMS <code>Metric</code> carries three tag partitions: intrinsic, meta and external. Intrinsic and meta map cleanly onto Prometheus labels. External tags do not, for two independent reasons.</p>
+
+    <h3>The key space is unbounded</h3>
+    <p>Under a column encoding every attribute key becomes a distinct label <em>name</em>. OpenNMS generates keys that embed per-resource identity, such as <code>latency ICMP/&lt;ip&gt;</code> and JMX mbean paths. That grows the backend's global label-name index without limit, which is why <code>labels.attr-mode</code> defaults to <code>off</code> and why <code>attr-mode=external</code> requires an explicit allowlist (issue #112).</p>
+
+    <h3>Label sets are immutable identities</h3>
+    <p>A Prometheus series <em>is</em> its label set. Putting a mutable attribute on the data series means changing it forks the series, once per metric on that resource. <code>ifAlias</code> is the case that matters: an operator editing an interface description on the switch should not split a year of throughput history.</p>
+
+    <div class="rule"><b>The allowlist addresses the first problem and not the second</b>, and it does so by making an operator responsible for curating a list they cannot be expected to know in advance.</div>
+
+    <div class="rule key"><b>Principle, not a measurement.</b> A network operator setting or improving an interface description is routine, and nothing about that action suggests it could affect monitoring. So <code>ifAlias</code> stays out of the data series identity on principle, whatever its churn rate turns out to be; a low rate would only make the split rarer, not acceptable. The same reasoning removes <code>ifDescr</code> from the data series: it is stable on Cisco, Juniper and Arista, but on Nokia SR OS and some Huawei releases it embeds the configured description, and on RouterOS and Linux it follows an interface rename. <code>ifName</code> is the one interface field no operator sets, so it is the only interface label that remains on the data series.</div>
+  </section>
+
+  <!-- 02 THE SPINE -->
+  <section class="spine">
+    <h2><span class="num">02</span>Columns or rows: two consumers, not two options</h2>
+    <p>Columns and rows look like alternatives until you notice they are serving different readers with opposite requirements. One wants a handful of attributes on every query. The other wants all of them, for one resource, and never joins anything.</p>
+
+    <figure>
+      <div class="plate">
+        <svg viewBox="0 0 1010 300" role="img"
+             aria-label="The plugin emits both a configurable info series and the complete normalized attribute series. Extending the column set is a plugin config edit, not a backend rules deployment. The info series feeds Grafana, PromQL and alert rules directly. The attribute series feeds the OpenNMS read path for completeness. No ruler appears anywhere in the path.">
+          <defs>
+            <marker id="mt" viewBox="0 0 8 8" refX="7.5" refY="4" markerWidth="6.5" markerHeight="6.5" orient="auto">
+              <path d="M0 0 L8 4 L0 8 Z" fill="var(--teal)"/>
+            </marker>
+            <marker id="ma" viewBox="0 0 8 8" refX="7.5" refY="4" markerWidth="6.5" markerHeight="6.5" orient="auto">
+              <path d="M0 0 L8 4 L0 8 Z" fill="var(--amber)"/>
+            </marker>
+            <marker id="mv" viewBox="0 0 8 8" refX="7.5" refY="4" markerWidth="6.5" markerHeight="6.5" orient="auto">
+              <path d="M0 0 L8 4 L0 8 Z" fill="var(--violet)"/>
+            </marker>
+          </defs>
+
+          <rect x="16" y="30" width="170" height="62" rx="2" fill="var(--card)" stroke="var(--amber)" stroke-width="1.2"/>
+          <text class="lbl" x="32" y="52">plugin config</text>
+          <text class="lbl" x="32" y="68" style="fill: var(--amber);">info.columns = …</text>
+          <text class="sub" x="32" y="84">edit and reload</text>
+
+          <path d="M101 92 L101 130" fill="none" stroke="var(--amber)" stroke-width="1.3" marker-end="url(#ma)"/>
+
+          <rect x="16" y="136" width="170" height="68" rx="2" fill="var(--card)" stroke="var(--ink)" stroke-width="1.4"/>
+          <text class="lbl" x="101" y="160" text-anchor="middle">OpenNMS plugin</text>
+          <text class="lbl" x="101" y="176" text-anchor="middle">write path</text>
+          <text class="sub" x="101" y="192" text-anchor="middle">emits both, always</text>
+
+          <path d="M186 156 L212 156 L212 79 L232 79" fill="none" stroke="var(--teal)" stroke-width="1.3" marker-end="url(#mt)"/>
+          <path d="M186 188 L212 188 L212 241 L232 241" fill="none" stroke="var(--violet)" stroke-width="1.3" marker-end="url(#mv)"/>
+
+          <rect x="240" y="46" width="280" height="66" rx="2" fill="var(--card)" stroke="var(--teal)" stroke-width="1.2"/>
+          <text class="lbl" x="256" y="68" style="fill: var(--teal);">onms_resource_info</text>
+          <text class="sub" x="256" y="84">the configured columns</text>
+          <text class="sub" x="256" y="100">ergonomics only, safe to miss a key</text>
+
+          <rect x="240" y="208" width="280" height="66" rx="2" fill="var(--card)" stroke="var(--violet)" stroke-width="1.2"/>
+          <text class="lbl" x="256" y="230" style="fill: var(--violet);">onms_resource_attr</text>
+          <text class="sub" x="256" y="246">every attribute, complete</text>
+          <text class="sub" x="256" y="262">correctness, nothing to curate</text>
+
+          <path d="M520 79 L592 79" fill="none" stroke="var(--teal)" stroke-width="1.3" marker-end="url(#mt)"/>
+          <path d="M520 241 L592 241" fill="none" stroke="var(--violet)" stroke-width="1.3" marker-end="url(#mv)"/>
+
+          <rect x="600" y="46" width="394" height="66" rx="2" fill="var(--card)" stroke="var(--teal)" stroke-width="1.2"/>
+          <text class="lbl" x="616" y="68">Grafana · PromQL · alert rules</text>
+          <text class="sub" x="616" y="84">one join, no rules file, no ruler</text>
+          <text class="sub" x="616" y="100">group_left(if_alias, if_descr)</text>
+
+          <rect x="600" y="208" width="394" height="66" rx="2" fill="var(--card)" stroke="var(--violet)" stroke-width="1.2"/>
+          <text class="lbl" x="616" y="230">OpenNMS graph rendering</text>
+          <text class="sub" x="616" y="246">all rows for one resourceId</text>
+          <text class="sub" x="616" y="262">no placeholder can go unsubstituted</text>
+        </svg>
+      </div>
+      <figcaption><strong>Both series, and no ruler anywhere.</strong> The read path forces rows: if the long tail existed only as columns, the allowlist would stop being a performance knob and become a correctness dependency, where an unlisted attribute means a graph renders with an unsubstituted <code>${name}</code> placeholder. Completeness therefore lives in the rows, which is exactly what makes the short column set safe, because a key missing from it costs somebody one join and nothing else. Extending that set is a plugin config edit. A recording rule could produce the same view, but it would mean configuring two systems instead of one and would put a backend component on the critical path for no gain.</figcaption>
+    </figure>
+  </section>
+
+  <!-- 03 INSTALL -->
+  <section>
+    <h2><span class="num">03</span>Install the plugin. That is the whole procedure.</h2>
+    <p>The column view is not a convenience, it is the interface: decorating a data series from rows needs a <code>label_replace</code> per attribute, and two joins collide on the label name <code>value</code>. Nobody writes that in a panel editor. Since the column view is mandatory, it must not depend on anything optional, which rules out deriving it from a recording rule. The plugin emits it, and the promoted set is a config list.</p>
+
+    <div class="rule key"><b>No rules to generate, no rules to deploy, no ruler to run.</b> Extending the column set means editing one config list on the side you already administer, not producing a rules file and loading it into the backend. One system instead of two.</div>
+
+    <h3>Alerting works the same way</h3>
+    <p>An alert expression can carry the join itself, so alerting needs no recording rules either. This matters most for VictoriaMetrics, where the usual setup has no <code>vmalert</code> at all.</p>
+
+    <div class="tbl-wrap">
+      <table class="tbl">
+        <thead>
+          <tr><th>Rule evaluator</th><th>Recording rules</th><th>Alert rules that join</th><th>Needed here</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>Grafana-managed alerting</td><td class="no">no write-back</td><td class="yes">yes</td><td>sufficient</td></tr>
+          <tr><td>vmalert</td><td class="yes">yes</td><td class="yes">yes</td><td>not required</td></tr>
+          <tr><td>Mimir ruler</td><td class="yes">yes</td><td class="yes">yes</td><td>not required</td></tr>
+          <tr><td>Prometheus rule engine</td><td class="yes">yes</td><td class="yes">yes</td><td>not required</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <pre class="code"><span class="c"># the join lives in the alert expression, no recorded series involved</span>
+rate(ifHCInOctets[5m]) * 8 / onms_resource_ifspeed &gt; 0.9
+  * on(resourceId) group_left(if_alias, if_descr) onms_resource_info</pre>
+
+    <div class="rule"><b>Two cautions specific to alert expressions.</b> Scope the join to the resources the alert covers rather than joining the whole fleet every evaluation, or a minutely alert becomes the most repetitive form of the series-limit problem. And use the <code>max by (…)</code> form here even if you skip it on dashboards: a duplicate match during an <code>ifAlias</code> churn window turns a panel visibly red, but it makes an alert rule error out instead of evaluating, which is a silent loss of coverage.</div>
+
+    <div class="rule"><b>The escape hatch:</b> an operator who cannot change the plugin config, or who wants a view the plugin cannot express, can still build one with a recording rule against <code>onms_resource_attr</code>. Two things to know if they do. The recorded series must land in the same tenant the plugin writes under, the same <code>X-Scope-OrgID</code>, or every join returns empty with no error at all. And on VictoriaMetrics this is the one path that does require <code>vmalert</code>, since Grafana-managed alerting cannot write series back.</div>
+  </section>
+
+  <!-- 04 WHAT THE PLUGIN EMITS -->
+  <section>
+    <h2><span class="num">04</span>What the plugin emits</h2>
+
+    <pre class="code"><span class="c"># data series: only what is needed to read them, plus the stable promoted set</span>
+ifHCInOctets{resourceId="snmp/1/if1", mtype="counter", node_label="core-sw-1", if_name="Et1"}
+
+<span class="c"># rows: every attribute, three label names forever</span>
+onms_resource_attr{resourceId="snmp/1/if1", key="ifAlias", value="uplink"} 1
+onms_resource_attr{resourceId="snmp/1/if1", key="ifDescr", value="Ethernet1"} 1
+onms_resource_category{resourceId="node/1", category="Production"} 1
+
+<span class="c"># columns: the configured subset, for query ergonomics</span>
+<span class="c"># info.columns = if_alias=ifAlias, if_descr=ifDescr, resource_name=name   (the default)</span>
+onms_resource_info{resourceId="snmp/1/if1", if_alias="uplink", if_descr="Ethernet1"} 1
+onms_resource_info{resourceId="node/1/pgDatabase/opennms", resource_name="opennms"} 1
+
+<span class="c"># numerics get their own gauge, never a label value</span>
+onms_resource_ifspeed{resourceId="snmp/1/if1"} 1000000000</pre>
+
+    <div class="split">
+      <div class="side v"><b>stays on the data series</b><code>mtype</code> and <code>unit</code>, which are not metadata about the resource but how a consumer knows whether the samples are a counter or a gauge. OpenNMS core dereferences <code>mtype</code> unconditionally when rendering graphs. Plus the stable promoted set: <code>node_label</code>, <code>foreign_source</code>, <code>foreign_id</code>, <code>location</code>, <code>if_name</code>. These need no join at all, which beats any derived view. <code>ifDescr</code> is no longer in this set, see §01.</div>
+      <div class="side t"><b>rows</b>Everything else, <code>ifAlias</code> and <code>ifDescr</code> included. Three label names permanently, whatever OpenNMS invents, so an unknown key cannot grow the label-name index. Categories as rows also removes the need for <code>labels.categories-mode</code>: set membership becomes an exact match rather than a regex over a joined string or a label name per user-defined category.</div>
+      <div class="side a"><b>columns</b>A short configured subset the plugin emits alongside the rows, so a fresh install has a usable query surface with no ruler. Each entry is <code>column=key</code>: the label name on the wire, and the OpenNMS attribute key it is read from. The default maps <code>ifAlias</code>, <code>ifDescr</code> and the collector attribute <code>name</code>; the last one becomes <code>resource_name</code> because a label called <code>name</code> next to <code>__name__</code> is a trap in every legend and query. Changing the list forks only this series, one per resource, and leaves the data series untouched.</div>
+      <div class="side w"><b>dropped</b><code>_idx0</code>…<code>_idxN</code>, resource-tree internals with no query value in any encoding; today they occupy the series identity, paying cardinality for nothing. Also every <code>onms_attr_*</code>, <code>onms_extattr_*</code> and <code>onms_cat_*</code> label, since rows carry that content now, and with them the <code>labels.attr-mode</code>, <code>labels.attr-include</code> and <code>labels.categories-mode</code> keys and the read-path branch that rebuilt tag partitions from those prefixes.</div>
+    </div>
+  </section>
+
+  <!-- 05 WHY ROWS -->
+  <section>
+    <h2><span class="num">05</span>Why the long tail must be rows</h2>
+    <p>The plugin's own read path needs <em>every</em> attribute for a resource in order to rebuild the <code>Metric</code> that OpenNMS graph definitions dereference for <code>${name}</code>-style placeholder substitution. Under a column-only encoding, an attribute nobody thought to allowlist is one the read path cannot restore.</p>
+
+    <figure>
+      <div class="plate">
+        <svg viewBox="0 0 1010 310" role="img"
+             aria-label="Two encodings for long-tail resource attributes. As columns, each attribute key becomes a label name on one wide info series, so label names grow with the OpenNMS key space and hit the backend's per-series label cap. As rows, each attribute becomes its own series with the key as a label value, fixing the label names at three and moving the cost to series count.">
+          <defs>
+            <marker id="mc" viewBox="0 0 8 8" refX="7.5" refY="4" markerWidth="6.5" markerHeight="6.5" orient="auto">
+              <path d="M0 0 L8 4 L0 8 Z" fill="var(--amber)"/>
+            </marker>
+            <marker id="mr" viewBox="0 0 8 8" refX="7.5" refY="4" markerWidth="6.5" markerHeight="6.5" orient="auto">
+              <path d="M0 0 L8 4 L0 8 Z" fill="var(--teal)"/>
+            </marker>
+          </defs>
+
+          <rect x="16" y="142" width="132" height="56" rx="2" fill="var(--card)" stroke="var(--ink)" stroke-width="1.2"/>
+          <text class="lbl" x="82" y="167" text-anchor="middle">snmp/1/if1</text>
+          <text class="sub" x="82" y="183" text-anchor="middle">8 string attributes</text>
+
+          <path d="M148 160 L190 160 L190 88 L226 88" fill="none" stroke="var(--amber)" stroke-width="1.3" marker-end="url(#mc)"/>
+          <path d="M148 180 L190 180 L190 244 L226 244" fill="none" stroke="var(--teal)" stroke-width="1.3" marker-end="url(#mr)"/>
+
+          <text class="lbl" x="232" y="42" style="fill: var(--amber); font-weight: 500;">COLUMNS · the key becomes a label name</text>
+          <rect x="232" y="52" width="556" height="74" rx="2" fill="var(--card)" stroke="var(--amber)" stroke-width="1.2"/>
+          <text class="lbl" x="248" y="76">onms_resource_info{</text>
+          <text class="lbl" x="248" y="94">  resourceId="…", if_alias="…", if_descr="…", if_name="…",</text>
+          <text class="lbl" x="248" y="112">  if_speed="…", if_high_speed="…", …  } 1</text>
+
+          <text class="warnlbl" x="802" y="76">8 label names, rising</text>
+          <text class="sub" x="802" y="92">hits the per-series label cap</text>
+          <text class="sub" x="802" y="106">(Mimir default: 30)</text>
+          <text class="sub" x="802" y="122">grows the global name index</text>
+
+          <text class="lbl" x="232" y="186" style="fill: var(--teal); font-weight: 500;">ROWS · the key becomes a label value</text>
+          <rect x="232" y="196" width="556" height="96" rx="2" fill="var(--card)" stroke="var(--teal)" stroke-width="1.2"/>
+          <text class="lbl" x="248" y="220">onms_resource_attr{resourceId="…", key="ifAlias", value="uplink"} 1</text>
+          <text class="lbl" x="248" y="238">onms_resource_attr{resourceId="…", key="ifDescr", value="Ethernet1"} 1</text>
+          <text class="lbl" x="248" y="256">onms_resource_attr{resourceId="…", key="ifName",  value="Et1"} 1</text>
+          <text class="sub" x="248" y="276">… 8 rows, one per attribute</text>
+
+          <text class="lbl" x="802" y="220" style="fill: var(--teal); font-weight: 500;">3 label names</text>
+          <text class="sub" x="802" y="236">fixed, whatever OpenNMS emits</text>
+          <text class="sub" x="802" y="252">no allowlist needed for safety</text>
+          <text class="sub" x="802" y="268">cost moves to series count</text>
+        </svg>
+      </div>
+      <figcaption><strong>Normalizing kills the allowlist as a safety mechanism.</strong> With the key in a label value, an unknown attribute cannot add a label name, so nothing an operator fails to curate can hurt the backend. Cardinality does not disappear, it relocates to series count, which a per-resource budget controls directly: keep the first 16 attributes by default, sorted by key for determinism, and count the remainder in <code>onms_resource_attrs_dropped</code> so truncation is visible rather than silent. An SNMP interface carries about eight, so the default only ever bites on JMX beans with dozens of properties.</figcaption>
+    </figure>
+  </section>
+
+  <!-- 06 QUERY PATTERNS -->
+  <section>
+    <h2><span class="num">06</span>Query patterns</h2>
+
+    <h3>Dashboards</h3>
+    <pre class="code">rate(ifHCInOctets[5m])
+  * on(resourceId) group_left(if_alias, if_descr) onms_resource_info</pre>
+
+    <h3>Historical correctness</h3>
+    <p>Point-in-time is the default behaviour of a range-vector join, so a query over old data sees the alias as it was then. To apply the <em>current</em> alias to historical data, pin the right-hand side with the <code>@</code> modifier:</p>
+    <pre class="code">rate(ifHCInOctets[5m])
+  * on(resourceId) group_left(value)
+    (last_over_time(onms_resource_attr{key="ifAlias"}[1h]) @ end())</pre>
+    <p>Both readings are available from the same data. Neither is available when the attribute is part of the data series identity.</p>
+  </section>
+
+  <!-- 07 SIZING -->
+  <section>
+    <h2><span class="num">07</span>Sizing and backend limits</h2>
+    <p>Illustrative arithmetic for an 11,000-device fleet at roughly 20 interfaces per device. Substitute real figures before committing to limits.</p>
+
+    <div class="tbl-wrap">
+      <table class="tbl">
+        <thead><tr><th>Series</th><th>Count</th><th>Note</th></tr></thead>
+        <tbody>
+          <tr><td>resources</td><td class="num">~220,000</td><td></td></tr>
+          <tr><td>data series</td><td class="num">~3,300,000</td><td>unchanged by this design</td></tr>
+          <tr><td>onms_resource_info</td><td class="num">~220,000</td><td>one per resource</td></tr>
+          <tr><td>onms_resource_attr</td><td class="num">~1,760,000</td><td>at 8 attributes per resource</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p>Sample rate is resources divided by the re-emission cadence, and cadence is tunable against the query idiom: emit every 15 minutes and widen the query to <code>last_over_time(…[1h])</code> rather than emitting every 2 minutes to stay inside the default 5-minute lookback. Series count is the number to watch, and the per-resource attribute budget controls it directly.</p>
+
+    <div class="tbl-wrap">
+      <table class="tbl">
+        <thead><tr><th>Limit</th><th>Applies to</th><th>Note</th></tr></thead>
+        <tbody>
+          <tr><td>max-label-names-per-series</td><td>the column series</td><td>Mimir and VictoriaMetrics both default around 30. This is why the long tail cannot be columns.</td></tr>
+          <tr><td>max_global_series_per_metric</td><td>the row series</td><td>Rows deliberately concentrate millions of series under one metric name, which looks exactly like a runaway metric to this guardrail.</td></tr>
+          <tr><td>search.maxUniqueTimeseries</td><td>joins</td><td>VictoriaMetrics, default 300,000. Every join must carry a <code>key=</code> matcher or it selects the whole attribute space and is refused.</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="rule"><b>Wire cost is string-heavy</b>, since every sample repeats <code>resourceId</code>, <code>key</code> and <code>value</code>. Remote Write v2's symbol table interns strings across a request and is a material win for this shape specifically. Emit the metadata series on their own cadence and batch rather than folding them into every data request.</div>
+  </section>
+
+  <!-- 08 FAILURE MODES -->
+  <section>
+    <h2><span class="num">08</span>Failure modes</h2>
+    <h3>Duplicate match during churn</h3>
+    <p>When an attribute changes, the old series stays resolvable for the whole lookback window, so a <code>group_left</code> join sees two matches and fails the query with <code>found duplicate series for the match group</code>. This is the known sharp edge of the info-series pattern and has no clean fix, because Prometheus has no tombstone. Mitigate in the documented idiom:</p>
+    <pre class="code">max by (resourceId, if_alias, if_descr) (
+  last_over_time(onms_resource_info[10m])
+)</pre>
+  </section>
+
+  <!-- 09 CUTOVER -->
+  <section>
+    <h2><span class="num">09</span>Cutover, not migration</h2>
+    <p>This design is implemented as a greenfield label schema. There is no compatibility mode for the v0.x schema, no dual emission, and no read-path support for the old prefixes. The data series lose <code>if_descr</code> and every <code>onms_attr_*</code>, <code>onms_extattr_*</code> and <code>onms_cat_*</code> label, which changes the identity of every affected series once, at cutover. That is the cutover, and the design does not soften it.</p>
+    <div class="rule"><b>Consequences to state in the release note, once.</b> Series written before the cutover keep their old identity for the retention window and are not joined to the new ones. Dashboards that filtered on a removed label move to the <code>group_left</code> idiom of §06. OpenNMS graph rendering is unaffected across the boundary, because the read path resolves resources by <code>__name__</code> and <code>resourceId</code>, both of which stay.</div>
+  </section>
+
+  <!-- 10 ALTERNATIVES -->
+  <section>
+    <h2><span class="num">10</span>Alternatives considered</h2>
+    <p>The three candidate homes for a mutable attribute differ in exactly one observable way, and it shows up the moment an operator edits an interface description.</p>
+
+    <figure>
+      <div class="plate">
+        <svg viewBox="0 0 1010 322" role="img"
+             aria-label="Timeline comparison of three metadata strategies when an operator renames an interface. With an info series the data series is unbroken and only the small info series forks. With a relational side table the data series is unbroken and the row is updated in place, invisible to PromQL. With labels on the data series the data series itself forks and history splits at the rename.">
+          <defs>
+            <marker id="mx" viewBox="0 0 8 8" refX="7.5" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+              <path d="M0 0 L8 4 L0 8 Z" fill="var(--muted)"/>
+            </marker>
+          </defs>
+
+          <line x1="470" y1="26" x2="470" y2="292" stroke="var(--warn)" stroke-width="1.1" stroke-dasharray="3 4"/>
+          <text class="warnlbl" x="470" y="18" text-anchor="middle">operator edits ifAlias</text>
+
+          <line x1="200" y1="300" x2="716" y2="300" stroke="var(--line)" stroke-width="1" marker-end="url(#mx)"/>
+          <text class="sub" x="200" y="315">time</text>
+
+          <text class="lbl" x="16" y="48" style="fill: var(--teal); font-weight: 500;">A · info series</text>
+          <text class="sub" x="16" y="63">metadata in Prometheus</text>
+          <text class="sub" x="200" y="38">data series</text>
+          <line x1="200" y1="48" x2="716" y2="48" stroke="var(--teal)" stroke-width="3.5" stroke-linecap="round"/>
+          <text class="sub" x="200" y="66">onms_resource_info</text>
+          <line x1="200" y1="76" x2="462" y2="76" stroke="var(--teal)" stroke-width="3.5" stroke-linecap="round" opacity="0.55"/>
+          <line x1="478" y1="90" x2="716" y2="90" stroke="var(--teal)" stroke-width="3.5" stroke-linecap="round"/>
+          <text class="lbl" x="744" y="56">data unbroken</text>
+          <text class="sub" x="744" y="72">one small series forks, per resource</text>
+          <text class="sub" x="744" y="86">history can be re-labelled by the join</text>
+
+          <text class="lbl" x="16" y="152" style="fill: var(--violet); font-weight: 500;">B · side table</text>
+          <text class="sub" x="16" y="167">metadata in a database</text>
+          <text class="sub" x="200" y="142">data series</text>
+          <line x1="200" y1="152" x2="716" y2="152" stroke="var(--violet)" stroke-width="3.5" stroke-linecap="round"/>
+          <rect x="424" y="172" width="92" height="26" rx="2" fill="var(--card)" stroke="var(--violet)" stroke-width="1.2"/>
+          <text class="lbl" x="470" y="189" text-anchor="middle">UPDATE</text>
+          <text class="lbl" x="744" y="160">data unbroken</text>
+          <text class="sub" x="744" y="176">nothing forks, row changed in place</text>
+          <text class="sub" x="744" y="190">invisible to PromQL</text>
+
+          <text class="lbl" x="16" y="256" style="fill: var(--amber); font-weight: 500;">C · data labels</text>
+          <text class="sub" x="16" y="271">metadata in the identity</text>
+          <text class="sub" x="200" y="246">data series</text>
+          <line x1="200" y1="256" x2="462" y2="256" stroke="var(--amber)" stroke-width="3.5" stroke-linecap="round" opacity="0.55"/>
+          <line x1="478" y1="278" x2="716" y2="278" stroke="var(--amber)" stroke-width="3.5" stroke-linecap="round"/>
+          <text class="lbl" x="744" y="256">data series forks</text>
+          <text class="sub" x="744" y="272">every metric of the resource splits</text>
+          <text class="sub" x="744" y="286">no join needed, history keeps old value</text>
+        </svg>
+      </div>
+      <figcaption><strong>One rename, three outcomes.</strong> The faded segment is the series that stops receiving samples. Option C is the only one where the <em>data</em> forks, and it forks once per metric on that resource rather than once per resource. Option B does not fork at all, which is its one real advantage, and pays for it by being unreachable from PromQL.</figcaption>
+    </figure>
+
+    <ul class="list">
+      <li><strong>Columns only, with an allowlist.</strong> Rejected because it makes the allowlist load-bearing for read-path correctness, and because it cannot hold the long tail under the per-series label cap.</li>
+      <li><strong>A relational side table.</strong> Rejected because it puts a database on the write path, makes the metadata unreachable from PromQL, and requires the read path to enrich every result from a second store. Its genuine advantage is that a mutable attribute changes nothing at all rather than forking a small series.</li>
+      <li><strong>Deriving the column series with a recording rule.</strong> Rejected because it makes the mandatory query interface depend on an optional backend component, and because it means an operator configures two systems where one would do. Retained as an escape hatch.</li>
+    </ul>
+
+    <div class="rule"><b>What would still flip the whole design:</b> if nobody queries the long tail <em>and</em> read-path parity is not required, columns-only with a modest allowlist is genuinely simpler. That is a testable question, not an architectural one. Look at what existing graph definitions dereference and what operators filter on in Grafana today. If that set is small, closed and stable across deployments, build the simple thing.</div>
+  </section>
+
+  <!-- 11 DECISIONS -->
+  <section>
+    <h2><span class="num">11</span>Decisions</h2>
+    <p>The four questions the first draft left open, resolved on 2026-09-14.</p>
+
+    <h3>ifAlias placement is a principle, not a measurement</h3>
+    <p>The draft wanted <code>ifAlias</code> churn measured before fixing its placement. It cannot be measured where the project measures everything else, since the reference fleet is simulated and its aliases never change, and the OpenNMS database holds only the current <code>snmpinterface.snmpifalias</code> with no history. More to the point, the number would not change the answer: an operator who has just relabelled an interface is the one about to look at its graph, and a low churn rate makes that split rarer, not acceptable. <code>ifAlias</code> and <code>ifDescr</code> stay in rows on principle (§01). Churn, once an operator measures it with two snapshots of <code>snmpinterface</code> weeks apart, tunes the re-emission cadence and the duplicate-match window, nothing else.</p>
+
+    <h3>Default columns and budget</h3>
+    <p><code>info.columns</code> takes <code>column=key</code> entries and defaults to <code>if_alias=ifAlias, if_descr=ifDescr, resource_name=name</code>; <code>resourceId</code> is always present as the join key. Columns exist for attributes that are <em>not</em> on the data series, so the default does not mirror <code>node_label</code> or <code>if_name</code>. Sub-resource names under collector-specific keys such as <code>hrStorageDescr</code>, <code>dskPath</code> or <code>datname</code> are one config entry away, deliberately: a fixed "first key that looks like a name" rule was considered and rejected, because that list is collector-specific and would be wrong somewhere. The per-resource attribute budget defaults to 16, lowest keys kept, remainder counted.</p>
+
+    <h3>Read path: one batched query, no plugin cache</h3>
+    <p>OpenNMS reads external tags from the <code>Metric</code> objects that <code>findMetrics</code> returns; <code>getTimeSeriesData</code> rebuilds its <code>Metric</code> from the query response and needs none. So enrichment happens in one place, and it is one instant query per <code>findMetrics</code> call, not one per metric: <code>last_over_time(onms_resource_attr{resourceId=~"^(…)$"}[2 × cadence])</code> over the call's resource set, batched by <code>read.discovery-batch-size</code> as the two-phase discovery path already does. The selector always carries the resource list, so it never selects the whole attribute space (§07). No plugin-side cache: OpenNMS already runs <code>timeseriesSearcherCache</code> in front of <code>findMetrics</code>, so a second cache would serve a stale alias for its TTL after exactly the operator action this design exists for. A bounded TTL cache with TTL equal to the cadence is the fallback if a deployment shows the second query dominating <code>findMetrics</code> latency, added on measurement.</p>
+
+    <h3>The <code>@</code> modifier is available everywhere that matters</h3>
+    <div class="tbl-wrap">
+      <table class="tbl">
+        <thead><tr><th>Backend</th><th>@ modifier</th><th>Minimum for this design</th></tr></thead>
+        <tbody>
+          <tr><td>Prometheus</td><td>flag from 2.25, always on from 2.33, flag removed in 3.0</td><td>2.33 (the project references 2.53.2 and 3.0.1)</td></tr>
+          <tr><td>Grafana Mimir</td><td>always on, every release</td><td>none</td></tr>
+          <tr><td>VictoriaMetrics</td><td>from v1.72.0</td><td>v1.72.0 (CI pins v1.151.0)</td></tr>
+          <tr><td>Cortex</td><td>1.8 to 1.17 behind <code>-querier.at-modifier-enabled</code>, default off; always on from 1.18</td><td>1.18, or the flag on earlier releases</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>These minimums belong in the backends table of the operator docs once the feature ships. Only the "apply today's alias to old data" idiom (§06) uses <code>@</code>; the primary <code>group_left</code> join needs nothing beyond plain PromQL.</p>
+  </section>
+
+  <footer>
+    <p><strong>Provenance.</strong> This design derives from Prometheus's own conventions for carrying entity metadata, specifically the info-series pattern used by <code>kube-state-metrics</code> and OpenTelemetry's <code>target_info</code>, and from the Remote Write specification. The relational side table appears above only as a rejected alternative, described at the level of externally observable architecture. No implementation detail of any AGPL-3.0 project informs this design. See <code>CLAUDE.md</code> for the project's clean-room constraint.</p>
+  </footer>
+
+</div>
+</body>
+</html>
