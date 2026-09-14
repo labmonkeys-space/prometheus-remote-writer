@@ -50,6 +50,19 @@ updates:
         patterns:
           - opennms/*
 
+  # The sandbox's snmpd image pins its base by digest (Scorecard's
+  # pinned-dependencies check); this keeps the digest current.
+  - package-ecosystem: docker
+    directory: /e2e/snmpd
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: build
+    labels:
+      - dependencies
+      - docker
   - package-ecosystem: maven
     directory: /
     schedule:

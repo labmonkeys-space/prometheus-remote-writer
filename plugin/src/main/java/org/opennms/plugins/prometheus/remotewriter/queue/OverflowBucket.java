@@ -252,9 +252,11 @@ public final class OverflowBucket implements Closeable {
      */
     private void repositionAfterEviction() throws IOException {
         long oldest = oldestSegmentStart();
-        if (oldest <= checkpoint.lastSentOffset()) return;
         try {
-            checkpoint.advance(oldest);
+            // One atomic step: an acknowledgement on the flusher thread may
+            // move the checkpoint between a read and an advance here, so the
+            // checkpoint decides under its own lock whether it is behind.
+            if (checkpoint.advancePast(oldest) < 0) return;
         } catch (IOException | RuntimeException e) {
             LOG.warn("{}: could not move the checkpoint past evicted segments; the reader will "
                     + "skip the hole on its next scan", name, e);
@@ -341,17 +343,24 @@ public final class OverflowBucket implements Closeable {
      *
      * @param samplesAcked how many samples the batch held, to take off the
      *                     pending depth
-     * @return bytes newly checkpointed, or -1 when the advance failed
+     * @return bytes newly checkpointed (0 when a drop-oldest eviction had
+     *         already moved the checkpoint past the batch), or -1 when the
+     *         advance failed
      */
     public long acknowledge(long newOffset, int samplesAcked) {
-        long previousOffset = checkpoint.lastSentOffset();
+        long previousOffset;
         try {
-            checkpoint.advance(newOffset);
+            // Under drop-oldest an eviction on the append thread may have
+            // moved the checkpoint past this batch while it was in flight.
+            // The backend took the batch all the same, so that is "already
+            // covered", not an error: the checkpoint stays where it is and
+            // nothing was newly checkpointed.
+            previousOffset = checkpoint.advancePast(newOffset);
         } catch (IOException | RuntimeException e) {
-            // Includes the programming-bug backward move. Never silently
-            // lose a batch: rewind and let the next cycle re-ship it.
+            // Never silently lose a batch: rewind and let the next cycle
+            // re-ship it.
             LOG.error("{}: checkpoint advance failed; resetting reader to last-good offset {} "
-                    + "for retry", name, previousOffset, e);
+                    + "for retry", name, checkpoint.lastSentOffset(), e);
             rewind("advance-fail");
             return -1L;
         }
@@ -383,7 +392,7 @@ public final class OverflowBucket implements Closeable {
                 LOG.warn("{}: could not re-read the bucket size after a failed GC", name, again);
             }
         }
-        return Math.max(0L, newOffset - previousOffset);
+        return previousOffset < 0 ? 0L : newOffset - previousOffset;
     }
 
     /**

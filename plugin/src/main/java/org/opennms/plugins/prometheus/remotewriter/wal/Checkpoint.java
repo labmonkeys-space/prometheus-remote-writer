@@ -113,6 +113,24 @@ public final class Checkpoint {
         lastSentAt = now;
     }
 
+    /**
+     * Advance to {@code offset} if the checkpoint is still behind it, in one
+     * step under the checkpoint's own lock, so a caller that would otherwise
+     * read the offset and then advance cannot race another advancer in
+     * between (an acknowledgement on the flusher thread against an eviction
+     * on the append thread). The offset moved from is returned under the
+     * same lock, so a caller's byte delta is exact.
+     *
+     * @return the offset the checkpoint moved from, or -1 when it was
+     *         already at or past {@code offset} and did not move
+     */
+    public synchronized long advancePast(long offset) throws IOException {
+        if (offset <= lastSentOffset) return -1L;
+        long previous = lastSentOffset;
+        advance(offset);
+        return previous;
+    }
+
     public synchronized long lastSentOffset() { return lastSentOffset; }
     public synchronized Instant lastSentAt() { return lastSentAt; }
 
