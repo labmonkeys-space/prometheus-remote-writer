@@ -80,7 +80,7 @@ public final class MetadataProcessor {
      *  plain-key meta tags before emitting them under the {@code onms_attr_}
      *  prefix. Case-insensitive so the safety net can't be bypassed by an
      *  unusual casing. */
-    static boolean isPlainKeyDenied(String key) {
+    public static boolean isPlainKeyDenied(String key) {
         return matchesAny(key, BUILTIN_PLAIN_DENYLIST_GLOBS);
     }
 

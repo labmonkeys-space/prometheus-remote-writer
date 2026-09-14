@@ -80,6 +80,8 @@
             <cm:property name="overflow.max-size-bytes" value="4294967296"/>
             <cm:property name="overflow.full"           value="refuse"/>
             <cm:property name="overflow.drain"          value="ordered"/>
+            <cm:property name="metadata.cadence-ms"     value="900000"/>
+            <cm:property name="metadata.attr-budget"    value="16"/>
             <cm:property name="overflow.fsync"          value="batch"/>
         </cm:default-properties>
     </cm:property-placeholder>
@@ -140,6 +142,8 @@
         <property name="overflowFull"            value="${overflow.full}"/>
         <property name="overflowDrain"           value="${overflow.drain}"/>
         <property name="overflowFsync"           value="${overflow.fsync}"/>
+        <property name="metadataCadenceMs"       value="${metadata.cadence-ms}"/>
+        <property name="metadataAttrBudget"      value="${metadata.attr-budget}"/>
     </bean>
 
     <!--
