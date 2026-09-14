@@ -786,6 +786,24 @@ class PrometheusRemoteWriterConfigTest {
     }
 
     @Test
+    void info_columns_default_is_the_shipped_datacollection_and_bad_specs_fail_validation() {
+        PrometheusRemoteWriterConfig c = minimal();
+        assertThat(c.metadataInfoColumns()).containsKeys("if_alias", "if_descr", "resource_name",
+                "hr_storage_descr", "dsk_path", "datname", "spcname");
+        c.setMetadataInfoColumns("if_alias=ifAlias, contact=sysContact");
+        assertThatCode(c::validate).doesNotThrowAnyException();
+        assertThat(c.metadataInfoColumns()).containsExactly(Map.entry("if_alias", "ifAlias"), Map.entry("contact", "sysContact"));
+        c.setMetadataInfoColumns("resourceId=ifAlias");
+        assertThatThrownBy(c::validate).isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("metadata.info-columns").hasMessageContaining("resourceId");
+        c.setMetadataInfoColumns("a=x, a=y");
+        assertThatThrownBy(c::validate).isInstanceOf(IllegalStateException.class).hasMessageContaining("metadata.info-columns");
+        c.setMetadataInfoColumns("");
+        assertThatCode(c::validate).doesNotThrowAnyException();
+        assertThat(c.metadataInfoColumns()).isEmpty();
+    }
+
+    @Test
     void resourceId_cannot_be_excluded_or_renamed_away_from_the_join() {
         PrometheusRemoteWriterConfig c = minimal();
         c.setLabelsExclude("resource*");

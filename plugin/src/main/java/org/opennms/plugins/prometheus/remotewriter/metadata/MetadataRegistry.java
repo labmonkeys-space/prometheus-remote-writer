@@ -38,7 +38,7 @@ import org.opennms.plugins.prometheus.remotewriter.mapper.MetadataProcessor;
  * intrinsics (not walked), {@code mtype}, {@code categories} (rows of its
  * own), {@code ifSpeed} and {@code ifHighSpeed} (a gauge of their own),
  * context keys containing {@code :} (owned by the metadata processor) and the
- * secret denylist. Keys keep their OpenNMS spelling, because a row is a fact
+ * secret denylist; a tag with an empty value is no attribute either. Keys keep their OpenNMS spelling, because a row is a fact
  * about OpenNMS and a graph placeholder is named after it.
  */
 public final class MetadataRegistry {
@@ -200,7 +200,10 @@ public final class MetadataRegistry {
             for (Tag t : partition) {
                 String key = t.getKey();
                 String value = t.getValue();
-                if (key == null || value == null) continue;
+                // An empty value is no attribute: an unaliased interface has
+                // ifAlias="", and Prometheus treats an empty label as absent,
+                // so emitting it would make a series the plugin misdescribes.
+                if (key == null || value == null || value.isEmpty()) continue;
                 if ("categories".equals(key)) {
                     for (String c : value.split(",")) {
                         String trimmed = c.trim();

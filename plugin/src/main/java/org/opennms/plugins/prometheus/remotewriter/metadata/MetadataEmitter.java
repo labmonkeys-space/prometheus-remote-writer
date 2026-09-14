@@ -22,15 +22,25 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Turns the {@link MetadataRegistry} into series on the wire: one
- * {@code onms_resource_attr} row per attribute and one
- * {@code onms_resource_category} row per category of each resource, on the
- * resource's first sight, on change, and otherwise every cadence.
+ * Turns the {@link MetadataRegistry} into series on the wire, per resource,
+ * on first sight, on change, and otherwise every cadence:
+ * <ul>
+ *   <li>{@code onms_resource_attr{resourceId,key,value} 1}, one row per
+ *       attribute up to the budget;</li>
+ *   <li>{@code onms_resource_category{resourceId,category} 1}, one row per
+ *       surveillance category;</li>
+ *   <li>{@code onms_resource_info{resourceId,<column>…} 1}, the configured
+ *       columns ({@link InfoColumns}), for query ergonomics;</li>
+ *   <li>{@code onms_resource_ifspeed{resourceId}}, the interface speed in
+ *       bits per second as a gauge.</li>
+ * </ul>
  *
- * <p>Rows have the same three label names whatever OpenNMS supplies, so an
+ * <p>The rows have fixed label names whatever OpenNMS supplies, so an
  * attribute key nobody has seen before cannot grow the backend's label-name
- * index. Cardinality moves to series count instead, which the per-resource
- * budget bounds and {@code metadata_attrs_dropped_total} makes visible.
+ * index; cardinality moves to series count, which the per-resource budget
+ * bounds and {@code metadata_attrs_dropped_total} makes visible. The info
+ * series is the one place operator-chosen label names reach the wire, which
+ * is why {@link InfoColumns#parse} validates them.
  *
  * <p>Metadata samples go through the write pipeline like any other, in
  * batches of the emitter's own, never folded into a data request.
@@ -45,6 +55,11 @@ public final class MetadataEmitter {
     public static final String CATEGORY_METRIC = "onms_resource_category";
     /** Interface speed in bits per second, a gauge so it multiplies as-is. */
     public static final String IFSPEED_METRIC  = "onms_resource_ifspeed";
+    /** The configured columns, one series per resource that has any of them. */
+    public static final String INFO_METRIC     = "onms_resource_info";
+    /** Labels every metadata series carries; {@link InfoColumns} reserves them. */
+    public static final String RESOURCE_ID_LABEL = "resourceId";
+    public static final String INSTANCE_ID_LABEL = "onms_instance_id";
 
     /** A resource not seen for this long is dropped from the registry. */
     static final long EXPIRE_AFTER_MS = TimeUnit.HOURS.toMillis(24);
@@ -53,12 +68,15 @@ public final class MetadataEmitter {
     /** Samples per call to the sink. */
     static final int BATCH = 1_000;
 
-    /** @param instanceId {@code instance.id}, stamped on every row as
-     *                    {@code onms_instance_id} when set, as on the data series */
-    public record Settings(long cadenceMs, int attrBudget, String instanceId) {
+    /** @param instanceId  {@code instance.id}, stamped on every metadata series
+     *                     as {@code onms_instance_id} when set, as on the data series
+     *  @param infoColumns column → attribute key, from {@link InfoColumns#parse} */
+    public record Settings(long cadenceMs, int attrBudget, String instanceId,
+                           Map<String, String> infoColumns) {
         public Settings {
             if (cadenceMs < 1) throw new IllegalArgumentException("cadenceMs must be >= 1");
             if (attrBudget < 1) throw new IllegalArgumentException("attrBudget must be >= 1");
+            Objects.requireNonNull(infoColumns, "infoColumns");
         }
     }
 
@@ -134,6 +152,17 @@ public final class MetadataEmitter {
             labels.put("category", Sanitizer.labelValue(category));
             out.add(new MappedSample(labels, now, 1.0, now));
         }
+        // Columns read the whole attribute set, not the budgeted rows: the
+        // budget bounds series count, and one info series per resource is
+        // fixed whatever it carries.
+        Map<String, String> info = null;
+        for (Map.Entry<String, String> column : settings.infoColumns().entrySet()) {
+            String value = r.attributes().get(column.getValue());
+            if (value == null) continue;
+            if (info == null) info = base(INFO_METRIC, resourceId);
+            info.put(column.getKey(), Sanitizer.labelValue(value));
+        }
+        if (info != null) out.add(new MappedSample(info, now, 1.0, now));
         if (r.ifSpeedBps() != null) {
             out.add(new MappedSample(base(IFSPEED_METRIC, resourceId), now, (double) r.ifSpeedBps(), now));
         }
@@ -143,9 +172,9 @@ public final class MetadataEmitter {
     private Map<String, String> base(String metricName, String resourceId) {
         Map<String, String> labels = new LinkedHashMap<>();
         labels.put(MappedSample.METRIC_NAME_LABEL, metricName);
-        labels.put("resourceId", resourceId);
+        labels.put(RESOURCE_ID_LABEL, resourceId);
         if (settings.instanceId() != null && !settings.instanceId().isEmpty()) {
-            labels.put("onms_instance_id", Sanitizer.labelValue(settings.instanceId()));
+            labels.put(INSTANCE_ID_LABEL, Sanitizer.labelValue(settings.instanceId()));
         }
         return labels;
     }
@@ -203,8 +232,8 @@ public final class MetadataEmitter {
     }
 
     private void run() {
-        LOG.info("metadata emitter started (cadence-ms={}, attr-budget={})",
-                settings.cadenceMs(), settings.attrBudget());
+        LOG.info("metadata emitter started (cadence-ms={}, attr-budget={}, info-columns={})",
+                settings.cadenceMs(), settings.attrBudget(), settings.infoColumns());
         while (running) {
             try {
                 Thread.sleep(TICK_MS);

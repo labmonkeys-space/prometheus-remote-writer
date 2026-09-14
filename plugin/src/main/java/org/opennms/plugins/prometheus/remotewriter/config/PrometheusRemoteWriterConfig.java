@@ -18,6 +18,7 @@ import java.util.Set;
 
 import org.opennms.plugins.prometheus.remotewriter.mapper.LabelMapper;
 import org.opennms.plugins.prometheus.remotewriter.sanitize.Sanitizer;
+import org.opennms.plugins.prometheus.remotewriter.metadata.InfoColumns;
 import org.opennms.plugins.prometheus.remotewriter.queue.OverflowBucket;
 import org.opennms.plugins.prometheus.remotewriter.wal.WalSegment;
 
@@ -360,6 +361,9 @@ public class PrometheusRemoteWriterConfig {
     /** {@code metadata.attr-budget}: attributes per resource emitted as rows,
      *  lowest keys first; the rest are counted in metadata_attrs_dropped_total. */
     private int metadataAttrBudget = 16;
+    /** {@code metadata.info-columns}: {@code column=key} entries for the
+     *  onms_resource_info series. See {@link InfoColumns}. */
+    private String metadataInfoColumns = InfoColumns.DEFAULT_SPEC;
 
     /** Fsync policy for bucket segments: {@code always} (fsync every
      *  append; tightest RPO, lowest throughput), {@code batch} (fsync at
@@ -503,6 +507,11 @@ public class PrometheusRemoteWriterConfig {
         validateResourceIdKept();
         if (metadataAttrBudget < 1) {
             throw new IllegalStateException("metadata.attr-budget must be >= 1 (got " + metadataAttrBudget + ")");
+        }
+        try {
+            InfoColumns.parse(metadataInfoColumns);
+        } catch (IllegalArgumentException e) {
+            throw new IllegalStateException("metadata.info-columns: " + e.getMessage(), e);
         }
         if (retryMaxAttempts < 0) {
             throw new IllegalStateException("retry.max-attempts must be >= 0");
@@ -1087,6 +1096,7 @@ public class PrometheusRemoteWriterConfig {
         diffLong(out, "batch.linger-ms",          other.batchLingerMs,         batchLingerMs);
         diffLong(out, "metadata.cadence-ms",      other.metadataCadenceMs,     metadataCadenceMs);
         diffLong(out, "metadata.attr-budget",     other.metadataAttrBudget,    metadataAttrBudget);
+        diffStr(out, "metadata.info-columns",     other.metadataInfoColumns,   metadataInfoColumns);
         diffInt(out, "retry.max-attempts",        other.retryMaxAttempts,      retryMaxAttempts);
         diffLong(out, "retry.initial-backoff-ms", other.retryInitialBackoffMs, retryInitialBackoffMs);
         diffLong(out, "retry.max-backoff-ms",     other.retryMaxBackoffMs,     retryMaxBackoffMs);
@@ -1142,6 +1152,7 @@ public class PrometheusRemoteWriterConfig {
     public void setBatchLingerMs(long v)           { batchLingerMs = v; }
     public void setMetadataCadenceMs(long v)       { metadataCadenceMs = v; }
     public void setMetadataAttrBudget(int v)       { metadataAttrBudget = v; }
+    public void setMetadataInfoColumns(String v)   { metadataInfoColumns = v == null ? "" : v; }
     public void setRetryMaxAttempts(int v)         { retryMaxAttempts = v; }
     public void setRetryInitialBackoffMs(long v)   { retryInitialBackoffMs = v; }
     public void setRetryMaxBackoffMs(long v)       { retryMaxBackoffMs = v; }
@@ -1499,6 +1510,9 @@ public class PrometheusRemoteWriterConfig {
     public long    getBatchLingerMs()         { return batchLingerMs; }
     public long    getMetadataCadenceMs()     { return metadataCadenceMs; }
     public int     getMetadataAttrBudget()    { return metadataAttrBudget; }
+    public String  getMetadataInfoColumns()   { return metadataInfoColumns; }
+    /** The parsed {@code metadata.info-columns}, column → attribute key. */
+    public Map<String, String> metadataInfoColumns() { return InfoColumns.parse(metadataInfoColumns); }
     public int     getRetryMaxAttempts()      { return retryMaxAttempts; }
     public long    getRetryInitialBackoffMs() { return retryInitialBackoffMs; }
     public long    getRetryMaxBackoffMs()     { return retryMaxBackoffMs; }

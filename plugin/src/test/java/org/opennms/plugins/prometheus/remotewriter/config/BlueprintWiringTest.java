@@ -252,6 +252,7 @@ class BlueprintWiringTest {
         expected.put("overflow.max-size-bytes", String.valueOf(javaDefaults.getOverflowMaxSizeBytes()));
         expected.put("metadata.cadence-ms",     String.valueOf(javaDefaults.getMetadataCadenceMs()));
         expected.put("metadata.attr-budget",    String.valueOf(javaDefaults.getMetadataAttrBudget()));
+        expected.put("metadata.info-columns",   javaDefaults.getMetadataInfoColumns());
 
         for (Map.Entry<String, String> e : expected.entrySet()) {
             assertThat(cmDefaults)

@@ -346,7 +346,8 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
                 final PluginMetrics metrics = m;
                 me = new MetadataEmitter(registry,
                         new MetadataEmitter.Settings(config.getMetadataCadenceMs(),
-                                config.getMetadataAttrBudget(), config.getInstanceId()),
+                                config.getMetadataAttrBudget(), config.getInstanceId(),
+                                config.metadataInfoColumns()),
                         batch -> {
                             try {
                                 int refused = offer(shards, policy, batch);
@@ -405,8 +406,8 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
                 config.getOverflowDrain().name().toLowerCase(java.util.Locale.ROOT),
                 config.getOverflowFull().name().toLowerCase(java.util.Locale.ROOT).replace('_', '-'),
                 storePolicy);
-        LOG.info("metadata: metadata.cadence-ms={}, metadata.attr-budget={}",
-                config.getMetadataCadenceMs(), config.getMetadataAttrBudget());
+        LOG.info("metadata: metadata.cadence-ms={}, metadata.attr-budget={}, metadata.info-columns={}",
+                config.getMetadataCadenceMs(), config.getMetadataAttrBudget(), config.getMetadataInfoColumns());
     }
 
     /**
