@@ -12,6 +12,7 @@ import java.nio.ByteBuffer;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.Objects;
 
 import org.opennms.plugins.prometheus.remotewriter.wal.Checkpoint;
@@ -39,9 +40,14 @@ import org.slf4j.LoggerFactory;
  * passed them. A batch whose write failed is {@linkplain #rewind(String)
  * rewound} and re-read on a later cycle, never dropped.
  *
- * <p>Not thread-safe for concurrent appends against concurrent reads by
- * design: {@link Shards} serialises appends per shard, and the reads all
- * happen on that shard's single builder thread.
+ * <p>Three threads share a bucket. {@link Shards} serialises appends per
+ * shard, so {@link #append} never runs against itself. The flusher's builder
+ * reads and its sender acknowledges and rewinds; the reader belongs to those
+ * two threads and is used under {@link #readerLock}. The pending count and
+ * the checkpoint are updated from all three sides: the count is atomic, and
+ * the checkpoint decides under its own lock whether an acknowledgement or an
+ * eviction moved it, which is what keeps the two from counting the same
+ * frame twice.
  */
 public final class OverflowBucket implements Closeable {
 
@@ -97,15 +103,29 @@ public final class OverflowBucket implements Closeable {
     private final int maxPayload;
     private final String name;
 
+    /**
+     * Owned by the flusher's threads: the builder reads it, the sender
+     * rewinds it, both under {@link #readerLock}. The append thread never
+     * touches it; an eviction only raises {@link #repositionReader}, and the
+     * builder repositions at its next read.
+     */
     private WalReader reader;
+    private final Object readerLock = new Object();
+    /** Set by an eviction on the append thread; consumed by {@link #nextBatch}. */
+    private volatile boolean repositionReader;
 
     /**
      * Samples on disk past the checkpoint. Incremented on append, reduced by
-     * what an acknowledgement covered. A rewind does not change it — those
-     * samples are still on disk, they will simply be read again. Volatile
-     * because the gauge is read from a scrape thread.
+     * what an acknowledgement covered and by what an eviction discarded that
+     * no acknowledgement had covered. A rewind does not change it. Those
+     * samples are still on disk and will simply be read again. Atomic
+     * because the append thread and the flusher's sender update it at the
+     * same time, and the gauge reads it from a scrape thread. It is an
+     * estimate while a bucket at its bound is being drained (see
+     * {@link Checkpoint#advancePastEvicted}) and re-bases to 0 at the first
+     * append into an empty bucket.
      */
-    private volatile int pending;
+    private final AtomicInteger pending = new AtomicInteger();
 
     /**
      * Offset immediately past the last appended frame, kept in step with the
@@ -141,7 +161,7 @@ public final class OverflowBucket implements Closeable {
         this.maxPayload      = maxPayload;
         this.name            = name;
         this.reader          = new WalReader(dir, checkpoint.lastSentOffset(), maxPayload);
-        this.pending         = recoveredPending;
+        this.pending.set(recoveredPending);
         this.writeOffset     = writeOffset;
         pinEvictionFloor();
         seedOldestPendingStamp();
@@ -219,75 +239,70 @@ public final class OverflowBucket implements Closeable {
     public AppendResult append(MappedSample sample, ByteBuffer frame) throws IOException {
         ByteBuffer f = frame != null ? frame : encodeFrame(sample);
         long frameBytes = f.remaining();
+        // An empty bucket holds nothing pending, whatever rounding the
+        // estimates below left behind: re-base before counting this frame.
+        if (isEmpty()) pending.set(0);
+        // Counted before the write: once the frame is on disk the builder can
+        // read it and the sender acknowledge it, and that subtraction must
+        // find the increment already there.
+        pending.incrementAndGet();
+        WalWriter.AppendResult r;
         try {
-            WalWriter.AppendResult r = writer.appendWithStats(f);
-            if (oldestPendingStamp <= 0L) oldestPendingStamp = sample.enqueuedEpochMs();
-            writeOffset = r.offsetAfter();
-            pending++;
-            if (r.evictedFrames() > 0) {
-                pending = Math.max(0, pending - r.evictedFrames());
-                repositionAfterEviction();
-            }
-            return new AppendResult(true, r.evictedFrames(), frameBytes);
+            r = writer.appendWithStats(f);
         } catch (WalFullException full) {
+            pending.decrementAndGet();
             // Under drop-oldest this only happens when a single frame cannot
             // fit the whole budget, which is a configuration error, not
             // backpressure. Either way the sample is refused; the caller
             // counts it. Any frames evicted before giving up are reported so
-            // the eviction counter stays honest.
+            // the eviction counter stays honest, and accounted for the same
+            // way as on the success path.
             if (full.evictedFramesBeforeFailure() > 0) {
+                accountEvictions(full.evictedSegmentsBeforeFailure());
                 return new AppendResult(false, full.evictedFramesBeforeFailure(), 0L);
             }
             return AppendResult.REFUSED;
+        } catch (IOException | RuntimeException e) {
+            pending.decrementAndGet();
+            throw e;
         }
+        if (oldestPendingStamp <= 0L) oldestPendingStamp = sample.enqueuedEpochMs();
+        writeOffset = r.offsetAfter();
+        if (r.evictedFrames() > 0) accountEvictions(r.evictedSegments());
+        return new AppendResult(true, r.evictedFrames(), frameBytes);
     }
 
     /**
-     * Move the checkpoint and reader past frames an eviction deleted.
+     * Take evicted frames off the pending count and move the checkpoint and
+     * reader past them.
      *
      * <p>Only reachable under {@code drop-oldest}, which can discard segments
      * the reader has not drained. Leaving the checkpoint behind the oldest
      * surviving segment would send the reader looking for frames that are no
-     * longer there.
+     * longer there. The checkpoint does the split between acknowledged and
+     * discarded frames under its own lock, so an acknowledgement racing this
+     * cannot count a frame the eviction counted too.
      */
-    private void repositionAfterEviction() throws IOException {
-        long oldest = oldestSegmentStart();
+    private void accountEvictions(List<WalWriter.EvictedSegment> evicted) {
         try {
-            // One atomic step: an acknowledgement on the flusher thread may
-            // move the checkpoint between a read and an advance here, so the
-            // checkpoint decides under its own lock whether it is behind.
-            if (checkpoint.advancePast(oldest) < 0) return;
+            Checkpoint.EvictionAccount account = checkpoint.advancePastEvicted(evicted);
+            subtractPending(account.discardedFrames());
+            if (account.movedFrom() < 0) return;
         } catch (IOException | RuntimeException e) {
             LOG.warn("{}: could not move the checkpoint past evicted segments; the reader will "
                     + "skip the hole on its next scan", name, e);
         }
         pinEvictionFloor();
-        rewind("after-eviction");
+        // The reader belongs to the flusher's threads: flag it, the builder
+        // repositions at its next read rather than this thread closing a
+        // reader that may be mid-read.
+        repositionReader = true;
         // The evicted frames may include the one the stamp described. Leaving
         // it would have overflow_oldest_pending_age_ms — the documented
         // recovery alert — report the age of data that was deliberately
         // discarded, firing precisely in the mode where dropping is the point.
         oldestPendingStamp = 0L;
         seedOldestPendingStamp();
-    }
-
-    /** Lowest start offset still on disk, or the checkpoint when none remain. */
-    private long oldestSegmentStart() throws IOException {
-        long oldest = Long.MAX_VALUE;
-        try (java.util.stream.Stream<Path> files = java.nio.file.Files.list(dir)) {
-            for (Path p : (Iterable<Path>) files::iterator) {
-                String n = p.getFileName().toString();
-                if (!n.endsWith(org.opennms.plugins.prometheus.remotewriter.wal.WalSegment.SEG_EXT)) {
-                    continue;
-                }
-                try {
-                    oldest = Math.min(oldest, Long.parseLong(n.substring(0, n.length() - 4)));
-                } catch (NumberFormatException ignored) {
-                    // Not a segment we wrote; leave it alone.
-                }
-            }
-        }
-        return oldest == Long.MAX_VALUE ? checkpoint.lastSentOffset() : oldest;
     }
 
     /** True while the bucket is below its size bound. */
@@ -297,7 +312,14 @@ public final class OverflowBucket implements Closeable {
 
     /** Read up to {@code maxSamples} unacknowledged samples, decoded. */
     public Batch nextBatch(int maxSamples) throws IOException {
-        ReadResult read = reader.nextBatch(maxSamples);
+        ReadResult read;
+        synchronized (readerLock) {
+            if (repositionReader) {
+                repositionReader = false;
+                rewindLocked("after-eviction");
+            }
+            read = reader.nextBatch(maxSamples);
+        }
         if (read.isEmpty()) {
             return new Batch(List.of(), read.newOffset(), read.corruptedFramesSkipped());
         }
@@ -342,7 +364,7 @@ public final class OverflowBucket implements Closeable {
      * tick any counter for a batch whose acknowledgement did not persist.
      *
      * @param samplesAcked how many samples the batch held, to take off the
-     *                     pending depth
+     *                     pending depth unless an eviction already did
      * @return bytes newly checkpointed (0 when a drop-oldest eviction had
      *         already moved the checkpoint past the batch), or -1 when the
      *         advance failed
@@ -364,7 +386,10 @@ public final class OverflowBucket implements Closeable {
             rewind("advance-fail");
             return -1L;
         }
-        pending = Math.max(0, pending - samplesAcked);
+        // An eviction that moved the checkpoint past this batch discarded its
+        // frames from the count already; subtracting them again would drift
+        // the gauge low by a batch per eviction while draining at the bound.
+        if (previousOffset >= 0) subtractPending(samplesAcked);
         // The stamp still describes the batch just acknowledged. Clear it so
         // the next read sets it from what is actually oldest; until then the
         // gauge reports 0 rather than something too old, which is the safer
@@ -402,6 +427,12 @@ public final class OverflowBucket implements Closeable {
      * segments the reset reader is about to scan.
      */
     public void rewind(String reason) {
+        synchronized (readerLock) {
+            rewindLocked(reason);
+        }
+    }
+
+    private void rewindLocked(String reason) {
         long offset = checkpoint.lastSentOffset();
         pinEvictionFloor();
         try {
@@ -423,10 +454,19 @@ public final class OverflowBucket implements Closeable {
         return writeOffset == checkpoint.lastSentOffset();
     }
 
-    /** Count of samples on disk past the checkpoint. */
+    /** Count of samples on disk past the checkpoint; see {@link #pending}. */
     public int pendingSamples() {
         if (isEmpty()) return 0;
-        return Math.max(0, pending);
+        return Math.max(0, pending.get());
+    }
+
+    /** The raw count behind {@link #pendingSamples()}, for tests. */
+    int pendingCount() {
+        return pending.get();
+    }
+
+    private void subtractPending(int n) {
+        if (n > 0) pending.updateAndGet(p -> Math.max(0, p - n));
     }
 
     /**
@@ -457,10 +497,12 @@ public final class OverflowBucket implements Closeable {
 
     @Override
     public void close() {
-        try {
-            reader.close();
-        } catch (IOException e) {
-            LOG.debug("{}: reader close: {}", name, e.getMessage());
+        synchronized (readerLock) {
+            try {
+                reader.close();
+            } catch (IOException e) {
+                LOG.debug("{}: reader close: {}", name, e.getMessage());
+            }
         }
         try {
             writer.close();

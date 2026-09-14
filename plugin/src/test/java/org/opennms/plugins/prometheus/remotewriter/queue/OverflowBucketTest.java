@@ -211,6 +211,40 @@ class OverflowBucketTest {
     }
 
     @Test
+    void a_batch_an_eviction_overtook_in_flight_is_not_subtracted_again_when_acknowledged(@TempDir Path dir)
+            throws IOException {
+        // The builder has read a batch; before the sender acknowledges it,
+        // appends at the bound evict the segments holding it and move the
+        // checkpoint past it. The eviction took its frames off the count; the
+        // acknowledgement must not take them off a second time (#214).
+        try (OverflowBucket b = open(dir, 8 * 1024, 1024, OverflowBucket.FullPolicy.DROP_OLDEST)) {
+            for (int i = 0; i < 20; i++) b.append(sample(i));
+            OverflowBucket.Batch inFlight = b.nextBatch(5);
+            assertThat(inFlight.size()).isEqualTo(5);
+
+            int evicted = 0;
+            for (int i = 20; i < 500; i++) evicted += b.append(sample(i)).evictedSamples();
+            assertThat(evicted).isPositive();
+
+            int before = b.pendingCount();
+            assertThat(b.acknowledge(inFlight.newOffset(), inFlight.size()))
+                    .as("already covered by the eviction, nothing newly checkpointed").isZero();
+            assertThat(b.pendingCount()).isEqualTo(before);
+            // Ground truth: what a full drain from the checkpoint reads back.
+            assertThat(b.pendingCount()).as("samples on disk past the checkpoint").isEqualTo(drain(b));
+        }
+    }
+
+    /** Read everything past the checkpoint without acknowledging it. */
+    private static int drain(OverflowBucket b) throws IOException {
+        int n = 0;
+        for (OverflowBucket.Batch batch = b.nextBatch(100); !batch.isEmpty(); batch = b.nextBatch(100)) {
+            n += batch.size();
+        }
+        return n;
+    }
+
+    @Test
     void a_bucket_evicted_out_from_under_its_reader_stays_readable(@TempDir Path dir)
             throws IOException {
         // Eviction under drop-oldest can delete frames the reader has not

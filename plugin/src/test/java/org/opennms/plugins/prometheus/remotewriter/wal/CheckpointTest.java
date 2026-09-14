@@ -13,6 +13,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
+import java.util.List;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -218,5 +219,32 @@ class CheckpointTest {
         // state visible).
         Checkpoint reloaded = Checkpoint.loadOrCreate(dir);
         assertThat(reloaded.lastSentOffset()).isEqualTo(cp.lastSentOffset());
+    }
+
+    @Test
+    void evicted_segments_are_discarded_only_past_the_checkpoint(@TempDir Path dir) throws IOException {
+        Checkpoint cp = Checkpoint.loadOrCreate(dir);
+        cp.advance(1000);
+        Checkpoint.EvictionAccount account = cp.advancePastEvicted(List.of(
+                new WalWriter.EvictedSegment(0, 800, 800, 5),      // acknowledged in full: not discarded
+                new WalWriter.EvictedSegment(800, 1000, 200, 3),   // ends at the checkpoint: not discarded
+                new WalWriter.EvictedSegment(1000, 1500, 500, 7),  // starts at the checkpoint: discarded whole
+                new WalWriter.EvictedSegment(1500, 1900, 400, 10)));
+        assertThat(account.discardedFrames()).isEqualTo(17);
+        assertThat(account.movedFrom()).isEqualTo(1000);
+        assertThat(cp.lastSentOffset()).isEqualTo(1900);
+
+        // A segment the checkpoint sits inside is apportioned by bytes:
+        // three of its four quarters are past the checkpoint.
+        cp.advance(2000);
+        account = cp.advancePastEvicted(List.of(new WalWriter.EvictedSegment(1900, 2300, 400, 8)));
+        assertThat(account.discardedFrames()).isEqualTo(6);
+        assertThat(cp.lastSentOffset()).isEqualTo(2300);
+
+        // Everything already covered: nothing discarded and the checkpoint stays.
+        account = cp.advancePastEvicted(List.of(new WalWriter.EvictedSegment(0, 2300, 2300, 40)));
+        assertThat(account.discardedFrames()).isZero();
+        assertThat(account.movedFrom()).isEqualTo(-1L);
+        assertThat(cp.lastSentOffset()).isEqualTo(2300);
     }
 }

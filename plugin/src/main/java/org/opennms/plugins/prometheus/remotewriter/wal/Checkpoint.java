@@ -131,6 +131,43 @@ public final class Checkpoint {
         return previous;
     }
 
+    /**
+     * Account for segments a drop-oldest eviction deleted and move the
+     * checkpoint past them, in one step under the lock {@link #advancePast}
+     * takes. An acknowledgement and an eviction thereby agree on which of
+     * them counted a frame: a segment that ends at or before the checkpoint
+     * was covered by the acknowledgement that moved it there and is not
+     * discarded; a segment that starts at or past the checkpoint is
+     * discarded whole; a segment the checkpoint sits inside is apportioned
+     * by bytes, because the index holds one sample count per segment and
+     * not per frame.
+     *
+     * @return how many frames were discarded and the offset the checkpoint
+     *         moved from, or -1 when it was already past every segment
+     */
+    public synchronized EvictionAccount advancePastEvicted(List<WalWriter.EvictedSegment> evicted)
+            throws IOException {
+        int discarded = 0;
+        long evictedUpTo = -1L;
+        for (WalWriter.EvictedSegment e : evicted) {
+            evictedUpTo = Math.max(evictedUpTo, e.endOffset());
+            if (e.endOffset() <= lastSentOffset) continue;
+            if (e.startOffset() >= lastSentOffset) {
+                discarded += e.samples();
+            } else {
+                long span = e.endOffset() - e.startOffset();
+                long past = e.endOffset() - lastSentOffset;
+                discarded += (int) Math.round(e.samples() * (double) past / span);
+            }
+        }
+        long movedFrom = evictedUpTo < 0 ? -1L : advancePast(evictedUpTo);
+        return new EvictionAccount(discarded, movedFrom);
+    }
+
+    /** What {@link #advancePastEvicted} found: frames no acknowledgement had
+     *  covered, and the offset the checkpoint moved from (-1 if it stayed). */
+    public record EvictionAccount(int discardedFrames, long movedFrom) {}
+
     public synchronized long lastSentOffset() { return lastSentOffset; }
     public synchronized Instant lastSentAt() { return lastSentAt; }
 
@@ -168,7 +205,7 @@ public final class Checkpoint {
             if (s >= newest) continue; // belt-and-braces
             Path segPath = WalSegment.segPathFor(dir, s);
             Path idxPath = WalSegment.idxPathFor(dir, s);
-            long size = Files.exists(segPath) ? Files.size(segPath) : 0L;
+            long size = FsUtils.sizeOrZero(segPath);
             long endOffset = s + size;
             if (endOffset <= checkpointOffset) {
                 // Counted only if this delete removed it: a drop-oldest
