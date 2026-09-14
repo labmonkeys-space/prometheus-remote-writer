@@ -19,7 +19,7 @@ and prints them through the Karaf shell command
 | `samples_dropped_transport_total`          | IOException / socket failures (distinct from 5xx so you can alert separately).
 | `samples_unconfirmed_by_receiver_total`    | Samples in requests the backend answered 2xx while its own `X-Prometheus-Remote-Write-Samples-Written` header reported writing fewer. Remote Write 2.0 forbids a 2xx on a partial write, so a non-zero value means the backend contradicted its acknowledgement and some of those samples may be missing there; a WARN names the counts. The samples are already in `samples_written_total`, so this is not a term of the reconciliation identity. A backend that does not send the header never moves it.
 | `samples_dropped_queue_full_total`         | Samples refused because the in-memory queue was full and no disk tier was configured to take them. Only ever non-zero with `overflow.max-size-bytes = 0`: with a disk tier a full queue spills instead of refusing, and refusals appear in `samples_dropped_overflow_full_total`. Counted in samples per refused `store()` attempt: under `queue.store-policy = partial` each refused sample, under `all-or-nothing` every mapped sample of a refused call. With Horizon's default ring-buffer writer, which does not retry, this is the number of samples lost. The offheap writer retries the whole call, so its retries are counted again. Earlier releases counted one per failed call.
-| `samples_spilled_total`                    | Samples written to a shard's disk bucket because its memory queue had no room. Includes the whole memory backlog moved at the transition into spilling, so the first spill of a burst adds up to `queue.capacity / writer.shards` at once, not 1.
+| `samples_spilled_total`                    | Samples written to a shard's disk bucket because its memory queue had no room. Includes the whole memory backlog moved at the transition into spilling, plus up to two in-flight batches, so the first spill of a burst adds up to `queue.capacity / writer.shards + 2 × batch.size` at once, not 1.
 | `samples_drained_from_overflow_total`      | Samples read back off a bucket and accepted by the backend. Over a quiet period `rate(samples_spilled_total) - rate(samples_drained_from_overflow_total)` is how fast the tier is filling or draining.
 | `samples_dropped_overflow_full_total`      | Samples refused because a shard's memory queue and its bucket were both full, under `overflow.full = refuse`. These are lost, and `store()` threw for the call carrying them.
 | `samples_evicted_overflow_total`           | Samples discarded by evicting a bucket's oldest segment under `overflow.full = drop-oldest`. The newest data is kept at the cost of the oldest; the segment is the eviction unit, so this moves in steps rather than one at a time.
@@ -59,7 +59,9 @@ See <<overflow-caller-cost,What an outage costs the writer threads>> for why a s
 | Gauge                              | What it shows
 
 | `queue_depth_high_water`                   | Maximum `queue_depth` observed since activation. Shows a queue that fills and empties between two reads of `queue_depth`.
-| `queue_depth`                      | Current in-memory queue occupancy, summed over shards. Reads 0 for any shard that is spilling, since a shard's memory queue is empty while its bucket is non-empty.
+| `queue_depth`                      | Current in-memory queue occupancy, summed over shards. Under `overflow.drain = ordered` it reads 0 for any shard that is spilling, since a shard's memory queue is empty while its bucket is non-empty.
+| `shard_<i>_queue_depth`            | The same per shard. Registered only when `writer.shards > 1`; hash skew fills one shard while its siblings idle, and the total hides that.
+| `shard_skew_pct`                   | Load of the fullest shard relative to an even split, in percent. Registered only when `writer.shards > 1`; 100 is balanced, `N × 100` is everything on one shard. See <<operations-tuning-shards,Tuning `writer.shards`>>.
 | `overflow_pending_samples`         | Samples on disk past the checkpoint, summed over shards — the backlog a backend outage has built up. Divided by the drain rate, this is how long recovery will take.
 | `overflow_pending_samples_shard_<i>` | The same per shard. Registered for every shard when a disk tier is configured, because hash skew fills one bucket while its siblings idle, and the total hides that.
 | `overflow_bytes`                   | Bytes every shard's bucket occupies on disk. Against `overflow.max-size-bytes` this is how much outage headroom is left.
@@ -93,7 +95,14 @@ See <<overflow-caller-cost,What an outage costs the writer threads>> for why a s
 | `metadata_attrs_dropped_total`     | Attributes past `metadata.attr-budget`, per emission. A steadily rising value names a resource type whose attributes outgrow the budget.
 | `metadata_resources`               | Gauge: resources the write path currently remembers metadata for.
 | `find_metrics_enrichment_batches_total` | Metadata queries `findMetrics` issued to restore attributes from the rows and the speed from the gauge, two per `read.discovery-batch-size` resources.
+| `find_metrics_single_pass_total`   | `findMetrics` calls that discovered resources with one `GET /api/v1/series` (the `single-pass` strategy, or a matcher shape that stays on it).
+| `find_metrics_two_phase_total`     | `findMetrics` calls that took the `label-values-first` path: `resourceId` values enumerated first, then batched series queries.
+| `find_metrics_phase2_batches_total` | Phase-2 series queries issued on the two-phase path. Divided by `find_metrics_two_phase_total` it is the average batches per call; tune `read.discovery-batch-size` against it.
 | `wal_replay_samples_total`         | Samples recovered from the disk tier at startup, summed over shards. They ship before anything offered after the restart. Approximate by a few samples either way — it sums the per-segment index counts, which over-count a segment spanning the checkpoint and under-count one whose index lagged its last append. Read it as "recovery found work", not as an accounting input; it is deliberately not a term in the reconciliation identity.
+| `wal_bytes_written_total`          | Bytes appended to the shards' disk buckets, frames and headers included. With `overflow_bytes` and `overflow_pending_samples` this is the on-disk cost of a spill.
+| `wal_bytes_checkpointed_total`     | Bytes the checkpoint has advanced past, that is, acknowledged by the backend or skipped after a 4xx, and so released for reclaim.
+| `wal_batches_dropped_4xx_total`    | Disk batches the backend answered with 4xx. The checkpoint advances past them, since the backend will never take them; the sample count is in `samples_dropped_4xx_total`.
+| `wal_frames_dropped_corrupted_total` | Frames skipped as corrupt while a bucket was read for sending. Each skip is logged at WARN. A torn tail truncated at startup recovery is not counted here.
 |===
 
 == Recommended alerts
@@ -105,7 +114,7 @@ These are starting points — tune to your deployment's noise floor.
 | Alert idea                                              | Sketch
 
 | Drop rate jumps                                         | `rate(samples_dropped_5xx_total[5m]) + rate(samples_dropped_transport_total[5m]) > 0` for 10m
-| Disk tier filling up                                    | `overflow_bytes / on() (overflow_max_size_bytes_constant) > 0.8` for 15m
+| Disk tier filling up                                    | `overflow_bytes > 0.8 * 4294967296` for 15m. The budget is not exported; substitute your configured `overflow.max-size-bytes` for the literal.
 | Spilling at all                                         | `rate(samples_spilled_total[5m]) > 0` for 15m — the backend has not kept up for a quarter of an hour
 | Recovery falling behind the budget                      | `overflow_oldest_pending_age_ms > 300000` for 10m — the oldest unwritten sample is more than five minutes old
 | Queue full (no-WAL deployments)                         | `rate(samples_dropped_queue_full_total[5m]) > 0`
@@ -115,9 +124,10 @@ These are starting points — tune to your deployment's noise floor.
 | TLS skip-verify left on in production                   | log-based — the plugin emits a WARN every hour
 |===
 
+[#operations-tuning-shards]
 == Tuning `writer.shards`
 
-The default (`1`) is the classic serialized pipeline. Raise it when the
+The default is `4`; `1` is the classic serialized pipeline. Raise it when the
 queue depth grows under bursty collection while the backend is healthy —
 the signature of the single-flusher throughput ceiling — or when one
 slow batch visibly stalls the drain.
@@ -191,11 +201,9 @@ log4j2.logger.prw.level = INFO
 |===
 | Level | What you see
 
-| `INFO`  | Plugin lifecycle (start / stop), config-change diff, the `write path:` line naming the resolved shards, queue, batch, linger and overflow settings, overflow bucket recovery at start (`shard N: recovered ... pending sample(s)`), a bucket draining back to empty (`overflow bucket is empty again`), `wire.protocol-version=2` startup WARN message.
-| `WARN`  | 4xx response bodies (truncated), `instance.id` unset on startup, unknown `labels.copy` source, WAL torn-tail truncation, `tls.insecure-skip-verify=true` reminder, a shard starting to spill to disk (`shard N is spilling to disk`), an overflow drain that waited its full bound for the sender (`the overflow drain waited ...`). That last line is expected while a write is retrying against a slow backend. It points at a stuck drain only when `http_writes_successful_total` and the dropped-write counters are all flat.
-| `DEBUG` | Per-batch flush results, retry timing, label-pipeline
-            diff for the first sample after a config reload. Verbose —
-            use sparingly.
+| `INFO`  | Plugin lifecycle (start / stop), config-change diff, the `write path:` line naming the resolved shards, queue, batch, linger and overflow settings, overflow bucket recovery at start (`shard N: recovered ... pending sample(s)`), a bucket draining back to empty (`overflow bucket is empty again`).
+| `WARN`  | 4xx response bodies (truncated), 5xx retries with their backoff, `instance.id` unset on startup, an unknown `labels.copy` source (once, when the first sample lacks it), a corrupt frame skipped while a bucket is read, the `wire.protocol-version=2` startup line, `tls.insecure-skip-verify=true` reminder, a shard starting to spill to disk (`shard N is spilling to disk`), an overflow drain that waited its full bound for the sender (`the overflow drain waited ...`). That last line is expected while a write is retrying against a slow backend. It points at a stuck drain only when `http_writes_successful_total` and the dropped-write counters are all flat. A torn tail truncated at startup recovery is not logged.
+| `DEBUG` | Per-batch flush results. Verbose; use sparingly.
 |===
 
 == The disk overflow tier
@@ -249,9 +257,9 @@ deployment.
 |===
 | Sample rate           | Settings                                  | Notes
 
-| < 5k samples/sec      | defaults                                  | `queue.capacity = 10000` and the default 4 GiB tier are plenty.
-| 5k–25k samples/sec    | `queue.capacity = 50000`, `batch.size = 2000`, `http.max-connections = 32` | Raise `overflow.max-size-bytes` if you want the same outage window at the higher rate.
-| 25k+ samples/sec      | `writer.shards = 4`, `queue.capacity = 40000`, `batch.size = 1000`, `batch.linger-ms = 100` | Single-process Karaf is the bottleneck before the wire. Size the tier from the outage window you actually want, not from a round number.
+| < 5k samples/sec      | defaults                                  | The shipped defaults (`writer.shards = 4`, `queue.capacity = 40000`, `batch.size = 1000`, `batch.linger-ms = 100`) and the 4 GiB tier are plenty; `writer.shards = 1` would also do.
+| 5k–25k samples/sec    | defaults                                  | Still within the defaults. Raise `overflow.max-size-bytes` if you want the same outage window at the higher rate.
+| 25k+ samples/sec      | defaults, then `queue.capacity = 50000`, `batch.size = 2000`, `http.max-connections = 32` if `queue_depth_high_water` approaches a shard's slice | The defaults were measured at 64k samples/sec on an 11,000-device fleet (see <<overflow-sizing,Sizing the disk tier>>). Single-process Karaf is the bottleneck before the wire. Size the tier from the outage window you actually want, not from a round number.
 |===
 
 The metadata series add about `resources × 6 ÷ cadence in seconds` samples per second (about 1,500 for 220,000 resources at the default 15 minutes) and, more importantly, about six series per resource on the backend; see <<resource-metadata>> for the arithmetic and the backend limits to check.

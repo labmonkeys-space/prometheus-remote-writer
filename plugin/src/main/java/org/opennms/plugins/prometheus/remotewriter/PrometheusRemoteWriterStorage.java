@@ -745,7 +745,8 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
                 && WIRE_V2_WARNED.compareAndSet(false, true)) {
             WIRE_V2_WARN_COUNT.incrementAndGet();
             LOG.warn("PrometheusRemoteWriter: wire.protocol-version=2 is set. "
-                   + "Requires a v2-capable backend: Prometheus 2.50+, Mimir 2.10+, "
+                   + "Requires a v2-capable backend: Prometheus 2.55+ (3.0+ recommended; "
+                   + "2.50 to 2.54 ship an experimental receiver that can drop v2 payloads), Mimir 2.10+, "
                    + "VictoriaMetrics with v2 ingest enabled, Grafana Cloud, or "
                    + "equivalent. Older backends will return 4xx and the batch is "
                    + "dropped (see samples_dropped_4xx_total). Verify backend "

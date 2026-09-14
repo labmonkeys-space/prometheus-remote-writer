@@ -67,11 +67,11 @@ Core and use the rest of this guide.
 [cols="2,1,1,2",options="header"]
 |===
 | Backend                  | Remote Write v1 | Remote Write v2 | Notes
-| Prometheus 3.x           | ✅              | ✅              | v2 receiver default-enabled; covered by Testcontainers IT
+| Prometheus 3.x           | ✅              | ✅              | Receiver still needs `--web.enable-remote-write-receiver`; once enabled, v2 is accepted by default. Covered by Testcontainers IT (v1 on 2.53.2, v2 on 3.0.1) and the e2e smoke (v1 on 3.14.0)
 | Prometheus 2.55+         | ✅              | ✅              | Receiver must be enabled with `--web.enable-remote-write-receiver`
 | Prometheus 2.50–2.54     | ✅              | ⚠ silently drops | Stay on v1 — see <<wire-protocols>>
-| Grafana Mimir 2.10+      | ✅              | ✅              | Covered by e2e smoke
-| VictoriaMetrics          | ✅              | ✅ (with v2 ingest) | Covered by e2e smoke
+| Grafana Mimir 2.10+      | ✅              | ✅              | e2e smoke covers v1; v2 is accepted by the backend but not exercised in CI
+| VictoriaMetrics          | ✅              | ✅ (with v2 ingest) | e2e smoke covers v1; v2 is accepted by the backend but not exercised in CI
 | Cortex                   | ✅              | ✅              | Compatible — not in CI
 | Thanos Receive           | ✅              | ✅              | Compatible — not in CI
 | Grafana Cloud            | ✅              | ✅              | Compatible — not in CI
@@ -90,5 +90,3 @@ specifications:
   `prompb/types.proto`, Apache 2.0 upstream)
 * Sanitization rules from `prometheus/common` (Apache 2.0 upstream)
 
-The normative requirement set lives in the project's `tss-plugin` spec
-under `openspec/specs/tss-plugin/spec.md`.

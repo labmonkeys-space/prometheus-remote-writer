@@ -26,6 +26,7 @@ rate(ifHCInOctets[5m]) * 8
 count by (node_label) ({__name__=~".+"})
 ----
 
-`node_label`, `location` and `if_name` appear when the matching core metatags are configured (see <<configuration>>); the identity labels `node`, `resource_type`, `resource_instance`, `job` and `instance` are always present.
+`node_label`, `location` and `if_name` appear when the matching core metatags are configured (see <<configuration>>).
+`job` is always present; `node`, `instance`, `resource_type` and `resource_instance` are present when the `resourceId` parses or the node identity is known (see <<label-mapping>>).
 The metadata series are emitted every 15 minutes, so the right-hand side of a join is always a `last_over_time` over twice that.
 The full label set is described in <<label-mapping>>; the metadata series, the join idioms and the duplicate-match caveat after an alias change are in <<resource-metadata>>.

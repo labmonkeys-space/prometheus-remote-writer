@@ -49,6 +49,7 @@ onms_resource_ifspeed{resourceId="…"} 1000000000
 
 | `onms_resource_category{resourceId, category} 1`
 | One row per surveillance category, when OpenNMS exposes them (`org.opennms.timeseries.tin.metatags.exposeCategories = true`).
+  Emitted for every resource of the node that carries the `categories` tag, interfaces included.
   Set membership is an exact match: `onms_resource_category{category="Production"}`.
 
 | `onms_resource_info{resourceId, <columns>} 1`
@@ -89,7 +90,7 @@ Each emission is one sample per row, category, column series and speed gauge, ab
 | Key | Default | Purpose
 
 | `metadata.cadence-ms` | `900000` (15 min) | How often an unchanged resource's series are re-emitted. New or changed metadata goes out at once. `0` switches the metadata series off; OpenNMS graph placeholders then no longer resolve, since the read path restores attributes from the rows.
-| `metadata.attr-budget` | `16` | Attributes per resource emitted as rows, lowest keys first. An SNMP interface carries about eight; the budget only bites on JMX beans with dozens of properties.
+| `metadata.attr-budget` | `16` | Attributes per resource emitted as rows, lowest keys first. An SNMP interface carries about four to six; the budget only bites on JMX beans with dozens of properties.
 | `metadata.info-columns` | `if_alias=ifAlias, if_descr=ifDescr, resource_name=name, hr_storage_descr=hrStorageDescr, dsk_path=dskPath, datname=datname, spcname=spcname` | Comma-separated `column=key` entries: the column is the label name on `onms_resource_info`, the key the OpenNMS attribute it is read from. Empty means no info series.
 |===
 
@@ -230,13 +231,14 @@ And on VictoriaMetrics this is the one path that does require `vmalert`, since G
 OpenNMS resolves graph placeholders (`${ifAlias}`, `${hrStorageDescr}`, `${name}`, …) from the string attributes on the `Metric` objects that `findMetrics` returns.
 The plugin restores them from the rows: after discovery, one `POST /api/v1/query` per batch of `read.discovery-batch-size` resources, never one per metric, asks for every `onms_resource_attr` and `onms_resource_category` row of those resources inside the last 24 hours (never less than two cadences), scoped to `instance.id` when set.
 A second query per batch reads `onms_resource_ifspeed` over the same window, and the plugin deposits the two strings OpenNMS's SNMP collector would have stored, `ifHighSpeed` (the gauge in whole Mbit/s) and `ifSpeed` (the gauge capped at 4,294,967,295): the interface utilisation reports OpenNMS ships (`mib2.traffic`, `mib2.traffic-inout`, `mib2.HCtraffic-inout`) dereference `{ifSpeed}` and `{ifHighSpeed}`, and the gauge stays the only wire form of the speed.
-Both queries count against the cap of 100 calls per `findMetrics`.
+Both queries count against enrichment's own cap of 100 calls per `findMetrics`.
 Each row comes back valued with its newest sample time, so after a rename the resource's newest emission wins; rows within half a cadence of the newest stamp count as one emission, and the newest row per key wins.
 A removed attribute or category therefore lingers until the next cadence emission.
 
 Enrichment is best effort.
 A failed or malformed metadata query is logged (at most once a minute) and the metrics of that batch go back without attributes; a resource listing never fails because its aliases could not be read.
-More than 100 batches in one call skips enrichment rather than issuing them.
+More than 50 batches in one call, that is more than 100 calls at two per batch, skips enrichment rather than issuing them.
+That cap is enrichment's own; the two-phase discovery path has a separate cap of 100 phase-2 calls.
 `find_metrics_enrichment_batches_total` counts the queries, two per batch.
 
 Two things to know about the window.
@@ -257,8 +259,8 @@ Substitute real figures before committing to limits.
 | resources | ~220,000 |
 | data series | ~3,300,000 | unchanged by this design
 | `onms_resource_info` | ~220,000 | one per resource with a column value
-| `onms_resource_attr` | ~880,000 | at 4 attributes per resource (`ifName`, `ifDescr`, `ifAlias` and one more; the node identity is not a row)
-| `onms_resource_category` | ~ resources × categories | node-level resources only, in practice
+| `onms_resource_attr` | ~880,000 to ~1,300,000 | at about four to six attributes per resource (`ifName`, `ifDescr`, `ifAlias`, `nodeId` and the like; the node identity labels are not rows)
+| `onms_resource_category` | ~ resources × categories | every resource of a node that carries the `categories` tag, interfaces included
 |===
 
 Series count is the number to watch, and `metadata.attr-budget` controls it directly.

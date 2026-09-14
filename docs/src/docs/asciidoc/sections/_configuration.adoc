@@ -1,10 +1,8 @@
 [#configuration]
 = Configuration reference
 
-All knobs live in `{cfg-file}` (Karaf ConfigAdmin PID `{cfg-pid}`) and
-take effect on the next flush cycle — no OpenNMS restart required, except
-where noted (typically wire-format and validator changes that require
-bundle restart).
+All knobs live in `{cfg-file}` (Karaf ConfigAdmin PID `{cfg-pid}`).
+Every key hot-reloads: a save rebuilds the plugin's Blueprint container, so the change takes effect on the next flush cycle with no OpenNMS restart and no bundle restart.
 
 == Endpoint and authentication
 
@@ -13,7 +11,7 @@ bundle restart).
 | Key                          | Default | Purpose
 
 | `write.url`                  | _(required)_ | Remote Write v1/v2 ingest URL.
-| `read.url`                   | _(required for read path)_ | Prometheus-compatible HTTP API root. The plugin appends `/api/v1/series` and `/api/v1/query_range` — do not include `/api/v1` here.
+| `read.url`                   | _(required for read path)_ | Prometheus-compatible HTTP API root. The plugin appends `/api/v1/series`, `/api/v1/query`, `/api/v1/query_range` and `/api/v1/label/resourceId/values`. Do not include `/api/v1` here.
 | `instance.id`                | _(unset)_ | Stamps every sample with `onms_instance_id="<value>"`. Required for multi-instance deployments sharing a backend.
 | `job.name`                   | _(unset)_ | Override the per-sample `job` derivation with a fleet-wide constant.
 | `tenant.org-id`              | _(unset)_ | Sets the `X-Scope-OrgID` header. Cortex/Mimir/VictoriaMetrics-cluster/Thanos partition by this.
@@ -22,7 +20,7 @@ bundle restart).
 | `auth.bearer.token`          | _(unset)_ | Bearer auth. Produces the same header as `auth.authorization.type = Bearer`; the two cannot both be set.
 | `auth.authorization.type`    | _(unset)_ | Scheme keyword of a custom `Authorization` header, e.g. `Token` or `ApiKey`. Trimmed; casing preserved; no allowlist. Must be a single HTTP token. `Basic` is rejected. **Required** whenever credentials are set — there is no default scheme.
 | `auth.authorization.credentials` | _(unset)_ | Credentials half of the custom `Authorization` header. Required whenever the block is used.
-| `tls.ca-file`                | _(unset)_ | PEM bundle to trust in addition to / in place of the JDK truststore.
+| `tls.ca-file`                | _(unset)_ | PEM bundle to trust. When set it replaces the JDK truststore as the only trust anchor; unset, the JDK truststore applies.
 | `tls.insecure-skip-verify`   | `false`   | Disables hostname and certificate verification. Logs WARN on startup and every hour.
 |===
 
@@ -101,7 +99,7 @@ if that is what your backend accepts, it fits.
 You do not have to write secrets into `{cfg-file}`. Karaf resolves two
 placeholder forms in configuration values before the plugin ever sees them,
 and both are available with no container reconfiguration. Verified on OpenNMS
-Horizon 36.0.3 (Karaf 4.4.x).
+Horizon 36.0.4 (Karaf 4.4.x).
 
 The two forms are different mechanisms, which is why their syntax differs.
 `${env:NAME}` is substituted when Karaf reads the `.cfg` file, before any key
@@ -266,7 +264,7 @@ and a full queue refuses, which is how the plugin behaved before 0.8.0.
 | `http.connect-timeout-ms`    | `5000`  | Socket connect timeout.
 | `http.read-timeout-ms`       | `30000` | Response read timeout.
 | `http.write-timeout-ms`      | `30000` | Request write timeout.
-| `http.max-connections`       | `16`    | Per-route OkHttp connection pool size.
+| `http.max-connections`       | `16`    | Concurrent-request ceiling of the OkHttp client: sets the dispatcher's `maxRequests` and `maxRequestsPerHost`, and the connection pool's idle-connection maximum.
 |===
 
 [#custom-http-headers]
@@ -413,7 +411,7 @@ here as a missing entry; check the log immediately after activation.
 
 | `max-series-lookback-seconds`| `7776000` (90 d) | `findMetrics` lookback when no time window is supplied.
 | `read.discovery-strategy`    | `single-pass` | Resource-discovery flow for `findMetrics`. `single-pass` issues one `GET /api/v1/series` per call. `label-values-first` opts into a two-phase path that enumerates `resourceId` values via `/api/v1/label/resourceId/values` first, then issues batched series queries with exact-match alternation. Under either strategy the result is then enriched from the metadata rows. See <<resource-discovery>>.
-| `read.discovery-batch-size`  | `50`    | Maximum `resourceId` values exact-match-alternated into one selector: the phase-2 selector under `label-values-first`, and the metadata enrichment query under either strategy (see <<metadata-read-path>>). Bounds `[1, 200]`. Default 50 is comfortably below the typical 8 KiB HTTP request-line cap for the phase-2 GET; the upper bound 200 holds at ~30 KiB worst case (fits cloud LB defaults; safe ceiling above default nginx / Mimir 8 KiB limits). The enrichment query is a POST and not bound by the request line.
+| `read.discovery-batch-size`  | `50`    | Maximum `resourceId` values exact-match-alternated into one selector: the phase-2 selector under `label-values-first`, and the metadata enrichment queries under either strategy (see <<metadata-read-path>>). Bounds `[1, 200]`. Default 50 is comfortably below the typical 8 KiB HTTP request-line cap for the phase-2 GET; the upper bound 200 holds at ~30 KiB worst case (fits cloud LB defaults; safe ceiling above default nginx / Mimir 8 KiB limits). Enrichment issues two `POST /api/v1/query` per batch and is skipped altogether above 50 batches (100 calls) in one `findMetrics`; a POST is not bound by the request line.
 |===
 
 [#resource-discovery]
@@ -470,11 +468,14 @@ correctly under your `match[]` shape.
 
 ==== Enrichment from the metadata rows
 
-Whichever strategy found the metrics, `findMetrics` then restores each
-resource's string attributes and categories from the `onms_resource_attr`
-and `onms_resource_category` rows, one `POST /api/v1/query` per
-`read.discovery-batch-size` resources, best effort. See
-<<metadata-read-path>>.
+Whichever strategy found the metrics, `findMetrics` then enriches each
+resource from the metadata series, two `POST /api/v1/query` per
+`read.discovery-batch-size` resources, best effort.
+The first query reads the `onms_resource_ifspeed` gauge and deposits `ifSpeed` and `ifHighSpeed` derived from it.
+The second reads the `onms_resource_attr` and `onms_resource_category` rows and restores the string attributes and categories.
+`nodeLabel`, `foreignSource`, `foreignId` and `location` come back from the data series' labels instead.
+Enrichment is skipped when a call would need more than 50 batches (100 queries); that cap is separate from the two-phase discovery cap of 100 phase-2 calls.
+See <<metadata-read-path>>.
 
 == Label policy
 
@@ -483,10 +484,10 @@ and `onms_resource_category` rows, one `POST /api/v1/query` per
 | Key                          | Default | Purpose
 
 | `labels.include`             | _(empty)_ | Glob list of source-tag keys to surface as labels in addition to the default allowlist. Snake-cased on the wire. See <<label-mapping>>.
-| `labels.exclude`             | _(empty)_ | Default labels to drop. Comma-separated label names.
+| `labels.exclude`             | _(empty)_ | Default labels to drop. Comma-separated glob list of label names. `resourceId` cannot be excluded; it is the join key of every metadata series.
 | `labels.rename`              | _(empty)_ | Rename a label. Comma-separated `from -> to` pairs.
 | `labels.copy`                | _(empty)_ | Add a second name for a label. Comma-separated `from -> to` pairs.
-| `metric.prefix`              | _(empty)_ | Prefix added to every metric name on the wire (sanitized).
+| `metric.prefix`              | _(empty)_ | Prefix added to every data-series metric name on the wire (sanitized). The `onms_resource_*` metadata series are never prefixed.
 |===
 
 NOTE: Pipeline order is `defaults → exclude → include → copy → rename →
@@ -525,7 +526,7 @@ OpenNMS metadata is opt-in only. The built-in denylist always applies.
 | `metadata.include`           | _(empty)_ | Glob list of `<context>:<key>` patterns to surface.
 | `metadata.exclude`           | _(empty)_ | Glob list to subtract from `metadata.include`.
 | `metadata.label-prefix`      | `onms_meta_` | Prefix applied to emitted metadata labels.
-| `metadata.case`              | `preserve` | `preserve` / `lower` / `upper`.
+| `metadata.case`              | `preserve` | `preserve` / `snake_case`. Any other value is rejected.
 |===
 
 WARNING: Metadata is an open KV store; operators put credentials in there
@@ -636,7 +637,3 @@ labels.copy                   = foreign_source -> tenant
 metadata.enabled              = false
 ----
 
-The full set of normative scenarios lives in
-`openspec/specs/tss-plugin/spec.md` in the source tree — that file is the
-authoritative source of truth for parser behavior, defaults, and
-edge cases.

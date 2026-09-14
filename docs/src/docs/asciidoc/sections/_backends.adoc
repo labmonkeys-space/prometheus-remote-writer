@@ -11,9 +11,9 @@ the wire-format selection knob and the Prometheus 2.50–2.54 caveat.
 |===
 | Backend                        | v1 (Prom 2.53.2 reference) | v2 (Prom 3.0.1 reference) | Coverage
 
-| Prometheus                     | ✅                          | ✅                          | Testcontainers integration test
-| Grafana Mimir                  | ✅                          | ✅ (`wire.protocol-version=2`) | e2e smoke (`make smoke BACKENDS=mimir`)
-| VictoriaMetrics                | ✅                          | ✅ (with v2 ingest enabled)   | e2e smoke (`make smoke BACKENDS=victoriametrics`)
+| Prometheus                     | ✅                          | ✅                          | Testcontainers IT (v1 on 2.53.2, v2 on 3.0.1) and the e2e smoke (v1 on 3.14.0)
+| Grafana Mimir                  | ✅                          | accepted; not exercised in CI | e2e smoke, v1 (`make smoke BACKENDS=mimir`)
+| VictoriaMetrics                | ✅                          | accepted with v2 ingest enabled; not exercised in CI | e2e smoke, v1 (`make smoke BACKENDS=victoriametrics`)
 | Cortex                         | Compatible — not in CI     | Compatible — not in CI     |
 | Thanos Receive                 | Compatible — not in CI     | Compatible — not in CI     |
 | Grafana Cloud                  | Compatible — not in CI     | Compatible — not in CI     |
@@ -25,7 +25,9 @@ Only one documented query uses PromQL's `@` modifier: applying today's
 alias to historical data,
 `last_over_time(onms_resource_attr{key="ifAlias"}[1h] @ end())`
 (see <<resource-metadata>>). The everyday `group_left` join needs
-nothing beyond plain PromQL. Minimum versions for that one idiom:
+nothing beyond plain PromQL.
+The smoke's metadata gates evaluate the idiom on Prometheus 3.14.0, Mimir 3.2.1 and VictoriaMetrics 1.151.0.
+Minimum versions for that one idiom:
 
 [cols="2,3,2",options="header"]
 |===
@@ -39,8 +41,8 @@ nothing beyond plain PromQL. Minimum versions for that one idiom:
 
 == `read.url` shapes per backend
 
-The plugin appends `/api/v1/series`, `/api/v1/query` and
-`/api/v1/query_range` itself. Do *not* include `/api/v1` in the
+The plugin appends `/api/v1/series`, `/api/v1/query`,
+`/api/v1/query_range` and `/api/v1/label/resourceId/values` itself. Do *not* include `/api/v1` in the
 configured value.
 
 [cols="2,3",options="header"]

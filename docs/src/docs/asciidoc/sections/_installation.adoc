@@ -61,9 +61,9 @@ flush sends samples through the plugin.
 ====
 By default, OpenNMS does not attach node, foreign-source, location, or
 interface tags to samples — they arrive at the plugin carrying only
-`name` and `resourceId`, and your Prometheus series end up with bare
-`{resourceId="…"}` labels regardless of any plugin-side config. Add
-the four-line snippet in <<minimal-metatag-config>> alongside the
+`name` and `resourceId`.
+The plugin still emits `job`, `mtype`, `onms_instance_id` (when `instance.id` is set) and the identity labels it derives from the resourceId, but `node_label`, `foreign_source`, `foreign_id`, `location` and `if_name` stay absent regardless of any plugin-side config.
+Add the four-line snippet in <<minimal-metatag-config>> alongside the
 strategy switch above so the first samples already carry useful
 labels (`node`, `instance`, `node_label`, `foreign_source`,
 `foreign_id`, `location`).
@@ -80,7 +80,8 @@ read.url  = https://mimir.example.com/prometheus
 ----
 
 `read.url` is the backend's *Prometheus-compatible root*. The plugin
-appends `/api/v1/series` and `/api/v1/query_range` itself — do *not*
+appends `/api/v1/series`, `/api/v1/query`, `/api/v1/query_range` and
+`/api/v1/label/resourceId/values` itself. Do *not*
 include `/api/v1` in the configured value. See
 <<configuration,Configuration reference>> for the full list of knobs and
 backend-specific URL shapes.
@@ -121,9 +122,9 @@ The fastest way to prove the plugin works is `make smoke`:
 
 [source,bash]
 ----
-make smoke                               # all backends, sequential
+make smoke                               # prometheus, mimir, victoriametrics, headers; sequential
 make smoke BACKENDS=prometheus           # single backend
-make smoke TIMEOUT=900 BACKENDS=mimir    # bump the per-backend deadline
+make smoke SMOKE_TIMEOUT=900 BACKENDS=mimir    # bump the per-backend deadline
 ----
 
 For interactive exploration, see `e2e/README.md` in the source tree.

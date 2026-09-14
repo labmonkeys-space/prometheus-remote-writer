@@ -64,7 +64,7 @@ make help          # list everything available
 make build         # compile, run unit tests, install locally
 make verify        # unit + integration tests (needs Docker)
 make kar           # build assembly/kar/target/*.kar
-make smoke         # e2e against all backends
+make smoke         # e2e smoke against prometheus, mimir, victoriametrics and headers (sentinel is opt-in)
 make docs          # render single-page HTML to docs/target/generated-docs
 ```
 

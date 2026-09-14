@@ -48,18 +48,20 @@ above.
 
 `compose.headers.yml` is the Prometheus stack with an nginx gate in front of
 the backend. The plugin's `write.url` and `read.url` point at the gate, which
-rejects anything not carrying `X-Smoke-Token` — a value supplied only through
-`http.headers.*` in `opennms/headers.cfg`.
+rejects anything not carrying all three headers: `X-Smoke-Token` and
+`X-Smoke-Instance`, supplied only through `http.headers.*` in
+`opennms/headers.cfg`, and `Authorization: Token …`, supplied through
+`auth.authorization.*` in the same file.
 
 That inversion is the point. Samples reach Prometheus if and only if the
-custom header reached the wire, so the harness's ordinary "samples landed"
+custom headers reached the wire, so the harness's ordinary "samples landed"
 assertion becomes an end-to-end proof of the feature rather than a log-scrape.
 The run pins three things beyond "samples landed", so that a misconfigured
 gate cannot let the check pass vacuously:
 
-- the gate itself — 403 without the headers, 200 with them;
+- the gate itself: 403 without all three headers, 200 with them;
 - traversal — `write.url` points at the gate, and the gate's access log shows
-  an accepted `POST /api/v1/write` carrying both operator headers;
+  an accepted `POST /api/v1/write` carrying all three headers;
 - co-activation — the `HttpHeadersConfig` startup line in `karaf.log`, when
   the deployment's log level emits it. Its absence is only a failure if
   traversal was not already proven, since that line depends on log
