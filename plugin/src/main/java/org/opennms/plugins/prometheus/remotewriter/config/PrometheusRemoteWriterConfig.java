@@ -36,8 +36,9 @@ public class PrometheusRemoteWriterConfig {
 
     /**
      * Read-side resource discovery strategy. {@code SINGLE_PASS} (default)
-     * issues exactly one {@code GET /api/v1/series} per {@code findMetrics}
-     * call. {@code LABEL_VALUES_FIRST} opts into the two-phase path:
+     * issues one {@code GET /api/v1/series} per {@code findMetrics} call,
+     * followed under either strategy by the metadata enrichment queries,
+     * one per {@code read.discovery-batch-size} resources. {@code LABEL_VALUES_FIRST} opts into the two-phase path:
      * enumerate {@code resourceId} values via
      * {@code /api/v1/label/resourceId/values}, then batch exact-match
      * alternations through {@code /api/v1/series} per
@@ -256,17 +257,9 @@ public class PrometheusRemoteWriterConfig {
      *  HTTP request-line caps (~8 KiB at typical OpenNMS resourceId
      *  sizes); upper bound 200 holds at ~30 KiB worst case, which fits
      *  cloud LB defaults but is the safe ceiling above default
-     *  nginx / Mimir 8 KiB limits. Ignored — with a startup WARN — when
-     *  the strategy is {@code SINGLE_PASS}. */
+     *  nginx / Mimir 8 KiB limits. Also sizes the metadata enrichment
+     *  queries, under either strategy. */
     private int discoveryBatchSize = 50;
-
-    /** Did the operator set {@code read.discovery-batch-size} explicitly to
-     *  a non-default value? The validator uses this to emit a one-shot
-     *  WARN when the value is set but the strategy is {@code SINGLE_PASS}
-     *  (the knob would otherwise silently no-op). Set in
-     *  {@link #setDiscoveryBatchSize(int)}, queried from
-     *  {@link #validate()}. */
-    private transient boolean discoveryBatchSizeExplicitlySet;
 
     // --- Label policy ---
     private String labelsInclude;
@@ -354,8 +347,9 @@ public class PrometheusRemoteWriterConfig {
 
     /** {@code metadata.cadence-ms}: how often a resource's metadata series
      *  (onms_resource_attr, onms_resource_category, …) are re-emitted when
-     *  nothing changed. New or changed metadata is emitted at once. Sets the
-     *  lookback a join needs: query with {@code last_over_time(…[2 × cadence])}.
+     *  nothing changed. New or changed metadata is emitted at once. A PromQL
+     *  join needs a lookback of at least two cadences, e.g.
+     *  {@code last_over_time(onms_resource_attr[30m])} at the default.
      *  0 switches the metadata series off. */
     private long metadataCadenceMs = 15L * 60L * 1000L;
     /** {@code metadata.attr-budget}: attributes per resource emitted as rows,
@@ -673,28 +667,13 @@ public class PrometheusRemoteWriterConfig {
     /**
      * Validate the two-phase discovery knobs. Strategy parsing already
      * happened in {@link #setDiscoveryStrategy(String)} (which throws on
-     * bad input); this method enforces the batch-size bounds and the
-     * "set non-default with single-pass strategy" warn.
+     * bad input); this method enforces the batch-size bounds.
      */
     private void validateDiscovery() {
         if (discoveryBatchSize < 1 || discoveryBatchSize > 200) {
             throw new IllegalStateException(
                 "read.discovery-batch-size must be in [1, 200] (got "
                 + discoveryBatchSize + ")");
-        }
-        if (discoveryStrategy == DiscoveryStrategy.SINGLE_PASS
-                && discoveryBatchSizeExplicitlySet
-                && discoveryBatchSize != 50) {
-            // One-shot WARN — set non-default while strategy is single-pass
-            // is almost always a configuration mistake (operator copied the
-            // knob without flipping the strategy). Don't reject — operators
-            // experimenting with the toggle should be able to flip it back
-            // without triggering startup errors.
-            org.slf4j.LoggerFactory.getLogger(PrometheusRemoteWriterConfig.class).warn(
-                "read.discovery-batch-size={} is set but read.discovery-strategy=single-pass; "
-                + "the batch-size knob has no effect on the single-pass path. "
-                + "Either flip read.discovery-strategy to label-values-first or remove the batch-size override.",
-                discoveryBatchSize);
         }
     }
 
@@ -1192,13 +1171,7 @@ public class PrometheusRemoteWriterConfig {
         discoveryStrategy = v == null ? DiscoveryStrategy.SINGLE_PASS : v;
     }
 
-    public void setDiscoveryBatchSize(int v) {
-        discoveryBatchSize = v;
-        // Track whether the operator changed it; the validator uses this to
-        // distinguish "default 50 with single-pass" (silent) from "operator
-        // set 200 with single-pass" (warn — likely a configuration mistake).
-        discoveryBatchSizeExplicitlySet = (v != 50);
-    }
+    public void setDiscoveryBatchSize(int v)       { discoveryBatchSize = v; }
     public void setLabelsInclude(String v)         { labelsInclude = blankToNull(v); }
     public void setLabelsExclude(String v)         { labelsExclude = blankToNull(v); }
     public void setLabelsRename(String v) {

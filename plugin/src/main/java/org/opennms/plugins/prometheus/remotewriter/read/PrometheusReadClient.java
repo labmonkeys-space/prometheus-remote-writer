@@ -20,8 +20,10 @@ import java.util.Objects;
 import java.util.TreeMap;
 import java.util.concurrent.TimeUnit;
 
+import okhttp3.MediaType;
 import okhttp3.OkHttpClient;
 import okhttp3.Request;
+import okhttp3.RequestBody;
 import okhttp3.Response;
 import okhttp3.ResponseBody;
 import org.opennms.integration.api.v1.timeseries.IntrinsicTagNames;
@@ -55,8 +57,9 @@ public final class PrometheusReadClient {
      *  multi-megabyte error page or a pathologically large matrix. */
     private static final long MAX_RESPONSE_BYTES = 8L * 1024 * 1024; // 8 MiB
 
-    /** Maximum number of phase-2 HTTP calls the two-phase path will issue
-     *  before refusing to proceed. Bounds the actual cost (sequential HTTP
+    /** Maximum number of batched HTTP calls one findMetrics will issue for
+     *  phase-2 discovery, and separately for metadata enrichment, before
+     *  refusing to proceed. Bounds the actual cost (sequential HTTP
      *  round-trips on the OpenNMS request thread) rather than the
      *  resourceId enumeration size — at small batch sizes (e.g.,
      *  {@code read.discovery-batch-size=1} for debugging), an enumeration of
@@ -67,13 +70,15 @@ public final class PrometheusReadClient {
      *  batch-size 50, 100 calls × 5000 = 5000 resourceIds (parity with the
      *  v0.5.0 round-1 cap); at batch-size 1, the same 100-call cap admits
      *  only 100 resourceIds. */
-    private static final int MAX_PHASE2_CALLS = 100;
+    static final int MAX_PHASE2_CALLS = 100;
 
     private final OkHttpClient http;
     private final PrometheusRemoteWriterConfig config;
     private final HttpHeadersConfig httpHeadersConfig;
     private final MtypeFallback mtypeFallback;
     private final PluginMetrics metrics;
+    /** Restores attributes and categories from the metadata rows onto findMetrics results. */
+    private final ResourceMetadataReader resourceMetadata;
 
     /** Test-friendly constructor — no metrics sink, so the synthesis counter
      *  and the find_metrics_* counters are not driven. Production code uses
@@ -101,6 +106,7 @@ public final class PrometheusReadClient {
         this.http = b.build();
         this.mtypeFallback = new MtypeFallback(metrics);
         this.metrics = metrics;
+        this.resourceMetadata = new ResourceMetadataReader(config, this::executePost, metrics);
     }
 
     /** Visible for tests — exposes the WARN-tracking set so tests can assert
@@ -133,8 +139,7 @@ public final class PrometheusReadClient {
      * of two paths:
      *
      * <ul>
-     *   <li><b>Single-pass</b> (default) — exactly one
-     *       {@code GET /api/v1/series}. Preserves v0.5.0 behavior bit-for-bit.</li>
+     *   <li><b>Single-pass</b> (default) — one {@code GET /api/v1/series}.</li>
      *   <li><b>Two-phase</b> — opt-in via
      *       {@code read.discovery-strategy = label-values-first}; fires only
      *       when the matcher collection contains a regex on {@code resourceId}.
@@ -152,12 +157,18 @@ public final class PrometheusReadClient {
         if (matchers.isEmpty()) {
             throw new IllegalArgumentException("matchers must not be empty");
         }
+        List<Metric> found;
         if (decideStrategy(matchers) == DiscoveryStrategy.LABEL_VALUES_FIRST) {
             if (metrics != null) metrics.findMetricsTwoPhase();
-            return findMetricsTwoPhase(matchers);
+            found = findMetricsTwoPhase(matchers);
+        } else {
+            if (metrics != null) metrics.findMetricsSinglePass();
+            found = findMetricsSinglePass(matchers);
         }
-        if (metrics != null) metrics.findMetricsSinglePass();
-        return findMetricsSinglePass(matchers);
+        // Either way, the resources' attributes and categories come from the
+        // metadata rows: one instant query per read.discovery-batch-size
+        // resources, best effort. See ResourceMetadataReader.
+        return resourceMetadata.enrich(found);
     }
 
     /**
@@ -406,7 +417,17 @@ public final class PrometheusReadClient {
     // -- HTTP ---------------------------------------------------------------
 
     private String executeGet(String url) throws StorageException {
-        Request.Builder rb = new Request.Builder().url(url).get();
+        return execute(new Request.Builder().url(url).get());
+    }
+
+    /** A form POST: the query API accepts one, and a long selector is then
+     *  not subject to the request-line limit a GET is. */
+    private String executePost(String url, String form) throws StorageException {
+        return execute(new Request.Builder().url(url)
+                .post(RequestBody.create(form, MediaType.get("application/x-www-form-urlencoded"))));
+    }
+
+    private String execute(Request.Builder rb) throws StorageException {
         // Each branch gates on a COMPLETE block — this constructor never calls
         // validate(), so these guards are the only thing standing between a
         // half-configured file and a garbage credential on the wire.
@@ -474,7 +495,7 @@ public final class PrometheusReadClient {
         }
     }
 
-    private static String urlEncode(String s) {
+    static String urlEncode(String s) {
         return URLEncoder.encode(s, StandardCharsets.UTF_8);
     }
 }

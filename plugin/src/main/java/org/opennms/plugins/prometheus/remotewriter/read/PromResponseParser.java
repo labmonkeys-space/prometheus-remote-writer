@@ -8,7 +8,9 @@ package org.opennms.plugins.prometheus.remotewriter.read;
 
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 import org.json.JSONArray;
 import org.json.JSONException;
@@ -98,6 +100,40 @@ public final class PromResponseParser {
                 "failed to parse Prometheus /series response: " + e.getMessage(), e);
         }
     }
+
+    /** One result of an instant query: its labels and its value. */
+    public record InstantSample(Map<String, String> labels, double value) {}
+
+    /**
+     * Parse a {@code /api/v1/query} instant-vector response, in response
+     * order. Non-finite values arrive as the strings {@code "NaN"},
+     * {@code "+Inf"} and {@code "-Inf"} and are mapped like the range parser
+     * maps them.
+     */
+    public static List<InstantSample> parseInstantVector(String json) throws StorageException {
+        try {
+            JSONObject root = parseJson(json);
+            requireSuccess(root);
+            JSONObject data = root.optJSONObject("data");
+            JSONArray result = data == null ? null : data.optJSONArray("result");
+            if (result == null) return List.of();
+            List<InstantSample> out = new ArrayList<>(result.length());
+            for (int i = 0; i < result.length(); i++) {
+                JSONObject entry = result.getJSONObject(i);
+                JSONObject metric = entry.optJSONObject("metric");
+                JSONArray value = entry.optJSONArray("value");
+                if (metric == null || value == null || value.length() < 2) continue;
+                Map<String, String> labels = new LinkedHashMap<>();
+                for (String key : metric.keySet()) labels.put(key, metric.optString(key, ""));
+                out.add(new InstantSample(labels, parsePromValue(value.getString(1))));
+            }
+            return out;
+        } catch (JSONException | IllegalStateException | NumberFormatException e) {
+            throw new StorageException(
+                "failed to parse Prometheus /query response: " + e.getMessage(), e);
+        }
+    }
+
 
     /**
      * Result of {@link #parseRangeResponseWithMetric}: the merged datapoints

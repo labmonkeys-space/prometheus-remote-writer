@@ -61,8 +61,9 @@ public final class MetadataEmitter {
     public static final String RESOURCE_ID_LABEL = "resourceId";
     public static final String INSTANCE_ID_LABEL = "onms_instance_id";
 
-    /** A resource not seen for this long is dropped from the registry. */
-    static final long EXPIRE_AFTER_MS = TimeUnit.HOURS.toMillis(24);
+    /** A resource not seen for this long is dropped from the registry; the
+     *  read path uses the same span as its window over the rows. */
+    public static final long EXPIRE_AFTER_MS = TimeUnit.HOURS.toMillis(24);
     /** How often the thread looks for due resources. */
     static final long TICK_MS = 1_000L;
     /** Samples per call to the sink. */
