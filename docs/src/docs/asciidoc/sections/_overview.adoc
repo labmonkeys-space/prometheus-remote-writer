@@ -8,12 +8,14 @@
 TSS implementation registered, every collected sample flows through the
 plugin to a Prometheus-compatible Remote Write endpoint of your choice.
 
-The plugin pushes OpenNMS resource context — node identity, foreign-source
-qualification, surveillance categories, interface descriptors, optional
-metadata — to the backend as native Prometheus labels. Operators query
-the resulting time series with PromQL directly, from Grafana's native
-Prometheus data source. No OpenNMS-side query plugin and no round-trip to
-the OpenNMS REST API are required at query time.
+The plugin pushes OpenNMS resource context to the backend: node identity,
+foreign-source qualification and the interface name as labels on the data
+series, and the resource's string attributes, surveillance categories and
+interface speed as metadata series joined on `resourceId` (see
+<<resource-metadata>>). Operators query the resulting time series with
+PromQL directly, from Grafana's native Prometheus data source. No
+OpenNMS-side query plugin and no round-trip to the OpenNMS REST API are
+required at query time.
 
 == What this plugin does NOT
 

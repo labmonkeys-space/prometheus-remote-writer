@@ -7,7 +7,7 @@ include::_attributes.adoc[]
 An OpenNMS Horizon plugin that pushes performance data to any
 Prometheus-compatible Remote Write endpoint — Prometheus, Cortex, Grafana
 Mimir, VictoriaMetrics, Thanos Receive — and surfaces OpenNMS resource
-context as native Prometheus labels.
+context as Prometheus labels and metadata series joined on `resourceId`.
 
 [IMPORTANT]
 .Incubation project — community support only
@@ -28,6 +28,8 @@ include::sections/_wire-protocols.adoc[leveloffset=+1]
 include::sections/_overflow.adoc[leveloffset=+1]
 
 include::sections/_label-mapping.adoc[leveloffset=+1]
+
+include::sections/_resource-metadata.adoc[leveloffset=+1]
 
 include::sections/_backends.adoc[leveloffset=+1]
 

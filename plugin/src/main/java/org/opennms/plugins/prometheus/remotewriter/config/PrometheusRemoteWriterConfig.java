@@ -207,13 +207,6 @@ public class PrometheusRemoteWriterConfig {
      *  is set; see {@link #validateRemovedLabelKeys()}. */
     private final Set<String> removedLabelKeys = new LinkedHashSet<>();
 
-    /** Thrown by {@link #validate()} for a {@code .cfg} that still carries a
-     *  v0.x key or label name removed in 1.0.0, so the storage can tell a
-     *  delivered-but-rejected configuration from one not delivered yet. */
-    public static final class RemovedKeyException extends IllegalStateException {
-        RemovedKeyException(String message) { super(message); }
-    }
-
     /** Label names the data series carried before 1.0.0. */
     private static final Set<String> REMOVED_LABELS =
             Set.of("if_descr", "if_speed", "ifSpeed", "ifHighSpeed", "categories");
@@ -545,9 +538,10 @@ public class PrometheusRemoteWriterConfig {
      * categories and the interface speed travel as metadata series, not as
      * labels on the data series. A {@code .cfg} that still sets one of the
      * keys that shaped them, renames or copies from one of the labels, or
-     * includes one of their source tags by name, must not start and quietly
-     * emit a different schema than the operator expects, so each is a
-     * validation error that names the replacement.
+     * includes one of their source tags by name, or excludes one of the
+     * labels, must not start and quietly emit a different schema than the
+     * operator expects, so each is a validation error that names the
+     * replacement.
      */
     private void validateRemovedLabelKeys() {
         List<String> found = new ArrayList<>(removedLabelKeys);
@@ -560,8 +554,11 @@ public class PrometheusRemoteWriterConfig {
         for (String entry : labelsIncludeGlobs()) {
             if (REMOVED_SOURCE_KEYS.contains(entry)) found.add("labels.include entry '" + entry + "'");
         }
+        for (String entry : labelsExcludeGlobs()) {
+            if (isRemovedLabel(entry)) found.add("labels.exclude entry '" + entry + "'");
+        }
         if (found.isEmpty()) return;
-        throw new RemovedKeyException(
+        throw new IllegalStateException(
             String.join(", ", found)
             + ": removed in 1.0.0. Resource string attributes are the onms_resource_attr rows "
             + "and the onms_resource_info columns (metadata.info-columns), categories are "

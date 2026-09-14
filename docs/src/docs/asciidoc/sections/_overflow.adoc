@@ -190,7 +190,7 @@ Every frame in a bucket stores one whole sample: an 8-byte header, the timestamp
 Nothing is shared between frames and nothing is compressed, so the labels are most of the size.
 The snappy-compressed wire payload is no guide to it.
 
-Measured on a native-profile OpenNMS fleet of SNMP interface data, a sample takes about 340 bytes on disk.
+Measured on an OpenNMS fleet of SNMP interface data under the 0.8 label set, a sample takes about 340 bytes on disk.
 At 64,000 samples/sec that is about 22 MB/s, so the default 4 GiB buys about 3 to 4 minutes of backend outage.
 The formula gives 3.3 minutes, and a real outage on that fleet ran 4.2 minutes from cut-off to the first refusal.
 Tolerating 15 minutes at that rate needs about 18 GiB.

@@ -123,11 +123,16 @@ Three usual culprits:
 
 . *`node_label` churn* — node renames create new series. Drop with
   `labels.exclude = node_label` if renames are routine.
-. *`if_descr` churn* — vendor-generated; firmware upgrades change it.
-  Same fix: `labels.exclude = if_descr`.
-. *Large `onms_cat_*` fan-out* — nodes with many surveillance categories
-  add one label each per series. If your cardinality budget is tight,
-  consider whether all categories need to be promoted to labels.
+. *A mutable attribute promoted with `labels.include`.* A label is part
+  of the series identity, so every edit of the value splits every series
+  of the resource. Leave `ifAlias` and friends on the metadata series,
+  where an edit forks one small series per resource instead (see
+  <<resource-metadata>>).
+. *The metadata series themselves.* `onms_resource_attr` is one series
+  per attribute per resource, about eight per SNMP interface. That is by
+  design and bounded by `metadata.attr-budget`; a per-metric series
+  guardrail such as Mimir's `max_global_series_per_metric` sees it as
+  one runaway metric and needs an exemption for that name.
 
 `labels.include = *` is rarely correct in production — it surfaces every
 non-default source tag. The default allowlist is deliberately narrow.
@@ -143,17 +148,17 @@ curl -s 'http://<backend>/api/v1/labels' | python3 -c \
   'import json,sys; d=json.load(sys.stdin)["data"]; print(len(d), d[:20])'
 ----
 
-Under the `native` profile with `labels.attr-mode = off` (the v0.5.0
-defaults) the count stays ≤ ~17 plus one `onms_cat_*` per surveillance
-category. Hundreds or thousands of names — typically
-`onms_extattr_ICMP_<ip>` or `onms_extattr_JMX_<mbean>` shapes — mean
-the attribute round-trip is on (`labels.attr-mode = both`, or v0.4.x):
-each per-resource attribute key becomes its own label name. Fix:
-switch to `labels.attr-mode = external` with a narrow
-`labels.attr-include` allowlist, or `off` if no graph placeholders
-need it. Background: issue
-https://github.com/labmonkeys-space/prometheus-remote-writer/issues/112[#112].
-The names already written age out with your backend's retention.
+With the 1.0.0 schema the count stays at the bounded default set (about
+15 names), plus `key`, `value` and `category` for the metadata rows, plus
+one name per `metadata.info-columns` entry. Hundreds or thousands of
+names, typically `onms_extattr_ICMP_<ip>`, `onms_extattr_JMX_<mbean>`
+or `onms_cat_<name>` shapes, are history written by a v0.x release:
+those releases made a label name out of every attribute key (issue
+https://github.com/labmonkeys-space/prometheus-remote-writer/issues/112[#112]).
+Nothing to fix on the plugin side; the names age out with your backend's
+retention. A name count that keeps growing on 1.0.0 means a
+`labels.include` glob or the metadata passthrough is surfacing
+per-resource keys; narrow the glob.
 
 == `job="opennms"` proportion is high
 

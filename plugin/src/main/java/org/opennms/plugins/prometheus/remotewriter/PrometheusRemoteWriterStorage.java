@@ -167,15 +167,17 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
         }
         try {
             config.validate();
-        } catch (PrometheusRemoteWriterConfig.RemovedKeyException removed) {
-            // A delivered configuration that still carries a v0.x key: this
-            // is the untouched-upgrade case, so it must not read as the
-            // transient "not yet configured" race below.
-            LOG.error("prometheus-remote-writer not started — {} The plugin will activate on "
-                    + "the next save of etc/org.opennms.plugins.tss.prometheusremotewriter.cfg "
-                    + "once they are gone.", removed.getMessage());
-            return;
         } catch (IllegalStateException bad) {
+            // A file with a write.url was delivered and rejected (a v0.x key
+            // after an untouched upgrade, a bad entry): say so at ERROR. Only
+            // the placeholder's empty defaults, before ConfigAdmin delivers
+            // the file, are the transient race the WARN below describes.
+            if (config.getWriteUrl() != null && !config.getWriteUrl().isBlank()) {
+                LOG.error("prometheus-remote-writer not started — {} The plugin will activate on "
+                        + "the next save of etc/org.opennms.plugins.tss.prometheusremotewriter.cfg "
+                        + "once the entry is corrected.", bad.getMessage());
+                return;
+            }
             LOG.warn("prometheus-remote-writer not yet configured ({}); "
                    + "waiting for ConfigAdmin to deliver real properties. "
                    + "If this persists, check etc/org.opennms.plugins.tss.prometheusremotewriter.cfg.",

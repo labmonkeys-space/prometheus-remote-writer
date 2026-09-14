@@ -141,15 +141,16 @@ final class ResourceMetadataReader {
         for (int from = 0; from < resourceIds.size(); from += batchSize) {
             List<String> chunk = resourceIds.subList(from, Math.min(from + batchSize, resourceIds.size()));
             if (this.metrics != null) this.metrics.findMetricsEnrichmentBatches(1);
-            String body;
+            List<PromResponseParser.InstantSample> samples;
             try {
-                body = http.post(url, "query=" + PrometheusReadClient.urlEncode(query(chunk)));
+                String body = http.post(url, "query=" + PrometheusReadClient.urlEncode(query(chunk)));
+                samples = PromResponseParser.parseInstantVector(body);
             } catch (StorageException | RuntimeException e) {
                 warn("metadata rows could not be read for {} resource(s); returning them without attributes: {}",
                         chunk.size(), e.getMessage());
                 continue;
             }
-            for (PromResponseParser.InstantSample s : PromResponseParser.parseInstantVector(body)) {
+            for (PromResponseParser.InstantSample s : samples) {
                 String rid = s.labels().get(IntrinsicTagNames.resourceId);
                 if (rid == null || !Double.isFinite(s.value())) continue;
                 long stampMs = Math.round(s.value() * 1000.0);
