@@ -102,8 +102,12 @@ kar: ## Build the KAR artifact
 	@# Remove stale KARs first: e2e mounts assembly/kar/target as Karaf's
 	@# deploy/ dir, and a leftover KAR from an earlier version deploys
 	@# ALONGSIDE the fresh one (observed: a stale pre-branch SNAPSHOT
-	@# feeding old-code samples into a smoke run).
-	@rm -f assembly/kar/target/*.kar
+	@# feeding old-code samples into a smoke run). The generated feature
+	@# directory goes too: karaf-maven-plugin re-packs the
+	@# maven-metadata-local.xml it finds there, and a stale one from an
+	@# earlier version makes Karaf refuse to resolve the KAR's own features
+	@# artifact (observed: "Could not find artifact ...:xml:features").
+	@rm -rf assembly/kar/target/*.kar assembly/kar/target/feature
 	$(MVN) $(MAVEN_FLAGS) -DskipTests package
 
 smoke: kar ## Run e2e smoke against BACKENDS (defaults exclude sentinel; SMOKE_TIMEOUT/SMOKE_POLL configurable)
@@ -130,34 +134,26 @@ smoke: kar ## Run e2e smoke against BACKENDS (defaults exclude sentinel; SMOKE_T
 	    && pub=$$(cut -d' ' -f2 "$$keydir/id_rsa.pub") \
 	    || { echo "WARN: could not generate the Karaf SSH test key; the stats-command gate will fail" >&2; }; \
 	for backend in $(BACKENDS); do \
-	    discovery_query=""; labels_query=""; plugin_cfg=""; gate_check=0; \
+	    api=""; hdr=""; discovery_query=""; labels_query=""; query_base=""; plugin_cfg=""; gate_check=0; \
 	    case "$$backend" in \
 	        prometheus) \
 	            file=e2e/compose.prometheus.yml; \
-	            query="curl -sfG 'http://localhost:9090/api/v1/query' --data-urlencode 'query=count({__name__=~\".+\"})'"; \
-	            discovery_query="curl -sfG 'http://localhost:9090/api/v1/label/resourceId/values'"; \
-	            labels_query="curl -sfG 'http://localhost:9090/api/v1/labels'"; \
+	            api=http://localhost:9090; hdr=""; \
 	            plugin_cfg=e2e/opennms/prometheus.cfg; \
 	            log_container=core; log_path=/opt/opennms/logs/karaf.log ;; \
 	        mimir) \
 	            file=e2e/compose.mimir.yml; \
-	            query="curl -sfG 'http://localhost:9009/prometheus/api/v1/query' -H 'X-Scope-OrgID: e2e' --data-urlencode 'query=count({__name__=~\".+\"})'"; \
-	            discovery_query="curl -sfG 'http://localhost:9009/prometheus/api/v1/label/resourceId/values' -H 'X-Scope-OrgID: e2e'"; \
-	            labels_query="curl -sfG 'http://localhost:9009/prometheus/api/v1/labels' -H 'X-Scope-OrgID: e2e'"; \
+	            api=http://localhost:9009/prometheus; hdr="-H 'X-Scope-OrgID: e2e'"; \
 	            plugin_cfg=e2e/opennms/mimir.cfg; \
 	            log_container=core; log_path=/opt/opennms/logs/karaf.log ;; \
 	        victoriametrics) \
 	            file=e2e/compose.victoriametrics.yml; \
-	            query="curl -sfG 'http://localhost:8428/api/v1/query' --data-urlencode 'query=count({__name__=~\".+\"})'"; \
-	            discovery_query="curl -sfG 'http://localhost:8428/api/v1/label/resourceId/values'"; \
-	            labels_query="curl -sfG 'http://localhost:8428/api/v1/labels'"; \
+	            api=http://localhost:8428; hdr=""; \
 	            plugin_cfg=e2e/opennms/victoriametrics.cfg; \
 	            log_container=core; log_path=/opt/opennms/logs/karaf.log ;; \
 	        headers) \
 	            file=e2e/compose.headers.yml; \
-	            query="curl -sfG 'http://localhost:9091/api/v1/query' --data-urlencode 'query=count({__name__=~\".+\"})'"; \
-	            discovery_query="curl -sfG 'http://localhost:9091/api/v1/label/resourceId/values'"; \
-	            labels_query="curl -sfG 'http://localhost:9091/api/v1/labels'"; \
+	            api=http://localhost:9091; hdr=""; \
 	            plugin_cfg=e2e/opennms/headers.cfg; \
 	            gate_check=1; \
 	            log_container=core; log_path=/opt/opennms/logs/karaf.log ;; \
@@ -169,6 +165,12 @@ smoke: kar ## Run e2e smoke against BACKENDS (defaults exclude sentinel; SMOKE_T
 	            echo "ERROR: unknown backend '$$backend' (known: prometheus mimir victoriametrics headers sentinel)" >&2; \
 	            failed="$$failed $$backend"; continue ;; \
 	    esac; \
+	    if [ -n "$$api" ]; then \
+	        query_base="curl -sfG '$$api/api/v1/query' $$hdr"; \
+	        query="$$query_base --data-urlencode 'query=count({__name__=~\".+\"})'"; \
+	        discovery_query="curl -sfG '$$api/api/v1/label/resourceId/values' $$hdr"; \
+	        labels_query="curl -sfG '$$api/api/v1/labels' $$hdr"; \
+	    fi; \
 	    current_file="$$file"; current_backend="$$backend"; \
 	    cf="-f $$file"; \
 	    if [ -n "$(HORIZON_VERSION)" ]; then \
@@ -204,16 +206,8 @@ smoke: kar ## Run e2e smoke against BACKENDS (defaults exclude sentinel; SMOKE_T
 	    done; \
 	    labels_ok=1; \
 	    if [ "$$ok" = 1 ] && [ -n "$$labels_query" ]; then \
-	        label_count=$$(eval "$$labels_query" 2>/dev/null \
-	            | python3 -c 'import json,sys; print(len(json.load(sys.stdin).get("data",[])))' \
-	            2>/dev/null || echo 0); \
-	        case "$$label_count" in ''|*[!0-9]*) label_count=0 ;; esac; \
-	        if [ "$$label_count" -lt 1 ] || [ "$$label_count" -gt $(SMOKE_LABEL_BOUND) ]; then \
-	            echo "=== [$$backend] FAIL: $$label_count distinct label names (bound $(SMOKE_LABEL_BOUND)) — label-name explosion regression, see issue #112 ===" >&2; \
-	            labels_ok=0; \
-	        else \
-	            echo "=== [$$backend] PASS (label-bound): $$label_count distinct label names <= $(SMOKE_LABEL_BOUND) ==="; \
-	        fi; \
+	        echo "=== [$$backend] provisioning the fleet and checking the metadata series, the documented queries, the label bound and the dashboard ==="; \
+	        bash e2e/tools/smoke-metadata.sh "$$backend" "$$cf" "$$query_base" "$$labels_query" $(SMOKE_LABEL_BOUND) $(SMOKE_TIMEOUT) $(SMOKE_POLL) || labels_ok=0; \
 	    fi; \
 	    gate_ok=1; \
 	    if [ "$$gate_check" = 1 ]; then \

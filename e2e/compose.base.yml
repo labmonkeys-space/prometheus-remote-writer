@@ -45,6 +45,10 @@ services:
       - "3000:3000"
     volumes:
       - grafana-data:/var/lib/grafana
+      # Dashboards are backend-independent (they use the default datasource),
+      # so they are provisioned here; the smoke exercises the join panel.
+      - ./grafana/dashboards/provider.yml:/etc/grafana/provisioning/dashboards/provider.yml:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
       # Per-backend datasource file is appended by the including compose
       # file (compose.<backend>.yml).
     healthcheck:
@@ -52,6 +56,16 @@ services:
       interval: 5s
       timeout:  3s
       retries:  20
+
+  snmpd:
+    # One SNMP node for the fleet (see snmpd/Dockerfile); the smoke imports
+    # opennms/requisitions/e2e.xml pointing at it.
+    build: ./snmpd
+    healthcheck:
+      test: ["CMD-SHELL", "snmpget -v2c -c public localhost sysName.0 | grep -q snmpd-1"]
+      interval: 5s
+      timeout:  3s
+      retries:  10
 
   core:
     # This tag is the source of truth for the README "OpenNMS Horizon" badge;

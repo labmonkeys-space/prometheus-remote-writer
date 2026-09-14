@@ -1,0 +1,368 @@
+{
+  "uid": "onms-resource-metadata",
+  "title": "OpenNMS resource metadata",
+  "tags": [
+    "opennms",
+    "prometheus-remote-writer"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "refresh": "30s",
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "ds",
+        "label": "Datasource",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": {},
+        "hide": 0,
+        "refresh": 1
+      },
+      {
+        "name": "metric",
+        "label": "Metric",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${ds}"
+        },
+        "refresh": 2,
+        "sort": 1,
+        "query": {
+          "query": "label_values({__name__!~\"onms_resource_.*\"}, __name__)",
+          "refId": "metric"
+        },
+        "definition": "label_values({__name__!~\"onms_resource_.*\"}, __name__)",
+        "current": {},
+        "includeAll": false,
+        "multi": false
+      },
+      {
+        "name": "resource",
+        "label": "Resource",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${ds}"
+        },
+        "refresh": 2,
+        "sort": 1,
+        "query": {
+          "query": "label_values(onms_resource_attr, resourceId)",
+          "refId": "resource"
+        },
+        "definition": "label_values(onms_resource_attr, resourceId)",
+        "current": {},
+        "includeAll": false,
+        "multi": false
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Resources with metadata",
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 6,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds}"
+          },
+          "expr": "count(count by (resourceId) (last_over_time(onms_resource_attr[30m])))",
+          "instant": true,
+          "range": false,
+          "editorMode": "code"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "none",
+        "graphMode": "none"
+      }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Attribute rows",
+      "gridPos": {
+        "x": 6,
+        "y": 0,
+        "w": 6,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds}"
+          },
+          "expr": "count(last_over_time(onms_resource_attr[30m]))",
+          "instant": true,
+          "range": false,
+          "editorMode": "code"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "none",
+        "graphMode": "none"
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Distinct attribute keys",
+      "description": "How many different attribute keys the fleet's rows carry. Each is a label VALUE of key=, never a label name: that is the property issue #112 was about, and the smoke checks the label-name count itself, which PromQL cannot express.",
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 6,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds}"
+          },
+          "expr": "count(count by (key) (last_over_time(onms_resource_attr[30m])))",
+          "instant": true,
+          "range": false,
+          "editorMode": "code"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "none",
+        "graphMode": "none"
+      }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Interface speed (bit/s)",
+      "description": "onms_resource_ifspeed: a gauge, so it divides a rate without a string conversion.",
+      "gridPos": {
+        "x": 18,
+        "y": 0,
+        "w": 6,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds}"
+          },
+          "expr": "max(last_over_time(onms_resource_ifspeed[30m]))",
+          "instant": true,
+          "range": false,
+          "editorMode": "code"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bps"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "none",
+        "graphMode": "none"
+      }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "$metric, legended by the join",
+      "description": "The documented idiom: the data series joined on resourceId with the onms_resource_info columns. The metadata series are emitted every 15 minutes, so the right-hand side is a last_over_time over twice that.",
+      "gridPos": {
+        "x": 0,
+        "y": 4,
+        "w": 24,
+        "h": 9
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds}"
+          },
+          "expr": "$metric * on(resourceId) group_left(resource_name, if_alias, if_descr) last_over_time(onms_resource_info[30m])",
+          "instant": false,
+          "range": true,
+          "editorMode": "code",
+          "legendFormat": "{{resource_name}}{{if_descr}} ({{resourceId}})"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 0
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      }
+    },
+    {
+      "id": 6,
+      "type": "table",
+      "title": "Attributes of $resource",
+      "description": "Every string attribute of the resource, one onms_resource_attr row each. This is what OpenNMS graph placeholders resolve from.",
+      "gridPos": {
+        "x": 0,
+        "y": 13,
+        "w": 12,
+        "h": 9
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds}"
+          },
+          "expr": "last_over_time(onms_resource_attr{resourceId=\"$resource\"}[30m])",
+          "instant": true,
+          "range": false,
+          "editorMode": "code",
+          "format": "table"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "Value": true,
+              "__name__": true,
+              "resourceId": true,
+              "onms_instance_id": true
+            }
+          }
+        }
+      ],
+      "options": {
+        "showHeader": true
+      }
+    },
+    {
+      "id": 7,
+      "type": "table",
+      "title": "Categories of $resource",
+      "gridPos": {
+        "x": 12,
+        "y": 13,
+        "w": 12,
+        "h": 9
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds}"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds}"
+          },
+          "expr": "last_over_time(onms_resource_category{resourceId=\"$resource\"}[30m])",
+          "instant": true,
+          "range": false,
+          "editorMode": "code",
+          "format": "table"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "Value": true,
+              "__name__": true,
+              "resourceId": true,
+              "onms_instance_id": true
+            }
+          }
+        }
+      ],
+      "options": {
+        "showHeader": true
+      }
+    }
+  ]
+}

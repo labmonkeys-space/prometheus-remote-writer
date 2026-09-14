@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  The sandbox's simulated fleet: the snmpd container as one SNMP node with
+  two surveillance categories. The smoke substitutes @SNMPD_IP@ with the
+  container's address on the compose network and imports it over REST, so
+  OpenNMS collects mib2-interfaces from it and the plugin emits the four
+  metadata series (rows, categories, info columns, the speed gauge) for a
+  resource the assertions can name.
+-->
+<model-import xmlns="http://xmlns.opennms.org/xsd/config/model-import" foreign-source="e2e" date-stamp="2026-09-14T00:00:00Z">
+  <node foreign-id="snmpd-1" node-label="snmpd-1">
+    <interface ip-addr="@SNMPD_IP@" status="1" snmp-primary="P">
+      <monitored-service service-name="SNMP"/>
+    </interface>
+    <category name="Routers"/>
+    <category name="Production"/>
+  </node>
+</model-import>
