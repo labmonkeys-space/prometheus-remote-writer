@@ -31,6 +31,11 @@ services:
     volumes:
       - ./opennms/mimir.cfg:/opt/opennms-etc-overlay/org.opennms.plugins.tss.prometheusremotewriter.cfg:ro
 
+  snmpd:
+    extends:
+      file: compose.base.yml
+      service: snmpd
+
   grafana:
     extends:
       file: compose.base.yml

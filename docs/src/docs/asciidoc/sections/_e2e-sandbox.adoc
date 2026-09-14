@@ -25,26 +25,45 @@ no ActiveMQ/Kafka, no TLS.
 
 ```
 e2e/
-├── compose.base.yml               # shared: postgres + core + grafana
+├── compose.base.yml               # shared: postgres + core + grafana + snmpd
 ├── compose.prometheus.yml         # extends base, adds prometheus + per-backend mounts
 ├── compose.mimir.yml              # extends base, adds mimir + per-backend mounts
 ├── compose.victoriametrics.yml    # extends base, adds vm + per-backend mounts
 ├── opennms/
 │   ├── opennms.properties.d/
 │   │   └── timeseries.properties  # activates TSS integration strategy
+│   ├── requisitions/
+│   │   └── e2e.xml                # the fleet: the snmpd node with two categories
 │   ├── prometheus.cfg             # plugin cfg for the prometheus backend
 │   ├── mimir.cfg                  # plugin cfg for the mimir backend
 │   └── victoriametrics.cfg        # plugin cfg for the vm backend
 ├── grafana/
-│   └── datasources/               # one file per backend; the matching
-│       ├── prometheus.yml         # compose.<backend>.yml mounts it to
-│       ├── mimir.yml              # Grafana's provisioning dir
-│       └── victoriametrics.yml
+│   ├── datasources/               # one file per backend; the matching
+│   │   ├── prometheus.yml         # compose.<backend>.yml mounts it to
+│   │   ├── mimir.yml              # Grafana's provisioning dir
+│   │   └── victoriametrics.yml
+│   └── dashboards/                # backend-independent, mounted by compose.base.yml
+│       ├── provider.yml
+│       └── resource-metadata.json # the resource metadata join, exercised by the smoke
 ├── prometheus/
 │   └── prometheus.yml             # minimal Prom config with remote-write receiver
-└── mimir/
-    └── mimir.yaml                 # single-binary Mimir config
+├── mimir/
+│   └── mimir.yaml                 # single-binary Mimir config
+├── snmpd/                         # a net-snmp agent: the fleet's one SNMP node
+└── tools/
+    └── smoke-metadata.sh          # the metadata gates of `make smoke`
 ```
+
+Two nodes produce data: OpenNMS monitors itself (`selfmonitor:1`, JMX and PostgreSQL resources), and the `snmpd` container is provisioned by the smoke, or by you, as `e2e:snmpd-1` with the categories `Routers` and `Production`, so there are real interfaces with `ifDescr`, an `ifHighSpeed` and categories on the wire (no `ifAlias`: released net-snmp does not report a Linux interface alias, so that row is absent, as the docs say about an empty value).
+To provision it by hand:
+
+[source,bash]
+----
+ip=$(docker compose -f compose.prometheus.yml exec -T core getent hosts snmpd | awk '{print $1}')
+sed "s/@SNMPD_IP@/$ip/" opennms/requisitions/e2e.xml \
+  | curl -u admin:admin -H 'Content-Type: application/xml' -X POST --data-binary @- http://localhost:8980/opennms/rest/requisitions
+curl -u admin:admin -X PUT http://localhost:8980/opennms/rest/requisitions/e2e/import
+----
 
 == Prerequisites
 
@@ -100,7 +119,11 @@ Starting Karaf...
 Grafana auto-provisions a datasource pointing at whichever backend is
 active (selected by the compose file you brought up). Open
 **Explore → OpenNMS (<backend>)** to run PromQL against the data
-OpenNMS just wrote.
+OpenNMS just wrote, or the provisioned **OpenNMS / OpenNMS resource
+metadata** dashboard: a data series legended by the
+`group_left` join on `onms_resource_info`, the attribute rows and
+categories of one resource, and the label-name count (see
+<<resource-metadata>>).
 
 [#e2e-smoke]
 == Smoke test (automated)
@@ -114,7 +137,7 @@ make smoke                          # default backends: prometheus, mimir, victo
 make smoke BACKENDS=prometheus      # single backend
 make smoke BACKENDS="mimir victoriametrics"
 make smoke-prometheus               # convenience wrapper, equivalent to BACKENDS=prometheus
-make smoke SMOKE_TIMEOUT=300        # tighter deadline (default 600s per backend)
+make smoke SMOKE_TIMEOUT=300        # tighter deadline (default 600s for the first samples, and again for the fleet)
 make smoke SMOKE_POLL=5             # tighter poll interval (default 15s)
 ----
 
@@ -123,6 +146,13 @@ down. The target depends on `kar`, so a fresh KAR is built first.
 Pass/fail summary is printed at the end; on a timeout, the last 40
 lines of the relevant container's `karaf.log` are dumped before
 teardown.
+
+Between the first samples and the teardown the harness gates on:
+
+* the fleet (`e2e/tools/smoke-metadata.sh`): the `e2e` requisition is imported over REST and the snmpd node's interfaces collected; then `onms_resource_attr` carries `ifDescr=eth0`, `onms_resource_category` carries `Routers` and `Production`, `onms_resource_info` carries `if_descr=eth0` and `onms_resource_ifspeed` is 10,000,000,000 bit/s for it; the documented `group_left` join, the utilisation divisor and the category membership join each return a series, and the `@ end()` idiom evaluates on the backend;
+* the distinct label-name count, metadata rows included, staying at or under `SMOKE_LABEL_BOUND` (the property of issue #112);
+* the provisioned dashboard: Grafana reports it, and its join panel's query returns frames through Grafana's `/api/ds/query`;
+* `/api/v1/label/resourceId/values` enumerating resources, and the `opennms:prometheus-writer-stats` Karaf command rendering its table.
 
 == Verifying the plugin is active
 
@@ -210,6 +240,6 @@ cycles the plugin without restarting the container.
 - **TLS / auth to the backend** — all cleartext on the compose
   network.
 - **Multi-tenant routing** beyond Mimir's default `e2e` tenant.
-- **Dashboards** — Grafana is provisioned with a datasource only;
-  build dashboards on top in **Explore** or by dropping JSON under a
-  `grafana/dashboards/` provisioning directory.
+- **Dashboards beyond the one example.** Build your own in **Explore**
+  or by dropping JSON next to `grafana/dashboards/resource-metadata.json`.
+  The provider picks it up within 30 seconds.

@@ -14,7 +14,10 @@ project docs site —
 # Build the KAR (the compose stacks mount it from assembly/kar/target)
 make kar
 
-# Bring up one backend
+# Bring up one backend. Grafana at :3000 provisions the datasource and the
+# "OpenNMS resource metadata" dashboard; the snmpd container is the fleet's
+# SNMP node once opennms/requisitions/e2e.xml is imported (the smoke does
+# that; see the e2e sandbox docs to do it by hand).
 docker compose -f e2e/compose.prometheus.yml      up -d
 docker compose -f e2e/compose.mimir.yml           up -d
 docker compose -f e2e/compose.victoriametrics.yml up -d
