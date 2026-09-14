@@ -86,7 +86,7 @@ services:
       retries:  20
 
   prometheus:
-    image: prom/prometheus:v2.53.2
+    image: prom/prometheus:v3.14.0
     command:
       - "--config.file=/etc/prometheus/prometheus.yml"
       - "--storage.tsdb.path=/prometheus"
