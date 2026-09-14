@@ -359,6 +359,10 @@ public final class WalSegment implements Closeable {
         if (closed) return;
         closed = true;
         try {
+            // A segment opened for read knows neither its sample count nor
+            // its creation time. Writing the index from it would replace the
+            // writer's count with 0, and an eviction reads that count.
+            if (size < 0) return;
             if (channel.isOpen()) channel.force(false);
             if (status == Status.OPEN) status = Status.SEALED;
             writeIndex();

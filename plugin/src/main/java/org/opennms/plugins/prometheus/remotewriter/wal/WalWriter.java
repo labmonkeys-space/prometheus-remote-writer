@@ -190,34 +190,44 @@ public final class WalWriter implements Closeable {
         if (frameSize > maxSizeBytes) {
             throw new WalFullException(
                 "single frame (" + frameSize + " bytes) exceeds wal.max-size-bytes ("
-                + maxSizeBytes + ") — increase the cap or reduce the label set", 0);
+                + maxSizeBytes + "). Increase the cap or reduce the label set", 0, List.of());
         }
         long evictedBytes = 0L;
         int evictedFrames = 0;
+        List<EvictedSegment> evictedSegments = new ArrayList<>();
         while (projectedTotalBytes(frameSize) > maxSizeBytes) {
             if (overflow == OverflowPolicy.BACKPRESSURE) {
                 throw new WalFullException(
                     "WAL at cap (" + trackedTotalBytes + "/" + maxSizeBytes
                     + " bytes); refusing append under backpressure policy",
-                    evictedFrames);
+                    evictedFrames, evictedSegments);
             }
-            long[] stats = evictOldestSegment();
-            if (stats == null) {
+            EvictedSegment e = evictOldestSegment();
+            if (e == null) {
                 throw new WalFullException(
                     "WAL at cap with no evictable segments (single active segment "
-                    + "exceeds cap)", evictedFrames);
+                    + "exceeds cap)", evictedFrames, evictedSegments);
             }
-            evictedBytes += stats[0];
-            evictedFrames += (int) stats[1];
-            trackedTotalBytes -= stats[0];
+            evictedBytes += e.bytes();
+            evictedFrames += e.samples();
+            evictedSegments.add(e);
+            trackedTotalBytes -= e.bytes();
         }
         long offsetAfter = active.append(frame);
         trackedTotalBytes += frameSize;
         if (active.endOffset() - active.startOffset() >= segmentSizeBytes) {
             rotate();
         }
-        return new AppendResult(offsetAfter, evictedBytes, evictedFrames);
+        return new AppendResult(offsetAfter, evictedBytes, evictedFrames, List.copyOf(evictedSegments));
     }
+
+    /**
+     * One segment a drop-oldest eviction deleted: the offsets it spanned, the
+     * bytes it freed, and its sample count from the {@code .idx}. A caller
+     * that keeps a pending count compares the offsets with its checkpoint to
+     * tell acknowledged frames from discarded ones.
+     */
+    public record EvictedSegment(long startOffset, long endOffset, long bytes, int samples) {}
 
     /** The footprint this append would leave. Arithmetic, never a listing. */
     private long projectedTotalBytes(long frameSize) throws IOException {
@@ -274,11 +284,7 @@ public final class WalWriter implements Closeable {
         long total = 0;
         try (DirectoryStream<Path> s = Files.newDirectoryStream(dir, "*" + WalSegment.SEG_EXT)) {
             for (Path p : s) {
-                try {
-                    total += Files.size(p);
-                } catch (java.nio.file.NoSuchFileException vanished) {
-                    // GC raced us; the file is gone, contributes 0.
-                }
+                total += FsUtils.sizeOrZero(p);
             }
         }
         return total;
@@ -300,13 +306,12 @@ public final class WalWriter implements Closeable {
     }
 
     /**
-     * Evict the oldest sealed segment; return {@code {bytesFreed,
-     * sampleCountFromIdx}} or {@code null} if there is nothing to evict
-     * (only the active segment exists, or the oldest segment still
-     * contains data the reader has not drained — see
+     * Evict the oldest sealed segment and describe it, or return {@code null}
+     * when there is nothing to evict (only the active segment exists, or the
+     * oldest segment still holds data the reader has not drained; see
      * {@link #setReaderOffsetFloor(long)}).
      */
-    private long[] evictOldestSegment() throws IOException {
+    private EvictedSegment evictOldestSegment() throws IOException {
         List<Long> starts = listSegmentStartOffsets();
         if (starts.size() <= 1) return null; // only the active one
 
@@ -317,7 +322,7 @@ public final class WalWriter implements Closeable {
         }
         Path seg = WalSegment.segPathFor(dir, oldest);
         Path idx = WalSegment.idxPathFor(dir, oldest);
-        long bytes = Files.exists(seg) ? Files.size(seg) : 0L;
+        long bytes = FsUtils.sizeOrZero(seg);
         long endOffset = oldest + bytes;
 
         // Protect the reader: if this segment still contains any bytes
@@ -332,16 +337,16 @@ public final class WalWriter implements Closeable {
         }
 
         // Read sample count from .idx without opening the .seg.
-        long samples = 0L;
-        if (Files.exists(idx)) {
-            samples = extractSampleCount(Files.readString(idx));
-        }
+        String index = FsUtils.readStringOrNull(idx);
+        long samples = index == null ? 0L : extractSampleCount(index);
         // Counted only if this delete is the one that removed it: segment GC
         // may reach the same file, and it reports its own deletions.
         boolean deleted = Files.deleteIfExists(seg);
         Files.deleteIfExists(idx);
         FsUtils.fsyncDirectory(dir);
-        return deleted ? new long[]{bytes, samples} : new long[]{0L, 0L};
+        return deleted
+                ? new EvictedSegment(oldest, endOffset, bytes, (int) samples)
+                : new EvictedSegment(oldest, endOffset, 0L, 0);
     }
 
     private List<Long> listSegmentStartOffsets() throws IOException {
@@ -464,6 +469,10 @@ public final class WalWriter implements Closeable {
      * @param evictedFrames  sample count reclaimed (approximate — from
      *                       .idx rather than recomputed from .seg to
      *                       avoid a rescan on every eviction)
+     * @param evictedSegments the evicted segments in eviction order, oldest
+     *                       first, for a caller that splits the frames it
+     *                       had acknowledged from the ones it discarded
      */
-    public record AppendResult(long offsetAfter, long evictedBytes, int evictedFrames) {}
+    public record AppendResult(long offsetAfter, long evictedBytes, int evictedFrames,
+                               List<EvictedSegment> evictedSegments) {}
 }

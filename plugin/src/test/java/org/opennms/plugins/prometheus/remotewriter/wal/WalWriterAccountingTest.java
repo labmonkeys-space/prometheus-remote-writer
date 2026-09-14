@@ -77,6 +77,33 @@ class WalWriterAccountingTest {
         return out;
     }
 
+    @Test
+    void an_append_describes_the_segments_it_evicted(@TempDir Path dir) throws IOException {
+        // The bucket splits acknowledged frames from discarded ones by
+        // offset (#214), so each eviction reports where the segment sat and
+        // what it held, oldest first and contiguous.
+        long cap = 8 * 1024, segment = 1024;
+        try (WalWriter w = WalWriter.createNew(dir, segment, cap, WalWriter.OverflowPolicy.DROP_OLDEST,
+                FsyncPolicy.BATCH, MAX_PAYLOAD)) {
+            int evicted = 0;
+            long lastEnd = 0L;
+            for (int i = 0; i < 400; i++) {
+                WalWriter.AppendResult r = w.appendWithStats(Frame.encode(payload(i)));
+                int inSegments = 0;
+                for (WalWriter.EvictedSegment e : r.evictedSegments()) {
+                    assertThat(e.startOffset()).as("contiguous with the previous eviction").isEqualTo(lastEnd);
+                    assertThat(e.endOffset()).isGreaterThan(e.startOffset());
+                    assertThat(e.samples()).isPositive();
+                    lastEnd = e.endOffset();
+                    inSegments += e.samples();
+                }
+                assertThat(inSegments).as("the segments account for every evicted frame").isEqualTo(r.evictedFrames());
+                evicted += r.evictedFrames();
+            }
+            assertThat(evicted).isPositive();
+        }
+    }
+
     private static void assertSameSegments(Path a, Path b) throws IOException {
         Map<String, byte[]> sa = segments(a), sb = segments(b);
         assertThat(sb.keySet()).isEqualTo(sa.keySet());

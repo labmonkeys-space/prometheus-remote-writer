@@ -8,6 +8,8 @@ package org.opennms.plugins.prometheus.remotewriter.wal;
 
 import java.io.IOException;
 import java.nio.channels.FileChannel;
+import java.nio.file.Files;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 
@@ -57,6 +59,32 @@ final class FsUtils {
                 return;
             }
             throw e;
+        }
+    }
+
+    /**
+     * The size of {@code file}, or 0 when it is gone. A segment can vanish
+     * between a listing and this call: the flusher's segment GC and a
+     * drop-oldest eviction delete on different threads, and each treats a
+     * file the other removed first as contributing nothing.
+     */
+    static long sizeOrZero(Path file) throws IOException {
+        try {
+            return Files.size(file);
+        } catch (NoSuchFileException gone) {
+            return 0L;
+        }
+    }
+
+    /**
+     * The content of {@code file}, or {@code null} when it is gone; see
+     * {@link #sizeOrZero(Path)}.
+     */
+    static String readStringOrNull(Path file) throws IOException {
+        try {
+            return Files.readString(file);
+        } catch (NoSuchFileException gone) {
+            return null;
         }
     }
 }

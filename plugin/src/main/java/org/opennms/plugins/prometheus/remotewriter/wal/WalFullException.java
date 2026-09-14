@@ -7,6 +7,7 @@
 package org.opennms.plugins.prometheus.remotewriter.wal;
 
 import java.io.IOException;
+import java.util.List;
 
 /**
  * Thrown by {@link WalWriter#append(byte[])} when the WAL is at its
@@ -28,13 +29,22 @@ import java.io.IOException;
 public final class WalFullException extends IOException {
 
     private final int evictedFramesBeforeFailure;
+    private final List<WalWriter.EvictedSegment> evictedSegmentsBeforeFailure;
 
-    public WalFullException(String message, int evictedFramesBeforeFailure) {
+    public WalFullException(String message, int evictedFramesBeforeFailure,
+                            List<WalWriter.EvictedSegment> evictedSegmentsBeforeFailure) {
         super(message);
         this.evictedFramesBeforeFailure = evictedFramesBeforeFailure;
+        this.evictedSegmentsBeforeFailure = List.copyOf(evictedSegmentsBeforeFailure);
     }
 
     public int evictedFramesBeforeFailure() {
         return evictedFramesBeforeFailure;
+    }
+
+    /** The segments those frames were in; see
+     *  {@link WalWriter.AppendResult#evictedSegments()}. */
+    public List<WalWriter.EvictedSegment> evictedSegmentsBeforeFailure() {
+        return evictedSegmentsBeforeFailure;
     }
 }

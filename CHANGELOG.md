@@ -7,6 +7,11 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Under `overflow.full = drop-oldest`, an eviction no longer races the flusher** (#214, found while fixing #215). The pending-sample count behind `overflow_pending_samples` is updated atomically by appends, evictions and acknowledgements. An eviction and an acknowledgement now decide under one lock which of them takes a frame off the count, so an acknowledged segment that garbage collection had not removed yet, and a batch an eviction overtook in flight, are no longer subtracted twice. A segment the checkpoint sits inside is apportioned by bytes, and the count re-bases to 0 whenever the bucket empties. The reader is read, rewound and closed only on the flusher's threads under one lock. An eviction on the append thread flags it for repositioning instead of closing it under a read in progress, on the refused-append path too. Segment GC and eviction, which delete on different threads, no longer fail with `NoSuchFileException` when the other side removed the segment first.
+- **Evicted segments report their real sample count.** Closing a segment the reader had opened rewrote its index with a sample count of 0, so an eviction of a segment the flusher had already read into counted no samples. `samples_dropped_wal_full_total` and the pending count under-reported by those frames. A read-only segment no longer writes an index.
+
 ## [1.0.0] — 2026-09-14
 
 ### Removed
