@@ -763,6 +763,38 @@ class PrometheusRemoteWriterConfigTest {
             .isInstanceOf(IllegalStateException.class);
     }
 
+    // ---------- metadata.* ----------------------------------------------------
+
+    @Test
+    void metadata_defaults_are_fifteen_minutes_and_sixteen_attributes() {
+        PrometheusRemoteWriterConfig c = minimal();
+        assertThat(c.getMetadataCadenceMs()).isEqualTo(900_000L);
+        assertThat(c.getMetadataAttrBudget()).isEqualTo(16);
+        assertThatCode(c::validate).doesNotThrowAnyException();
+    }
+
+    @Test
+    void metadata_cadence_zero_is_off_negative_is_rejected_and_budget_must_be_positive() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setMetadataCadenceMs(0);
+        assertThatCode(c::validate).doesNotThrowAnyException();
+        c.setMetadataCadenceMs(-1);
+        assertThatThrownBy(c::validate).isInstanceOf(IllegalStateException.class).hasMessageContaining("metadata.cadence-ms");
+        c.setMetadataCadenceMs(1_000);
+        c.setMetadataAttrBudget(0);
+        assertThatThrownBy(c::validate).isInstanceOf(IllegalStateException.class).hasMessageContaining("metadata.attr-budget");
+    }
+
+    @Test
+    void resourceId_cannot_be_excluded_or_renamed_away_from_the_join() {
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setLabelsExclude("resource*");
+        assertThatThrownBy(c::validate).isInstanceOf(IllegalStateException.class).hasMessageContaining("resourceId");
+        c.setLabelsExclude("");
+        c.setLabelsRename("resourceId=resource_id");
+        assertThatThrownBy(c::validate).isInstanceOf(IllegalStateException.class).hasMessageContaining("resourceId");
+    }
+
     // ---------- batch.linger-ms -----------------------------------------------
 
     @Test

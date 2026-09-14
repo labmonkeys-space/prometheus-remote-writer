@@ -31,6 +31,14 @@ public final class PluginMetrics {
      *  written-count header says it did not write. Not a term of the
      *  reconciliation identity: they are already in samples_written_total. */
     public static final String SAMPLES_UNCONFIRMED_BY_RECEIVER = "samples_unconfirmed_by_receiver_total";
+    /** Metadata samples (onms_resource_attr, onms_resource_category, …)
+     *  handed to the write pipeline. Part of the offered identity like any
+     *  other sample. */
+    public static final String METADATA_SERIES_EMITTED        = "metadata_series_emitted_total";
+    /** Attributes beyond metadata.attr-budget, not emitted as rows. */
+    public static final String METADATA_ATTRS_DROPPED         = "metadata_attrs_dropped_total";
+    /** Resources currently in the metadata registry (gauge). */
+    public static final String METADATA_RESOURCES             = "metadata_resources";
     public static final String SAMPLES_DROPPED_5XX             = "samples_dropped_5xx_total";
     public static final String SAMPLES_DROPPED_TRANSPORT       = "samples_dropped_transport_total";
     public static final String SAMPLES_DROPPED_QUEUE_FULL      = "samples_dropped_queue_full_total";
@@ -135,6 +143,8 @@ public final class PluginMetrics {
     private final Counter samplesWritten;
     private final Counter samplesDropped4xx;
     private final Counter samplesUnconfirmedByReceiver;
+    private final Counter metadataSeriesEmitted;
+    private final Counter metadataAttrsDropped;
     private final Counter samplesDropped5xx;
     private final Counter samplesDroppedTransport;
     private final Counter samplesDroppedNonfinite;
@@ -173,6 +183,8 @@ public final class PluginMetrics {
         this.samplesWritten               = registry.counter(SAMPLES_WRITTEN);
         this.samplesDropped4xx            = registry.counter(SAMPLES_DROPPED_4XX);
         this.samplesUnconfirmedByReceiver = registry.counter(SAMPLES_UNCONFIRMED_BY_RECEIVER);
+        this.metadataSeriesEmitted        = registry.counter(METADATA_SERIES_EMITTED);
+        this.metadataAttrsDropped         = registry.counter(METADATA_ATTRS_DROPPED);
         this.samplesDropped5xx            = registry.counter(SAMPLES_DROPPED_5XX);
         this.samplesDroppedTransport      = registry.counter(SAMPLES_DROPPED_TRANSPORT);
         this.samplesDroppedNonfinite      = registry.counter(SAMPLES_DROPPED_NONFINITE);
@@ -208,6 +220,8 @@ public final class PluginMetrics {
     public void samplesDropped4xx(long n)              { if (n > 0) samplesDropped4xx.inc(n); }
     public void samplesUnconfirmedByReceiver(long n)   { if (n > 0) samplesUnconfirmedByReceiver.inc(n); }
     public long samplesUnconfirmedByReceiverTotal()    { return samplesUnconfirmedByReceiver.getCount(); }
+    public void metadataSeriesEmitted(long n)          { if (n > 0) metadataSeriesEmitted.inc(n); }
+    public void metadataAttrsDropped(long n)           { if (n > 0) metadataAttrsDropped.inc(n); }
     public void samplesDropped5xx(long n)              { if (n > 0) samplesDropped5xx.inc(n); }
     public void samplesDroppedTransport(long n)        { if (n > 0) samplesDroppedTransport.inc(n); }
     public void samplesDroppedNonfinite(long n)        { if (n > 0) samplesDroppedNonfinite.inc(n); }

@@ -351,6 +351,16 @@ public class PrometheusRemoteWriterConfig {
      *  the boundary and needs a backend that accepts out-of-order writes. */
     private OverflowBucket.DrainPolicy overflowDrain = OverflowBucket.DrainPolicy.ORDERED;
 
+    /** {@code metadata.cadence-ms}: how often a resource's metadata series
+     *  (onms_resource_attr, onms_resource_category, …) are re-emitted when
+     *  nothing changed. New or changed metadata is emitted at once. Sets the
+     *  lookback a join needs: query with {@code last_over_time(…[2 × cadence])}.
+     *  0 switches the metadata series off. */
+    private long metadataCadenceMs = 15L * 60L * 1000L;
+    /** {@code metadata.attr-budget}: attributes per resource emitted as rows,
+     *  lowest keys first; the rest are counted in metadata_attrs_dropped_total. */
+    private int metadataAttrBudget = 16;
+
     /** Fsync policy for bucket segments: {@code always} (fsync every
      *  append; tightest RPO, lowest throughput), {@code batch} (fsync at
      *  the flush-interval boundary; loses at most ~flush-interval-ms of
@@ -486,6 +496,13 @@ public class PrometheusRemoteWriterConfig {
         }
         if (batchLingerMs < 0) {
             throw new IllegalStateException("batch.linger-ms must be >= 0 (got " + batchLingerMs + ")");
+        }
+        if (metadataCadenceMs < 0) {
+            throw new IllegalStateException("metadata.cadence-ms must be >= 0, 0 switching the metadata series off (got " + metadataCadenceMs + ")");
+        }
+        validateResourceIdKept();
+        if (metadataAttrBudget < 1) {
+            throw new IllegalStateException("metadata.attr-budget must be >= 1 (got " + metadataAttrBudget + ")");
         }
         if (retryMaxAttempts < 0) {
             throw new IllegalStateException("retry.max-attempts must be >= 0");
@@ -708,6 +725,35 @@ public class PrometheusRemoteWriterConfig {
      * target are NOT caught here — they depend on per-sample tag presence and
      * can only be observed at flush. Static-known collisions are caught.
      */
+    /**
+     * {@code resourceId} is the join key of every metadata series and the
+     * read path's resource contract; a config that excludes or renames it on
+     * the data series breaks both with no error at query time.
+     */
+    private void validateResourceIdKept() {
+        for (String glob : labelsExcludeGlobs()) {
+            if (globMatches(glob, "resourceId")) {
+                throw new IllegalStateException("labels.exclude = " + glob + " would remove resourceId, "
+                        + "the join key of the onms_resource_* metadata series and the read path's resource contract");
+            }
+        }
+        if (labelsRenameMap().containsKey("resourceId")) {
+            throw new IllegalStateException("labels.rename must not rename resourceId: it is the join key of the "
+                    + "onms_resource_* metadata series and the read path's resource contract");
+        }
+    }
+
+    /** Glob with {@code *} and {@code ?}, the grammar labels.exclude uses. */
+    private static boolean globMatches(String glob, String name) {
+        StringBuilder rx = new StringBuilder();
+        for (char c : glob.toCharArray()) {
+            if (c == '*') rx.append(".*");
+            else if (c == '?') rx.append('.');
+            else rx.append(java.util.regex.Pattern.quote(String.valueOf(c)));
+        }
+        return name.matches(rx.toString());
+    }
+
     private void validateRenameTargets() {
         Map<String, String> renameMap = labelsRenameMap();   // may throw on bad syntax
         if (renameMap.isEmpty()) return;
@@ -1039,6 +1085,8 @@ public class PrometheusRemoteWriterConfig {
         diffInt(out, "batch.size",                other.batchSize,             batchSize);
         diffLong(out, "flush.interval-ms",        other.flushIntervalMs,       flushIntervalMs);
         diffLong(out, "batch.linger-ms",          other.batchLingerMs,         batchLingerMs);
+        diffLong(out, "metadata.cadence-ms",      other.metadataCadenceMs,     metadataCadenceMs);
+        diffLong(out, "metadata.attr-budget",     other.metadataAttrBudget,    metadataAttrBudget);
         diffInt(out, "retry.max-attempts",        other.retryMaxAttempts,      retryMaxAttempts);
         diffLong(out, "retry.initial-backoff-ms", other.retryInitialBackoffMs, retryInitialBackoffMs);
         diffLong(out, "retry.max-backoff-ms",     other.retryMaxBackoffMs,     retryMaxBackoffMs);
@@ -1092,6 +1140,8 @@ public class PrometheusRemoteWriterConfig {
     public void setBatchSize(int v)                { batchSize = v; }
     public void setFlushIntervalMs(long v)         { flushIntervalMs = v; }
     public void setBatchLingerMs(long v)           { batchLingerMs = v; }
+    public void setMetadataCadenceMs(long v)       { metadataCadenceMs = v; }
+    public void setMetadataAttrBudget(int v)       { metadataAttrBudget = v; }
     public void setRetryMaxAttempts(int v)         { retryMaxAttempts = v; }
     public void setRetryInitialBackoffMs(long v)   { retryInitialBackoffMs = v; }
     public void setRetryMaxBackoffMs(long v)       { retryMaxBackoffMs = v; }
@@ -1447,6 +1497,8 @@ public class PrometheusRemoteWriterConfig {
     public int     getBatchSize()             { return batchSize; }
     public long    getFlushIntervalMs()       { return flushIntervalMs; }
     public long    getBatchLingerMs()         { return batchLingerMs; }
+    public long    getMetadataCadenceMs()     { return metadataCadenceMs; }
+    public int     getMetadataAttrBudget()    { return metadataAttrBudget; }
     public int     getRetryMaxAttempts()      { return retryMaxAttempts; }
     public long    getRetryInitialBackoffMs() { return retryInitialBackoffMs; }
     public long    getRetryMaxBackoffMs()     { return retryMaxBackoffMs; }

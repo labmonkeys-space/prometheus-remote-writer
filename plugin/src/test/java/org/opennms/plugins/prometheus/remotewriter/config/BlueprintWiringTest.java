@@ -250,6 +250,8 @@ class BlueprintWiringTest {
         expected.put("batch.size",              String.valueOf(javaDefaults.getBatchSize()));
         expected.put("flush.interval-ms",       String.valueOf(javaDefaults.getFlushIntervalMs()));
         expected.put("overflow.max-size-bytes", String.valueOf(javaDefaults.getOverflowMaxSizeBytes()));
+        expected.put("metadata.cadence-ms",     String.valueOf(javaDefaults.getMetadataCadenceMs()));
+        expected.put("metadata.attr-budget",    String.valueOf(javaDefaults.getMetadataAttrBudget()));
 
         for (Map.Entry<String, String> e : expected.entrySet()) {
             assertThat(cmDefaults)

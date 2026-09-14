@@ -14,9 +14,11 @@ import static org.awaitility.Awaitility.await;
 import java.io.IOException;
 import java.time.Duration;
 import java.time.Instant;
-import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
+import org.opennms.plugins.prometheus.remotewriter.wire.proto.WriteRequest;
+import org.xerial.snappy.Snappy;
+import java.util.List;
 
 import okhttp3.mockwebserver.MockResponse;
 import okhttp3.mockwebserver.MockWebServer;
@@ -453,12 +455,98 @@ class PrometheusRemoteWriterStorageTest {
 
                 PluginMetrics m = s.getMetrics();
                 await().atMost(Duration.ofSeconds(2))
-                       .until(() -> m.snapshot().get(PluginMetrics.SAMPLES_WRITTEN).longValue() == 1L);
+                       .until(() -> m.snapshot().get(PluginMetrics.SAMPLES_WRITTEN).longValue() >= 1L);
             } finally {
                 s.stop();
             }
-            assertThat(server.getRequestCount()).isEqualTo(1);
+            // The data path's request, decoded: one series, the one stored.
+            // Request counting would race the metadata emitter, whose first
+            // rows for this resource can follow within a second.
+            WriteRequest first = decode(server.takeRequest(5, TimeUnit.SECONDS));
+            assertThat(first.getTimeseriesCount()).isEqualTo(1);
+            assertThat(labelsOf(first.getTimeseries(0))).containsEntry("__name__", "ifHCInOctets");
         }
+    }
+
+    /**
+     * The metadata series reach the backend through the same pipeline as
+     * the data: registry, emitter, shards, HTTP. Nothing else exercises that
+     * whole path, and a resource's attributes only ever become rows here.
+     */
+    @Test
+    void resource_attributes_reach_the_backend_as_rows() throws Exception {
+        try (MockWebServer server = new MockWebServer()) {
+            server.setDispatcher(new okhttp3.mockwebserver.Dispatcher() {
+                @Override public MockResponse dispatch(okhttp3.mockwebserver.RecordedRequest r) {
+                    return new MockResponse().setResponseCode(204);
+                }
+            });
+            server.start();
+            PrometheusRemoteWriterConfig c = new PrometheusRemoteWriterConfig();
+            c.setOverflowMaxSizeBytes(0);
+            c.setWriteUrl(server.url("/api/v1/push").toString());
+            c.setReadUrl(server.url("/prometheus").toString());
+            c.setBatchSize(10);
+            c.setFlushIntervalMs(50);
+            c.setShutdownGracePeriodMs(1_000);
+
+            PrometheusRemoteWriterStorage s = new PrometheusRemoteWriterStorage(c);
+            s.start();
+            try {
+                s.store(List.of(ImmutableSample.builder()
+                        .metric(ImmutableMetric.builder()
+                                .intrinsicTag("name", "ifHCInOctets")
+                                .intrinsicTag("resourceId", "node[1].interfaceSnmp[eth0]")
+                                .externalTag("ifName", "eth0")
+                                .externalTag("ifAlias", "uplink to core")
+                                .externalTag("categories", "Routers")
+                                .build())
+                        .time(Instant.ofEpochMilli(1_000_000L))
+                        .value(42.0)
+                        .build()));
+
+                Map<String, String> dataSeries = null;
+                Map<String, String> aliasRow = null;
+                Map<String, String> categoryRow = null;
+                long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+                while ((aliasRow == null || categoryRow == null || dataSeries == null) && System.nanoTime() < deadline) {
+                    okhttp3.mockwebserver.RecordedRequest r = server.takeRequest(5, TimeUnit.SECONDS);
+                    if (r == null) break;
+                    for (org.opennms.plugins.prometheus.remotewriter.wire.proto.TimeSeries ts : decode(r).getTimeseriesList()) {
+                        Map<String, String> l = labelsOf(ts);
+                        switch (l.get("__name__")) {
+                            case "ifHCInOctets" -> dataSeries = l;
+                            case "onms_resource_attr" -> { if ("ifAlias".equals(l.get("key"))) aliasRow = l; }
+                            case "onms_resource_category" -> categoryRow = l;
+                            default -> { }
+                        }
+                    }
+                }
+                assertThat(dataSeries).as("data series").isNotNull();
+                assertThat(aliasRow).as("ifAlias row").isNotNull()
+                        .containsEntry("value", "uplink to core")
+                        .containsEntry("resourceId", dataSeries.get("resourceId"));
+                assertThat(aliasRow.keySet()).containsExactlyInAnyOrder("__name__", "resourceId", "key", "value");
+                assertThat(categoryRow).as("category row").isNotNull().containsEntry("category", "Routers");
+                assertThat(dataSeries).doesNotContainKey("if_alias");
+
+                Map<String, Number> m = s.getMetrics().snapshot();
+                assertThat(m.get(PluginMetrics.METADATA_RESOURCES).longValue()).isEqualTo(1);
+                assertThat(m.get(PluginMetrics.METADATA_SERIES_EMITTED).longValue()).isGreaterThanOrEqualTo(3);
+            } finally {
+                s.stop();
+            }
+        }
+    }
+
+    private static WriteRequest decode(okhttp3.mockwebserver.RecordedRequest r) throws java.io.IOException {
+        return WriteRequest.parseFrom(Snappy.uncompress(r.getBody().readByteArray()));
+    }
+
+    private static Map<String, String> labelsOf(org.opennms.plugins.prometheus.remotewriter.wire.proto.TimeSeries ts) {
+        Map<String, String> out = new java.util.LinkedHashMap<>();
+        ts.getLabelsList().forEach(l -> out.put(l.getName(), l.getValue()));
+        return out;
     }
 
     /**
@@ -503,7 +591,7 @@ class PrometheusRemoteWriterStorageTest {
 
                 PluginMetrics m = s.getMetrics();
                 await().atMost(Duration.ofSeconds(2))
-                       .until(() -> m.snapshot().get(PluginMetrics.SAMPLES_WRITTEN).longValue() == 1L);
+                       .until(() -> m.snapshot().get(PluginMetrics.SAMPLES_WRITTEN).longValue() >= 1L);
             } finally {
                 s.stop();
             }
@@ -1108,6 +1196,7 @@ class PrometheusRemoteWriterStorageTest {
         PrometheusRemoteWriterConfig c = new PrometheusRemoteWriterConfig();
         c.setWriteUrl(server.url("/api/v1/push").toString());
         c.setOverflowMaxSizeBytes(0);   // memory-only: these cases pin the refusal contract
+        c.setMetadataCadenceMs(0);      // these cases count offered samples and queue slots exactly
         c.setReadUrl(server.url("/prometheus").toString());
         c.setQueueCapacity(queueCapacity);
         c.setWriterShards(1);   // these cases size one queue deliberately; 0.8.0 defaults to 4

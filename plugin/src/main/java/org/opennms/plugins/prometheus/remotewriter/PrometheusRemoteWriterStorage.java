@@ -34,6 +34,8 @@ import org.opennms.plugins.prometheus.remotewriter.config.HttpHeadersConfig;
 import org.opennms.plugins.prometheus.remotewriter.config.PrometheusRemoteWriterConfig;
 import org.opennms.plugins.prometheus.remotewriter.http.RemoteWriteHttpClient;
 import org.opennms.plugins.prometheus.remotewriter.mapper.LabelMapper;
+import org.opennms.plugins.prometheus.remotewriter.metadata.MetadataEmitter;
+import org.opennms.plugins.prometheus.remotewriter.metadata.MetadataRegistry;
 import org.opennms.plugins.prometheus.remotewriter.metrics.PluginMetrics;
 import org.opennms.plugins.prometheus.remotewriter.queue.OverflowBucket;
 import org.opennms.plugins.prometheus.remotewriter.queue.Shards;
@@ -104,6 +106,8 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
      */
     private record Active(
             LabelMapper           labelMapper,
+            MetadataRegistry      metadataRegistry,
+            MetadataEmitter       metadataEmitter,
             Shards                shards,
             RemoteWriteHttpClient writeClient,
             PrometheusReadClient  readClient,
@@ -318,9 +322,13 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
         RemoteWriteHttpClient wc = null;
         PrometheusReadClient  rc = null;
         Shards                sh = null;
+        MetadataEmitter       me = null;
         try {
             m  = new PluginMetrics();
-            lm = new LabelMapper(config, m);
+            // metadata.cadence-ms = 0 switches the metadata series off: no
+            // registry work on the hot path, no emitter thread.
+            MetadataRegistry registry = config.getMetadataCadenceMs() > 0 ? new MetadataRegistry() : null;
+            lm = new LabelMapper(config, m, registry);
             wc = new RemoteWriteHttpClient(config, httpHeadersConfig);
             rc = new PrometheusReadClient(config, m, httpHeadersConfig);
             sh = new Shards(config.getWriterShards(), config.getQueueCapacity(), wc,
@@ -330,15 +338,43 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
                     bucketFactory(m), config.getOverflowDrain());
 
             PrometheusRemoteWriterConfig.StorePolicy policy = config.resolvedStorePolicy();
-            Active built = new Active(lm, sh, wc, rc, m, policy);
+            if (registry != null) {
+                // Metadata series ride the same pipeline as data samples, in
+                // the emitter's own batches, through the same offer path as
+                // store(): same store policy, same lock, same accounting.
+                final Shards shards = sh;
+                final PluginMetrics metrics = m;
+                me = new MetadataEmitter(registry,
+                        new MetadataEmitter.Settings(config.getMetadataCadenceMs(),
+                                config.getMetadataAttrBudget(), config.getInstanceId()),
+                        batch -> {
+                            try {
+                                int refused = offer(shards, policy, batch);
+                                // Offered only once placed or refused, so a
+                                // batch the tier threw on does not drift the
+                                // reconciliation identity.
+                                metrics.storeSamplesOffered(batch.size());
+                                return refused;
+                            } catch (StorageException e) {
+                                // The disk tier could not be written. The
+                                // emitter logs it, once a minute, and retries
+                                // the batch next tick.
+                                throw new IllegalStateException(e.getMessage(), e);
+                            }
+                        },
+                        m, System::currentTimeMillis);
+            }
+            Active built = new Active(lm, registry, me, sh, wc, rc, m, policy);
             registerGauges(built);
             m.startJmxReporter();
             logActivationOrDiff();
             logEffectiveWritePath(policy);
             sh.start();
+            if (me != null) me.start();
             active = built;
         } catch (RuntimeException e) {
             if (m != null) m.stopJmxReporter();
+            if (me != null) { try { me.stop(); } catch (RuntimeException ignored) {} }
             rollbackStart(sh, wc, rc);
             throw e;
         }
@@ -369,6 +405,8 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
                 config.getOverflowDrain().name().toLowerCase(java.util.Locale.ROOT),
                 config.getOverflowFull().name().toLowerCase(java.util.Locale.ROOT).replace('_', '-'),
                 storePolicy);
+        LOG.info("metadata: metadata.cadence-ms={}, metadata.attr-budget={}",
+                config.getMetadataCadenceMs(), config.getMetadataAttrBudget());
     }
 
     /**
@@ -435,6 +473,10 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
         active = null;
 
         LOG.info("prometheus-remote-writer stopping");
+        // The emitter first, so nothing new enters the shards during the drain.
+        if (a.metadataEmitter() != null) {
+            try { a.metadataEmitter().stop(); } catch (RuntimeException e) { LOG.warn("metadata emitter stop: {}", e.getMessage(), e); }
+        }
         stopPipeline(a);
         // After the drain so a scrape during the grace period still sees the
         // final totals; before the clients go so no gauge reads a closed one.
@@ -515,23 +557,36 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
             mapped.add(m);
         }
         if (mapped.isEmpty()) return;
+        int refused = offer(a.shards(), a.storePolicy(), mapped);
+        if (refused > 0) throw noRoom(a.shards(), refused, mapped.size());
+    }
 
-        if (a.storePolicy() == PrometheusRemoteWriterConfig.StorePolicy.ALL_OR_NOTHING) {
+    /**
+     * The one way samples enter the shards, for {@code store()} and the
+     * metadata emitter alike: the store policy, the all-or-nothing lock, the
+     * disk-tier error translation and the refusal accounting all live here.
+     * Under all-or-nothing a call is placed whole or not at all, so the room
+     * check and the placement are one step against every other offerer,
+     * including the emitter, which is why the emitter cannot bypass this.
+     *
+     * @return how many samples were refused, already counted
+     */
+    private int offer(Shards shards,
+                      PrometheusRemoteWriterConfig.StorePolicy policy,
+                      List<MappedSample> mapped) throws StorageException {
+        if (policy == PrometheusRemoteWriterConfig.StorePolicy.ALL_OR_NOTHING) {
             // Refuse the whole call without placing anything, so a caller that
             // retries the whole call on exception (Horizon's offheap writer)
-            // never re-sends samples we already took. The lock makes
-            // check-then-place atomic against other store() threads; the
-            // flusher only ever removes, which can only make room.
+            // never re-sends samples we already took.
             synchronized (allOrNothingLock) {
-                if (!everyShardHasRoomFor(a.shards(), mapped)) {
-                    countRefused(a, mapped.size());
-                    throw noRoom(a, mapped.size(), mapped.size());
+                if (!everyShardHasRoomFor(shards, mapped)) {
+                    countRefused(shards, mapped.size());
+                    return mapped.size();
                 }
-                acceptAll(a, mapped);
+                return acceptAll(shards, mapped);
             }
-            return;
         }
-        acceptAll(a, mapped);
+        return acceptAll(shards, mapped);
     }
 
     /** PARTIAL: attempt every sample so a shard that is out of room does not
@@ -540,11 +595,11 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
      *  only when its bucket is at its bound too. One exception per call, not
      *  per refused sample: under overload that is tens of thousands of stack
      *  traces a second saved. */
-    private static void acceptAll(Active a, List<MappedSample> mapped) throws StorageException {
+    private static int acceptAll(Shards shards, List<MappedSample> mapped) throws StorageException {
         int refused;
         try {
             // One accept lock per shard per call, not one per sample (#182).
-            refused = a.shards().acceptAll(mapped);
+            refused = shards.acceptAll(mapped);
         } catch (java.io.UncheckedIOException io) {
             // The disk tier could not be written. Surface it as a typed error
             // rather than an unchecked one, so OpenNMS backs off instead of
@@ -554,18 +609,16 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
                 + io.getMessage() + " — check that overflow.dir is present and writable",
                 io.getCause());
         }
-        if (refused > 0) {
-            countRefused(a, refused);
-            throw noRoom(a, refused, mapped.size());
-        }
+        if (refused > 0) countRefused(shards, refused);
+        return refused;
     }
 
     /** Book refusals against whichever tier was the one that ran out. */
-    private static void countRefused(Active a, int refused) {
-        if (a.shards().overflowEnabled()) {
-            a.shards().countDroppedOverflowFull(refused);
+    private static void countRefused(Shards shards, int refused) {
+        if (shards.overflowEnabled()) {
+            shards.countDroppedOverflowFull(refused);
         } else {
-            a.shards().countDroppedQueueFull(refused);
+            shards.countDroppedQueueFull(refused);
         }
     }
 
@@ -578,15 +631,15 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
         return true;
     }
 
-    private static StorageException noRoom(Active a, int refused, int offered) {
-        return a.shards().overflowEnabled()
+    private static StorageException noRoom(Shards shards, int refused, int offered) {
+        return shards.overflowEnabled()
                 ? new StorageException("prometheus-remote-writer overflow tier full: refused "
                         + refused + " of " + offered + " sample(s) (writer.shards="
-                        + a.shards().shardCount() + "); raise overflow.max-size-bytes, switch to "
+                        + shards.shardCount() + "); raise overflow.max-size-bytes, switch to "
                         + "overflow.full=drop-oldest, or resolve the downstream outage that is "
                         + "preventing drain; see samples_dropped_overflow_full_total")
                 : new StorageException("prometheus-remote-writer queue full: refused " + refused
-                        + " of " + offered + " sample(s) (writer.shards=" + a.shards().shardCount()
+                        + " of " + offered + " sample(s) (writer.shards=" + shards.shardCount()
                         + "); see samples_dropped_queue_full_total");
     }
 
@@ -794,6 +847,8 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
         }
         m.registerLongGauge(PluginMetrics.DELETE_NOOP,              this::getDeleteNoopTotal);
         m.registerLongGauge(PluginMetrics.METADATA_DENYLIST_BLOCKED, a.labelMapper()::getMetadataDenylistBlockedCount);
+        m.registerLongGauge(PluginMetrics.METADATA_RESOURCES,
+                () -> a.metadataRegistry() == null ? 0L : (long) a.metadataRegistry().size());
 
         m.registerLongGauge(PluginMetrics.QUEUE_DEPTH,              () -> (long) a.shards().totalDepth());
         m.registerLongGauge(PluginMetrics.QUEUE_DEPTH_HIGH_WATER,   a.shards()::depthHighWater);

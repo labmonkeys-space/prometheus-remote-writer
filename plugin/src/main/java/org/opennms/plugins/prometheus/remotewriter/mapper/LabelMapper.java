@@ -193,13 +193,26 @@ public final class LabelMapper {
      *  resolved snake-cased label names aren't known until a sample flows
      *  through, so runtime detection is the only practical guard. */
     private final Set<String> warnedCopyTargetClobbers = ConcurrentHashMap.newKeySet();
+    /** Fed with every mapped sample's resource metadata; null when not wired. */
+    private final org.opennms.plugins.prometheus.remotewriter.metadata.MetadataRegistry registry;
 
     public LabelMapper(PrometheusRemoteWriterConfig config) {
         this(config, null);
     }
 
     public LabelMapper(PrometheusRemoteWriterConfig config, PluginMetrics metrics) {
+        this(config, metrics, null);
+    }
+
+    /**
+     * @param registry where each mapped sample's resource metadata is
+     *                 recorded for the metadata series, or null to record
+     *                 nothing (tests of the label mapping alone)
+     */
+    public LabelMapper(PrometheusRemoteWriterConfig config, PluginMetrics metrics,
+                       org.opennms.plugins.prometheus.remotewriter.metadata.MetadataRegistry registry) {
         Objects.requireNonNull(config, "config");
+        this.registry          = registry;
         this.excludeGlobs      = compileGlobs(config.labelsExcludeGlobs());
         this.includeGlobs      = compileGlobs(config.labelsIncludeGlobs());
         this.renameMap         = config.labelsRenameMap();
@@ -254,6 +267,14 @@ public final class LabelMapper {
         }
         if (metricPrefix != null && !metricPrefix.isEmpty()) {
             metricName = metricPrefix + metricName;
+        }
+        // The resource's attributes and categories become series of their own
+        // (onms_resource_attr, onms_resource_category), not labels here. This
+        // is a hash compare on the hot path; the registry allocates only when
+        // the metadata is new or changed.
+        String rawResourceId = sourceTags.get(IntrinsicTagNames.resourceId);
+        if (registry != null && rawResourceId != null && !rawResourceId.isEmpty()) {
+            registry.observe(rawResourceId, metric);
         }
 
         Defaults defaults = buildDefaults(metricName, sourceTags, instanceId, jobName, ifSpeedMode, categoriesMode);

@@ -72,6 +72,7 @@ class PrometheusRemoteWriterStorageOverflowTest {
         c.setRetryMaxAttempts(1);
         c.setShutdownGracePeriodMs(100);
         c.setOverflowDir(dir.toString());
+        c.setMetadataCadenceMs(0);      // these cases count offered samples and tiers exactly
         c.setOverflowMaxSizeBytes(bucketBytes);
         c.setOverflowFull(full);
         return c;
