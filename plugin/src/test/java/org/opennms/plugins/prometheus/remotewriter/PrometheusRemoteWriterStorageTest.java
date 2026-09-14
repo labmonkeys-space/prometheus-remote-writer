@@ -76,6 +76,24 @@ class PrometheusRemoteWriterStorageTest {
     }
 
     @Test
+    void a_cfg_still_carrying_a_removed_v0x_key_leaves_the_plugin_inactive() {
+        // The untouched-upgrade case: validation rejects the key, start()
+        // logs it as a rejected configuration (not the transient "not yet
+        // configured" race) and the plugin declines to serve.
+        PrometheusRemoteWriterConfig c = minimal();
+        c.setAttrMode("off");
+        PrometheusRemoteWriterStorage s = new PrometheusRemoteWriterStorage(c);
+        s.start();
+        try {
+            assertThatThrownBy(() -> s.store(List.of()))
+                .isInstanceOf(StorageException.class)
+                .hasMessageContaining("not yet started");
+        } finally {
+            s.stop();
+        }
+    }
+
+    @Test
     void instance_id_set_does_not_trip_the_warn_gate() {
         PrometheusRemoteWriterConfig c = minimal();
         c.setInstanceId("opennms-us-east");

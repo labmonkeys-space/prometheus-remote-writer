@@ -80,17 +80,6 @@ class PrometheusRemoteWriteIT {
         return c;
     }
 
-    /** Swap the shared storage for one with labels.attr-mode=both — the
-     *  attr round-trip ITs pin the (now opt-in) v0.4 emission. The field is
-     *  reassigned so @AfterEach tears the replacement down. */
-    private void restartWithAttrModeBoth() {
-        storage.stop();
-        PrometheusRemoteWriterConfig c = baseConfig();
-        c.setAttrMode("both");
-        storage = new PrometheusRemoteWriterStorage(c);
-        storage.start();
-    }
-
     @AfterEach
     void stop() {
         if (storage != null) storage.stop();
@@ -144,8 +133,10 @@ class PrometheusRemoteWriteIT {
         assertThat(keys).contains(
                 "job", "instance",
                 "node", "foreign_source", "foreign_id", "location",
-                "resource_type", "resource_instance", "if_name", "if_speed");
-        assertThat(keys).contains("onms_cat_Routers", "onms_cat_ProductionSites");
+                "resource_type", "resource_instance", "if_name");
+        // Categories and the speed are metadata series, not labels.
+        assertThat(keys).doesNotContain("if_speed", "if_descr", "categories",
+                "onms_cat_Routers", "onms_cat_ProductionSites");
 
         // job derives to "snmp" from a bracketed-form resourceId; instance
         // mirrors node for the FS-qualified identity.
@@ -475,8 +466,8 @@ class PrometheusRemoteWriteIT {
 
             // The canonical defaults ARE still present.
             assertThat(keys).contains(
-                    "node", "foreign_source", "foreign_id", "node_label", "location",
-                    "if_name", "if_descr", "if_speed", "onms_cat_Routers");
+                    "node", "foreign_source", "foreign_id", "node_label", "location", "if_name");
+            assertThat(keys).doesNotContain("if_descr", "if_speed", "onms_cat_Routers");
         } finally {
             override.stop();
         }
@@ -886,164 +877,6 @@ class PrometheusRemoteWriteIT {
         } finally {
             override.stop();
         }
-    }
-
-    @Test
-    void string_attribute_external_tag_round_trips_through_prometheus() throws Exception {
-        restartWithAttrModeBoth();
-        // OpenNMS-core's TimeseriesPersistOperationBuilder attaches resource
-        // string attributes (the values ${name} / ${datname} / ${spcname}
-        // resolve against) to Metric.getExternalTags(). The plugin emits them
-        // as `onms_extattr_<key>` so the read side can deposit them on the
-        // external partition where TimeseriesResourceStorageDao reads them
-        // for placeholder substitution.
-        Instant now = Instant.now();
-        String metricName = "onms_it_extattr_" + System.nanoTime();
-        Sample sample = ImmutableSample.builder()
-                .metric(ImmutableMetric.builder()
-                        .intrinsicTag("name", metricName)
-                        .intrinsicTag("resourceId", "node[1].eventdProcessingStat[Logger]")
-                        .metaTag(MetaTagNames.mtype, "counter")
-                        .externalTag("name", "Eventd_Logger_Receiver")
-                        .build())
-                .time(now)
-                .value(7.0)
-                .build();
-
-        storage.store(List.of(sample));
-        await().atMost(Duration.ofSeconds(20))
-               .until(() -> storage.getMetrics().snapshot()
-                       .get(PluginMetrics.SAMPLES_WRITTEN).longValue() >= 1L);
-
-        TagMatcher nameMatcher = ImmutableTagMatcher.builder()
-                .type(TagMatcher.Type.EQUALS)
-                .key("name")
-                .value(metricName)
-                .build();
-
-        List<Metric> found = await().atMost(Duration.ofSeconds(20))
-                .until(() -> storage.findMetrics(List.of(nameMatcher)),
-                       list -> !list.isEmpty());
-        assertThat(found).hasSize(1);
-
-        // External partition carries the resource string attribute on the
-        // read side — what OpenNMS-core dereferences for ${name} substitution.
-        assertThat(found.get(0).getExternalTags())
-                .anySatisfy(t -> {
-                    assertThat(t.getKey()).isEqualTo("name");
-                    assertThat(t.getValue()).isEqualTo("Eventd_Logger_Receiver");
-                });
-        // Partition fidelity: meta partition must NOT also carry it.
-        assertThat(found.get(0).getMetaTags())
-                .noneSatisfy(t -> assertThat(t.getKey()).isEqualTo("name"));
-        // The prefixed wire form must NOT leak into either partition.
-        assertThat(found.get(0).getMetaTags())
-                .noneSatisfy(t -> assertThat(t.getKey()).isEqualTo("onms_extattr_name"));
-        assertThat(found.get(0).getExternalTags())
-                .noneSatisfy(t -> assertThat(t.getKey()).isEqualTo("onms_extattr_name"));
-
-        // Same on getTimeSeriesData — reconstructs from the response labels.
-        TimeSeriesData data = storage.getTimeSeriesData(
-                ImmutableTimeSeriesFetchRequest.builder()
-                        .metric(found.get(0))
-                        .start(now.minusSeconds(60))
-                        .end(now.plusSeconds(60))
-                        .step(Duration.ofSeconds(1))
-                        .aggregation(org.opennms.integration.api.v1.timeseries.Aggregation.NONE)
-                        .build());
-        assertThat(data.getMetric().getExternalTags())
-                .anySatisfy(t -> {
-                    assertThat(t.getKey()).isEqualTo("name");
-                    assertThat(t.getValue()).isEqualTo("Eventd_Logger_Receiver");
-                });
-    }
-
-    @Test
-    void multiple_string_attribute_external_tags_round_trip_independently() throws Exception {
-        restartWithAttrModeBoth();
-        Instant now = Instant.now();
-        String metricName = "onms_it_extattr_multi_" + System.nanoTime();
-        Sample sample = ImmutableSample.builder()
-                .metric(ImmutableMetric.builder()
-                        .intrinsicTag("name", metricName)
-                        .intrinsicTag("resourceId", "node[1].pgDatabase[customers]")
-                        .metaTag(MetaTagNames.mtype, "counter")
-                        .externalTag("name",    "X")
-                        .externalTag("datname", "Y")
-                        .build())
-                .time(now)
-                .value(11.0)
-                .build();
-
-        storage.store(List.of(sample));
-        await().atMost(Duration.ofSeconds(20))
-               .until(() -> storage.getMetrics().snapshot()
-                       .get(PluginMetrics.SAMPLES_WRITTEN).longValue() >= 1L);
-
-        TagMatcher nameMatcher = ImmutableTagMatcher.builder()
-                .type(TagMatcher.Type.EQUALS)
-                .key("name")
-                .value(metricName)
-                .build();
-        List<Metric> found = await().atMost(Duration.ofSeconds(20))
-                .until(() -> storage.findMetrics(List.of(nameMatcher)),
-                       list -> !list.isEmpty());
-        assertThat(found).hasSize(1);
-
-        assertThat(found.get(0).getExternalTags())
-                .anySatisfy(t -> {
-                    assertThat(t.getKey()).isEqualTo("name");
-                    assertThat(t.getValue()).isEqualTo("X");
-                })
-                .anySatisfy(t -> {
-                    assertThat(t.getKey()).isEqualTo("datname");
-                    assertThat(t.getValue()).isEqualTo("Y");
-                });
-    }
-
-    @Test
-    void meta_attribute_round_trips_via_onms_attr_prefix_unchanged_from_v04() throws Exception {
-        restartWithAttrModeBoth();
-        // Lock the v0.4.0 contract: a Sample with a plain-key META tag
-        // round-trips via `onms_attr_<key>` and lands back on the META
-        // partition. Pinned alongside the new external-partition test so
-        // the round-2 fix doesn't accidentally regress when partition
-        // routing is tweaked.
-        Instant now = Instant.now();
-        String metricName = "onms_it_meta_compat_" + System.nanoTime();
-        Sample sample = ImmutableSample.builder()
-                .metric(ImmutableMetric.builder()
-                        .intrinsicTag("name", metricName)
-                        .intrinsicTag("resourceId", "node[1].eventdProcessingStat[Logger]")
-                        .metaTag(MetaTagNames.mtype, "counter")
-                        .metaTag("custom", "from_meta")
-                        .build())
-                .time(now)
-                .value(3.0)
-                .build();
-
-        storage.store(List.of(sample));
-        await().atMost(Duration.ofSeconds(20))
-               .until(() -> storage.getMetrics().snapshot()
-                       .get(PluginMetrics.SAMPLES_WRITTEN).longValue() >= 1L);
-
-        TagMatcher nameMatcher = ImmutableTagMatcher.builder()
-                .type(TagMatcher.Type.EQUALS)
-                .key("name")
-                .value(metricName)
-                .build();
-        List<Metric> found = await().atMost(Duration.ofSeconds(20))
-                .until(() -> storage.findMetrics(List.of(nameMatcher)),
-                       list -> !list.isEmpty());
-        assertThat(found).hasSize(1);
-        assertThat(found.get(0).getMetaTags())
-                .anySatisfy(t -> {
-                    assertThat(t.getKey()).isEqualTo("custom");
-                    assertThat(t.getValue()).isEqualTo("from_meta");
-                });
-        // External partition does NOT carry the meta value (partition fidelity).
-        assertThat(found.get(0).getExternalTags())
-                .noneSatisfy(t -> assertThat(t.getKey()).isEqualTo("custom"));
     }
 
     // ---------- two-phase resource discovery -------------------------------

@@ -50,11 +50,16 @@ import org.slf4j.LoggerFactory;
  *   <li>{@code name} (intrinsic) — metric name</li>
  *   <li>{@code resourceId} (intrinsic) — kept raw and parsed</li>
  *   <li>{@code nodeId}, {@code foreignSource}, {@code foreignId}, {@code nodeLabel}, {@code location} — node identity</li>
- *   <li>{@code ifName}, {@code ifDescr}, {@code ifSpeed}, {@code ifHighSpeed} — interface attributes</li>
- *   <li>{@code categories} (comma-separated) — surveillance categories</li>
+ *   <li>{@code ifName} — the interface name</li>
  * </ul>
  * Any other source tag is only surfaced when the operator opts in via
- * {@code labels.include}.
+ * {@code labels.include}. The resource's string attributes ({@code ifAlias},
+ * {@code ifDescr}, {@code hrStorageDescr}, …), its categories and its
+ * interface speed are not labels on the data series: they go out as the
+ * metadata series ({@code onms_resource_attr}, {@code onms_resource_category},
+ * {@code onms_resource_info}, {@code onms_resource_ifspeed}) via the
+ * {@link org.opennms.plugins.prometheus.remotewriter.metadata.MetadataRegistry}
+ * this mapper feeds.
  */
 public final class LabelMapper {
 
@@ -72,20 +77,6 @@ public final class LabelMapper {
      * used {@code labels.rename = foo -> instance} (unusual, since {@code instance}
      * wasn't a default emission pre-v0.4) must pick a different target name.
      *
-     * <p>{@code ifSpeed} and {@code ifHighSpeed} are reserved <strong>unconditionally</strong>
-     * — regardless of the active {@code labels.if-speed-mode}. They are only
-     * emitted as defaults in raw mode, but reserving them only-when-raw would
-     * create a hot-reload footgun: a {@code labels.rename = X -> ifSpeed} accepted
-     * under {@code normalized} mode would silently clobber the now-emitted
-     * default after a flip to {@code raw}. Unconditional reservation closes that
-     * window with no operator-facing loss — neither name is a useful rename target
-     * in {@code normalized} mode (the labels aren't emitted there).
-     *
-     * <p>{@code categories} (singular) follows the same unconditional-reservation
-     * pattern: it is only emitted as a default in {@code labels.categories-mode = raw}
-     * (or {@code both}), but reserving it only-when-emitted would re-introduce the
-     * same hot-reload footgun. The {@code onms_cat_*} prefix reservation in
-     * {@link #RESERVED_LABEL_PREFIXES} is similarly mode-independent.
      */
     public static final Set<String> RESERVED_LABEL_NAMES = Set.of(
             "__name__",
@@ -98,11 +89,6 @@ public final class LabelMapper {
             "resource_type",
             "resource_instance",
             "if_name",
-            "if_descr",
-            "if_speed",
-            "ifSpeed",
-            "ifHighSpeed",
-            "categories",
             "onms_instance_id",
             "instance",
             "job",
@@ -113,46 +99,11 @@ public final class LabelMapper {
      * under them. Renaming onto a matching target would collide with one of
      * those emissions at flush time.
      *
-     * <p>{@code onms_cat_*} covers per-surveillance-category expansion.
-     * {@code onms_meta_*} is the default {@code metadata.label-prefix}; an
+     * <p>{@code onms_meta_*} is the default {@code metadata.label-prefix}; an
      * operator who customizes that prefix is out of scope for this guard.
-     * {@code onms_attr_*} carries plain-key Sample meta tags (resource
-     * string attributes used by OpenNMS placeholder substitution like
-     * {@code ${name}}) — see {@link #emitAttrLabels}.
-     * Keep in sync with {@link #buildDefaults} and {@link MetadataProcessor}.
+     * Keep in sync with {@link MetadataProcessor}.
      */
-    public static final List<String> RESERVED_LABEL_PREFIXES = List.of(
-            "onms_cat_",
-            "onms_meta_",
-            "onms_attr_",
-            "onms_extattr_");
-
-    /** Reserved label-name prefix that carries plain-key Sample meta tags
-     *  through the Prometheus round-trip. Keys without a {@code :} (i.e. not
-     *  OpenNMS context tags, which use {@code onms_meta_}) and not already
-     *  owned by a default emission (e.g. {@code mtype}) are emitted under
-     *  this prefix. The read side strips the prefix to recover the meta key.
-     *
-     *  <p>Public so {@code PromResponseParser} can reference the canonical
-     *  constant without duplicating the literal — keeps write and read in
-     *  lockstep. */
-    public static final String ATTR_PREFIX = "onms_attr_";
-
-    /** Reserved label-name prefix that carries plain-key Sample EXTERNAL
-     *  tags through the Prometheus round-trip. The external partition is
-     *  the one OpenNMS-core's {@code TimeseriesPersistOperationBuilder}
-     *  attaches resource string attributes to (the values
-     *  {@code ${name}} / {@code ${datname}} / {@code ${spcname}}
-     *  substitution dereferences), and
-     *  {@code TimeseriesResourceStorageDao.getStringAttributes()} reads
-     *  ONLY from the external partition for placeholder substitution. So
-     *  partition fidelity is required end-to-end: meta tags continue to
-     *  round-trip via {@link #ATTR_PREFIX}, external tags round-trip via
-     *  this prefix, and the read side deposits each on its respective
-     *  partition.
-     *
-     *  <p>Public for the same cross-package reason as {@link #ATTR_PREFIX}. */
-    public static final String EXTATTR_PREFIX = "onms_extattr_";
+    public static final List<String> RESERVED_LABEL_PREFIXES = List.of("onms_meta_");
 
     private static final Logger LOG = LoggerFactory.getLogger(LabelMapper.class);
 
@@ -163,16 +114,6 @@ public final class LabelMapper {
     private final String metricPrefix;
     private final String instanceId;
     private final String jobName;
-    private final PrometheusRemoteWriterConfig.IfSpeedMode ifSpeedMode;
-    private final PrometheusRemoteWriterConfig.CategoriesMode categoriesMode;
-    private final PrometheusRemoteWriterConfig.AttrMode attrMode;
-    /** Allowlist for {@code labels.attr-mode = external} — matched against
-     *  the RAW source-tag key (pre-sanitization), the spelling operators see
-     *  in their datacollection configs. An empty allowlist under external
-     *  mode emits nothing (gated at the call site in {@link #map(Sample)}),
-     *  so flipping to external without an allowlist never reopens the
-     *  unbounded v0.4 emission. */
-    private final List<Pattern> attrIncludeGlobs;
     private final MetadataProcessor metadataProcessor;
     /** Plugin metrics sink. May be null — tests that don't care about the
      *  counter use the 1-arg constructor which leaves this null; the
@@ -220,17 +161,8 @@ public final class LabelMapper {
         this.metricPrefix      = config.getMetricPrefix();
         this.instanceId        = config.getInstanceId();
         this.jobName           = config.getJobName();
-        this.ifSpeedMode       = config.getIfSpeedMode();
-        this.categoriesMode    = config.getCategoriesMode();
-        this.attrMode          = config.getAttrMode();
-        this.attrIncludeGlobs  = compileGlobs(config.labelsAttrIncludeGlobs());
         this.metadataProcessor = new MetadataProcessor(config);
         this.metrics           = metrics;
-        // labels.profile=legacy is rejected in PrometheusRemoteWriterConfig
-        // .validateLabelProfile() until the fixture-pinned baseline lands
-        // (openspec change label-profiles, task group 5) — validation-level so
-        // the storage's graceful config-error handling applies instead of a
-        // blueprint container failure.
     }
 
     /** Visible for tests — unmodifiable view of labels.copy sources that
@@ -277,77 +209,13 @@ public final class LabelMapper {
             registry.observe(rawResourceId, metric);
         }
 
-        Defaults defaults = buildDefaults(metricName, sourceTags, instanceId, jobName, ifSpeedMode, categoriesMode);
+        Defaults defaults = buildDefaults(metricName, sourceTags, instanceId, jobName);
         if (defaults.resourceIdWasUnparseable() && metrics != null) {
             metrics.samplesUnparseableResourceId(1);
         }
-        // Work on a fresh mutable copy; apply{Exclude,Include} may pass the
-        // map through unchanged when globs are empty, and metadataProcessor
-        // then mutates it — we do not want those mutations to leak back into
-        // the Defaults record, which is otherwise treated as a value object.
-        Map<String, String> labels = new LinkedHashMap<>(defaults.labels());
-        // Walk the source meta-tag and external-tag lists directly (not the
-        // merged sourceTags map) so partition-keyed values whose source key
-        // collides with intrinsics — notably `name` on the external partition,
-        // the resource string attribute that drives OpenNMS's ${name}
-        // placeholder substitution — survive into the wire payload despite
-        // the shadow merge in collectTags.
-        //
-        // Two prefixes preserve partition fidelity end-to-end so the read
-        // side can deposit each tag on the correct partition of the
-        // reconstructed Metric:
-        //   meta     → onms_attr_<key>
-        //   external → onms_extattr_<key>
-        //
-        // The external pass passes the default emitter's consumed-keys set so
-        // an external `nodeLabel` / `foreignSource` / etc. that the default
-        // allowlist already represents under a canonical name is not also
-        // emitted as `onms_extattr_*` (avoids double-emission). The meta pass
-        // uses an empty consumed-keys set — meta keys don't typically overlap
-        // with the default allowlist's source-tag conventions, and the
-        // existing v0.4.0 behavior round-trips MATE-derived meta tags like
-        // `nodeLabel` under `onms_attr_*` even though `node_label` is also
-        // emitted as a default. Kept the same to preserve wire compatibility.
-        // Runs before applyExclude so `labels.exclude = onms_*attr_*` is honored.
-        //
-        // The external-pass consumed-keys set is the default-allowlist's
-        // consumed keys MINUS the intrinsic keys (`name`, `resourceId`).
-        // Rationale: `consumedSourceKeys()` exists to stop `applyInclude` from
-        // re-emitting the same source key under a snake-cased alias; for that
-        // purpose `name` and `resourceId` belong in the set. But on the
-        // external partition, `name` is exactly the resource string attribute
-        // we WANT to round-trip via `onms_extattr_name` (it's the value
-        // OpenNMS-core's ${name} placeholder substitution dereferences). So
-        // we strip the intrinsic-key entries before handing the set to the
-        // external pass — the remaining entries are the default-emitter-owned
-        // source keys (`nodeLabel`, `foreignSource`, `ifName`, …) which we
-        // legitimately don't want to double-emit under `onms_extattr_*`.
-        Set<String> extConsumedKeys = new HashSet<>(defaults.consumedSourceKeys());
-        extConsumedKeys.remove(IntrinsicTagNames.name);
-        extConsumedKeys.remove(IntrinsicTagNames.resourceId);
-        // Gated on labels.attr-mode (default OFF since v0.5.0): every
-        // attribute key becomes a distinct label NAME, and keys that embed
-        // per-resource identity (latency ICMP/<ip>, JMX mbean paths) explode
-        // the backend's label-name index at scale — issue #112. BOTH restores
-        // the unfiltered v0.4 emission; EXTERNAL emits only the external
-        // partition (what ${name}-style graph placeholder substitution
-        // dereferences), filtered by the labels.attr-include allowlist.
-        switch (attrMode) {
-            case BOTH -> {
-                emitAttrLabels(labels, metric.getMetaTags(),     ATTR_PREFIX,    java.util.Set.of(), List.of());
-                emitAttrLabels(labels, metric.getExternalTags(), EXTATTR_PREFIX, extConsumedKeys,    List.of());
-            }
-            case EXTERNAL -> {
-                // Spec: external emits ONLY allowlisted keys. An empty
-                // allowlist therefore emits nothing — gate here because
-                // emitAttrLabels treats an empty glob list as "no filter"
-                // (the BOTH path's contract).
-                if (!attrIncludeGlobs.isEmpty()) {
-                    emitAttrLabels(labels, metric.getExternalTags(), EXTATTR_PREFIX, extConsumedKeys, attrIncludeGlobs);
-                }
-            }
-            case OFF -> { /* no attribute round-trip */ }
-        }
+        // Nothing but this call holds the Defaults record, so its map can be
+        // worked on in place.
+        Map<String, String> labels = defaults.labels();
         labels = applyExclude(labels, excludeGlobs);
         labels = applyInclude(labels, sourceTags, includeGlobs, defaults.consumedSourceKeys());
         labels = applyCopy(labels, copyMap, warnedUnknownCopySources, warnedCopyTargetClobbers);
@@ -384,28 +252,7 @@ public final class LabelMapper {
                     Set<String> consumedSourceKeys,
                     boolean resourceIdWasUnparseable) {}
 
-    /** 4-arg overload — defaults to v0.4.x mode shapes ({@code NORMALIZED} for
-     *  if-speed, {@code PER_CATEGORY} for categories). Preserves the pre-mode-knob
-     *  call shape for existing tests and any future caller that doesn't care
-     *  about either mode (the defaults reproduce v0.4.x emission). */
     static Defaults buildDefaults(String metricName, Map<String, String> tags, String instanceId, String jobName) {
-        return buildDefaults(metricName, tags, instanceId, jobName,
-                PrometheusRemoteWriterConfig.IfSpeedMode.NORMALIZED,
-                PrometheusRemoteWriterConfig.CategoriesMode.PER_CATEGORY);
-    }
-
-    /** 5-arg overload — defaults categories to {@code PER_CATEGORY}. Preserves
-     *  the post-{@code if-speed-mode}-pre-{@code categories-mode} call shape
-     *  for tests added in v0.4.3 that pass an explicit if-speed mode. */
-    static Defaults buildDefaults(String metricName, Map<String, String> tags, String instanceId, String jobName,
-                                  PrometheusRemoteWriterConfig.IfSpeedMode ifSpeedMode) {
-        return buildDefaults(metricName, tags, instanceId, jobName, ifSpeedMode,
-                PrometheusRemoteWriterConfig.CategoriesMode.PER_CATEGORY);
-    }
-
-    static Defaults buildDefaults(String metricName, Map<String, String> tags, String instanceId, String jobName,
-                                  PrometheusRemoteWriterConfig.IfSpeedMode ifSpeedMode,
-                                  PrometheusRemoteWriterConfig.CategoriesMode categoriesMode) {
         Map<String, String> out = new LinkedHashMap<>();
         Set<String> consumed = new HashSet<>();
 
@@ -476,13 +323,11 @@ public final class LabelMapper {
         consumed.add("nodeLabel");
         consumed.add("location");
         consumed.add("ifName");
-        consumed.add("ifDescr");
         putIfPresent(out, "node_label",     tags, "nodeLabel");
         putIfPresent(out, "foreign_source", tags, "foreignSource");
         putIfPresent(out, "foreign_id",     tags, "foreignId");
         putIfPresent(out, "location",       tags, "location");
         putIfPresent(out, "if_name",        tags, "ifName");
-        putIfPresent(out, "if_descr",       tags, "ifDescr");
 
         // mtype — load-bearing for OpenNMS late-aggregation. NewtsConverterUtils
         // dereferences MetaTagNames.mtype on every Sample returned by the read
@@ -493,70 +338,14 @@ public final class LabelMapper {
         consumed.add(MetaTagNames.mtype);
         putIfPresent(out, "mtype", tags, MetaTagNames.mtype);
 
-        // ifSpeed / ifHighSpeed emission — mode-dispatched. Both modes mark
-        // the source keys consumed so labels.include = * does not re-surface
-        // them and onms_extattr_* does not double-emit them.
+        // ifDescr, ifSpeed, ifHighSpeed and categories are not labels on the
+        // data series (they travel as metadata series), but they are marked
+        // consumed so labels.include = * does not surface them under a
+        // snake-cased alias.
+        consumed.add("ifDescr");
         consumed.add("ifHighSpeed");
         consumed.add("ifSpeed");
-        if (ifSpeedMode == PrometheusRemoteWriterConfig.IfSpeedMode.RAW) {
-            // Cortex parity for SHAPE (two raw labels, no synthesis): emit each
-            // present source tag verbatim under its camelCase spelling. A row
-            // with only ifHighSpeed present emits ONLY ifHighSpeed — no
-            // synthesized ifSpeed from ifHighSpeed × 1_000_000. See change
-            // add-cortex-if-speed-compat / design.md §6.
-            //
-            // Source-presence filter: same grammar as the normalized path's
-            // IfSpeedNormalizer.parseNonNegative — non-null, non-empty,
-            // parseable as a non-negative long. Whitespace-only, non-numeric,
-            // and negative source values are dropped (not emitted) so a
-            // misconfigured upstream agent can't blow up series cardinality
-            // by stuffing arbitrary text into a series-identity label.
-            if (IfSpeedNormalizer.isParseableNonNegative(tags.get("ifSpeed"))) {
-                putIfPresent(out, "ifSpeed", tags, "ifSpeed");
-            }
-            if (IfSpeedNormalizer.isParseableNonNegative(tags.get("ifHighSpeed"))) {
-                putIfPresent(out, "ifHighSpeed", tags, "ifHighSpeed");
-            }
-        } else {
-            Long ifSpeed = IfSpeedNormalizer.normalize(tags.get("ifHighSpeed"), tags.get("ifSpeed"));
-            if (ifSpeed != null) {
-                out.put("if_speed", Long.toString(ifSpeed));
-            }
-        }
-
-        // Surveillance categories — mode-dispatched. `categories` is a
-        // comma-separated source tag attached by OpenNMS-core's
-        // MetaTagDataLoader.mapCategories() when the operator has set
-        // `org.opennms.timeseries.tin.metatags.exposeCategories=true`.
-        // OpenNMS pre-sorts the list alphabetically and joins with `,`
-        // (no space) — `String.join(",", sortedCatList)`. The plugin
-        // delegates ordering to that upstream contract.
-        //
-        // PER_CATEGORY (default): split + sanitize + per-category booleans.
-        // RAW: emit the source value verbatim as a single `categories` label.
-        // BOTH: apply both code paths in sequence (migration scaffold).
-        //
-        // The source key `categories` is consumed in all three modes so
-        // labels.include = * does not re-surface it and onms_extattr_*
-        // does not double-emit it.
         consumed.add("categories");
-        String categories = tags.get("categories");
-        if (categories != null && !categories.trim().isEmpty()) {
-            if (categoriesMode == PrometheusRemoteWriterConfig.CategoriesMode.PER_CATEGORY
-                    || categoriesMode == PrometheusRemoteWriterConfig.CategoriesMode.BOTH) {
-                for (String cat : categories.split(",")) {
-                    cat = cat.trim();
-                    if (!cat.isEmpty()) {
-                        String labelName = "onms_cat_" + Sanitizer.labelName(cat);
-                        out.put(labelName, "true");
-                    }
-                }
-            }
-            if (categoriesMode == PrometheusRemoteWriterConfig.CategoriesMode.RAW
-                    || categoriesMode == PrometheusRemoteWriterConfig.CategoriesMode.BOTH) {
-                out.put("categories", Sanitizer.labelValue(categories));
-            }
-        }
         // `parsed == null` captures both "resourceId was null" and "resourceId
         // was present but all three parser grammars missed" — the catch-all
         // branch that also drives `job="opennms"` in deriveJob. Exposed on
@@ -612,84 +401,6 @@ public final class LabelMapper {
             }
         }
         return "snmp";
-    }
-
-    // -- attr passthrough -----------------------------------------------------
-
-    /**
-     * Emit plain-key Sample tags from one partition as
-     * {@code <prefix><sanitized_key>} labels so they survive the round-trip
-     * through Prometheus and reach OpenNMS's resource-graph placeholder
-     * substitution (e.g. {@code ${name}}, {@code ${datname}},
-     * {@code ${spcname}}).
-     *
-     * <p>Called twice from {@link #map(Sample)} — once with the meta-tag
-     * partition and {@link #ATTR_PREFIX}, once with the external-tag
-     * partition and {@link #EXTATTR_PREFIX}. The two calls are
-     * partition-distinct on the wire so the read side can deposit each
-     * recovered tag on the correct partition of the reconstructed
-     * {@link Metric}. Walking the partition lists directly (not the merged
-     * sourceTags map) is the whole point: a meta or external tag whose key
-     * collides with an intrinsic — e.g. external {@code name="eventlogs.process"}
-     * vs. intrinsic {@code name="EventProcess50"} on JMX-collected
-     * resources — is otherwise dropped because the intrinsic occupies the
-     * merged map first.
-     *
-     * <p>Skips tags whose key:
-     * <ul>
-     *   <li>is null or empty,</li>
-     *   <li>contains a colon (context tags — handled by {@link MetadataProcessor}
-     *       under {@code onms_meta_}; partition-irrelevant — the metadata
-     *       processor pulls colon-keyed tags from either partition via the
-     *       merged source map),</li>
-     *   <li>equals {@link MetaTagNames#mtype} (handled by the {@code mtype}
-     *       default emission, defensive on both partitions even though
-     *       OpenNMS-core only puts mtype on meta),</li>
-     *   <li>matches the plain-key secret denylist
-     *       ({@link MetadataProcessor#isPlainKeyDenied}),</li>
-     *   <li>is in {@code consumedKeys} — used by the external-tag pass to
-     *       skip keys the default allowlist already represents under a
-     *       canonical name (e.g. external {@code nodeLabel} → {@code node_label},
-     *       not {@code onms_extattr_nodeLabel}). The meta-tag pass
-     *       passes an empty set to preserve the v0.4.0 behavior of also
-     *       round-tripping default-allowlist source keys under the
-     *       {@code onms_attr_*} prefix.</li>
-     * </ul>
-     *
-     * <p>Uses {@code putIfAbsent} so a same-named default-emitted label
-     * (none today, but defensive) wins.
-     */
-    /** 4-arg overload — unfiltered emission, the pre-attr-mode call shape
-     *  kept for existing tests. Equivalent to an empty allowlist under BOTH
-     *  semantics (empty = no filtering). */
-    static void emitAttrLabels(Map<String, String> labels,
-                               java.util.Collection<Tag> tags,
-                               String prefix,
-                               Set<String> consumedKeys) {
-        emitAttrLabels(labels, tags, prefix, consumedKeys, List.of());
-    }
-
-    static void emitAttrLabels(Map<String, String> labels,
-                               java.util.Collection<Tag> tags,
-                               String prefix,
-                               Set<String> consumedKeys,
-                               List<Pattern> includeGlobs) {
-        if (tags == null || tags.isEmpty()) return;
-        for (Tag t : tags) {
-            String key = t.getKey();
-            if (key == null || key.isEmpty()) continue;
-            if (key.indexOf(':') >= 0) continue;
-            if (MetaTagNames.mtype.equals(key)) continue;
-            if (consumedKeys.contains(key)) continue;
-            if (MetadataProcessor.isPlainKeyDenied(key)) continue;
-            // Allowlist filter (labels.attr-include, EXTERNAL mode): matched
-            // against the raw key, before sanitization, because that's the
-            // spelling operators know. An empty list means "no filter" — the
-            // EXTERNAL caller gates the empty-allowlist case before calling.
-            if (!includeGlobs.isEmpty() && !matchesAny(key, includeGlobs)) continue;
-            String labelName = prefix + Sanitizer.labelName(key);
-            labels.putIfAbsent(labelName, Sanitizer.labelValue(t.getValue()));
-        }
     }
 
     // -- exclude/include/rename ----------------------------------------------
