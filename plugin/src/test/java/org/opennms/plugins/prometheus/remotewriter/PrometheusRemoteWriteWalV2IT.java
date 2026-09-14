@@ -41,7 +41,7 @@ import org.testcontainers.utility.DockerImageName;
  * <ol>
  *   <li><b>WAL replay under v2</b> — samples queued in the WAL while the
  *       endpoint is unreachable, then replayed under v2 after a restart
- *       against a real Prometheus 3.0.1.</li>
+ *       against a real Prometheus (the V2_REFERENCE image).</li>
  *   <li><b>Wire-version flipped mid-WAL</b> — samples written under
  *       {@code wire.protocol-version=1}, replayed under
  *       {@code wire.protocol-version=2} after a restart. Pins the
@@ -58,7 +58,7 @@ class PrometheusRemoteWriteWalV2IT {
 
     @Container
     static GenericContainer<?> prometheus =
-            new GenericContainer<>(DockerImageName.parse("prom/prometheus:v3.0.1"))
+            new GenericContainer<>(DockerImageName.parse(PrometheusImages.V2_REFERENCE))
                     .withExposedPorts(9090)
                     .withCommand(
                             "--config.file=/etc/prometheus/prometheus.yml",
@@ -106,7 +106,7 @@ class PrometheusRemoteWriteWalV2IT {
             storage = null;
         }
 
-        // Phase 2: same wal.path, real Prom 3.0.1 URL, still v2.
+        // Phase 2: same wal.path, the real Prometheus URL, still v2.
         // Replay must hit the v2 builder and reach Prometheus.
         {
             PrometheusRemoteWriterConfig c = walConfig(walDir);
@@ -123,7 +123,7 @@ class PrometheusRemoteWriteWalV2IT {
             awaitMetricInPrometheus(metricName, 3);
 
             // Positive proof the v2 wire path was used: if v1 bytes had
-            // been sent under v2 headers, Prom 3.0.1 would 4xx the batch
+            // been sent under v2 headers, the V2_REFERENCE Prometheus would 4xx the batch
             // and SAMPLES_WRITTEN would never reach 3 (so awaitMetric
             // would time out). Pinning samples_dropped_4xx==0 turns that
             // failure mode from "await timeout" into a direct
@@ -164,9 +164,9 @@ class PrometheusRemoteWriteWalV2IT {
             storage = null;
         }
 
-        // Phase 2: same wal.path, but now v2 + real Prom 3.0.1 URL.
+        // Phase 2: same wal.path, but now v2 + the real Prometheus URL.
         // The WAL must replay the v1-era samples under v2 headers; if
-        // anything in the WAL had cached v1 wire bytes, Prom 3.0.1 would
+        // anything in the WAL had cached v1 wire bytes, the V2_REFERENCE Prometheus would
         // reject the request (it only knows v2).
         {
             PrometheusRemoteWriterConfig c = walConfig(walDir); // defaults to v2

@@ -59,7 +59,7 @@ e2e/
 ├── sentinel/                      # Sentinel proof of concept, not functional end-to-end
 └── tools/
     ├── smoke-metadata.sh          # the metadata gates of `make smoke`
-    └── verify-*                   # CI checks on the compat range, docs attributes and the badge
+    └── verify-*                   # CI checks: compat range, docs attributes, the badge, the smoke backend versions
 ```
 
 Two nodes produce data: OpenNMS monitors itself (`selfmonitor:1`, JMX and PostgreSQL resources), and the `snmpd` container is provisioned by the smoke, or by you, as `e2e:snmpd-1` with the categories `Routers` and `Production`, so there are real interfaces with `ifDescr`, an `ifHighSpeed` and categories on the wire (no `ifAlias`: released net-snmp does not report a Linux interface alias, so that row is absent, as the docs say about an empty value).

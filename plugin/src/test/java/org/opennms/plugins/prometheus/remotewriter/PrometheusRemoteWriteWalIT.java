@@ -55,7 +55,7 @@ class PrometheusRemoteWriteWalIT {
 
     @Container
     static GenericContainer<?> prometheus =
-            new GenericContainer<>(DockerImageName.parse("prom/prometheus:v2.53.2"))
+            new GenericContainer<>(DockerImageName.parse(PrometheusImages.V1_REFERENCE))
                     .withExposedPorts(9090)
                     .withCommand(
                             "--config.file=/etc/prometheus/prometheus.yml",

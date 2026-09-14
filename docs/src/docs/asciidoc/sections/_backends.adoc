@@ -9,9 +9,9 @@ the wire-format selection knob and the Prometheus 2.50–2.54 caveat.
 
 [cols="2,2,2,3",options="header"]
 |===
-| Backend                        | v1 (Prom 2.53.2 reference) | v2 (Prom 3.0.1 reference) | Coverage
+| Backend                        | v1 (Prom {it-prometheus-v1} reference) | v2 (Prom {it-prometheus-v2} reference) | Coverage
 
-| Prometheus                     | ✅                          | ✅                          | Testcontainers IT (v1 on 2.53.2, v2 on 3.0.1) and the e2e smoke (v1 on 3.14.0)
+| Prometheus                     | ✅                          | ✅                          | Testcontainers IT (v1 on {it-prometheus-v1}, v2 on {it-prometheus-v2}) and the e2e smoke (v1 on {e2e-prometheus})
 | Grafana Mimir                  | ✅                          | accepted; not exercised in CI | e2e smoke, v1 (`make smoke BACKENDS=mimir`)
 | VictoriaMetrics                | ✅                          | accepted with v2 ingest enabled; not exercised in CI | e2e smoke, v1 (`make smoke BACKENDS=victoriametrics`)
 | Cortex                         | Compatible — not in CI     | Compatible — not in CI     |
@@ -26,14 +26,14 @@ alias to historical data,
 `last_over_time(onms_resource_attr{key="ifAlias"}[1h] @ end())`
 (see <<resource-metadata>>). The everyday `group_left` join needs
 nothing beyond plain PromQL.
-The smoke's metadata gates evaluate the idiom on Prometheus 3.14.0, Mimir 3.2.1 and VictoriaMetrics 1.151.0.
+The smoke's metadata gates evaluate the idiom on Prometheus {e2e-prometheus}, Mimir {e2e-mimir} and VictoriaMetrics {e2e-victoriametrics}.
 Minimum versions for that one idiom:
 
 [cols="2,3,2",options="header"]
 |===
 | Backend          | `@` modifier                                              | Minimum
 
-| Prometheus       | behind a flag from 2.25, always on from 2.33, flag removed in 3.0 | 2.33 (CI references 2.53.2 and 3.0.1)
+| Prometheus       | behind a flag from 2.25, always on from 2.33, flag removed in 3.0 | 2.33 (CI references {it-prometheus-v1} and {it-prometheus-v2})
 | Grafana Mimir    | always on, every release                                  | none
 | VictoriaMetrics  | from v1.72.0                                              | v1.72.0
 | Cortex           | 1.8 to 1.13 behind `-querier.at-modifier-enabled` (default off); always on from 1.14, flag removed in 1.18 | 1.14, or the flag on 1.8 to 1.13

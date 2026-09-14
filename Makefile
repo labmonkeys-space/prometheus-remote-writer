@@ -72,7 +72,7 @@ HORIZON_VERSION        ?=
         smoke-prometheus smoke-mimir smoke-victoriametrics smoke-sentinel \
         smoke-headers \
         sentinel-poc sentinel-poc-down docs sbom clean test-class \
-        verify-badge verify-compat verify-docs-attrs
+        verify-badge verify-compat verify-docs-attrs verify-versions
 
 .DEFAULT_GOAL := help
 
@@ -379,6 +379,9 @@ verify-compat: ## Fail if the opennms-integration-api floor disagrees across pom
 
 verify-docs-attrs: ## Fail if a docs listing block references attributes that will not resolve
 	@./e2e/tools/verify-docs-attributes.py
+
+verify-versions: ## Fail if the backend versions the docs quote drift from the e2e compose pins or the IT references
+	@./e2e/tools/verify-backend-versions.sh
 
 clean: ## Remove all build artifacts
 	$(MVN) $(MAVEN_FLAGS) clean
