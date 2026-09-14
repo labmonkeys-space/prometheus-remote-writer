@@ -950,6 +950,20 @@ class PrometheusRemoteWriterConfigTest {
     }
 
     @Test
+    void the_rows_skip_a_label_key_only_while_its_label_is_on_the_wire() {
+        PrometheusRemoteWriterConfig c = minimal();
+        assertThat(c.metadataRowlessKeys()).containsExactlyInAnyOrder("nodeLabel", "foreignSource", "foreignId", "location");
+        c.setLabelsExclude("node_label, foreign_*");
+        assertThat(c.metadataRowlessKeys()).containsExactly("location");
+        // and a column may then read the key the rows carry again
+        c.setMetadataInfoColumns("node=nodeLabel");
+        c.validate();
+        PrometheusRemoteWriterConfig kept = minimal();
+        kept.setMetadataInfoColumns("node=nodeLabel");
+        assertThatThrownBy(kept::validate).hasMessageContaining("node_label");
+    }
+
+    @Test
     void a_rename_copy_or_include_of_a_removed_label_fails_validation_too() {
         // Otherwise the entry validates and silently does nothing: the label
         // it names is never on the data series any more.

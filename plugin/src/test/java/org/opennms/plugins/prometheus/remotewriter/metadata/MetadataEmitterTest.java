@@ -74,20 +74,20 @@ class MetadataEmitterTest {
                 "ifAlias", "uplink", "ifHighSpeed", "1000", "categories", "Routers,ProductionSites"));
         int n = emitter(16, null).emitDue();
 
-        assertThat(n).isEqualTo(8);
+        // nodeLabel is on every data series as node_label, so it is no row.
+        assertThat(n).isEqualTo(7);
         assertThat(labelsOf(emitted())).containsExactly(
                 Map.of("__name__", "onms_resource_attr", "resourceId", rid, "key", "ifAlias", "value", "uplink"),
                 Map.of("__name__", "onms_resource_attr", "resourceId", rid, "key", "ifDescr", "value", "GigabitEthernet0/0"),
                 Map.of("__name__", "onms_resource_attr", "resourceId", rid, "key", "ifName", "value", "eth0"),
-                Map.of("__name__", "onms_resource_attr", "resourceId", rid, "key", "nodeLabel", "value", "router-42"),
                 Map.of("__name__", "onms_resource_category", "resourceId", rid, "category", "ProductionSites"),
                 Map.of("__name__", "onms_resource_category", "resourceId", rid, "category", "Routers"),
                 Map.of("__name__", "onms_resource_info", "resourceId", rid, "if_alias", "uplink", "if_descr", "GigabitEthernet0/0"),
                 Map.of("__name__", "onms_resource_ifspeed", "resourceId", rid));
         List<MappedSample> all = emitted();
-        assertThat(all.subList(0, 7)).allSatisfy(s -> assertThat(s.value()).isEqualTo(1.0));
+        assertThat(all.subList(0, 6)).allSatisfy(s -> assertThat(s.value()).isEqualTo(1.0));
         // ifHighSpeed=1000 Mbit/s as a gauge in bits per second: a multiplier as-is.
-        assertThat(all.get(7).value()).isEqualTo(1_000_000_000.0);
+        assertThat(all.get(6).value()).isEqualTo(1_000_000_000.0);
         assertThat(all).allSatisfy(s -> assertThat(s.timestampMs()).isEqualTo(clock.get()));
     }
 

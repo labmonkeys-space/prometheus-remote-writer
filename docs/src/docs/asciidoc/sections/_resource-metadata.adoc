@@ -43,7 +43,7 @@ onms_resource_ifspeed{resourceId="…"} 1000000000
 | Series | What it carries
 
 | `onms_resource_attr{resourceId, key, value} 1`
-| One row per string attribute of the resource, OpenNMS key spelling, value verbatim (truncated to the label-value cap).
+| One row per string attribute of the resource, OpenNMS key spelling, value verbatim (truncated to the label-value cap), except the attributes every data series already carries as a label (see below).
   The first `metadata.attr-budget` attributes sorted by key; the remainder is counted in `metadata_attrs_dropped_total`.
   This is what the plugin's read path restores OpenNMS graph placeholders from, so completeness lives here and nothing has to be curated.
 
@@ -57,7 +57,7 @@ onms_resource_ifspeed{resourceId="…"} 1000000000
   Ergonomics only: a key missing from the column list costs one more join and nothing else.
 
 | `onms_resource_ifspeed{resourceId} <bits/s>`
-| `ifHighSpeed × 1,000,000` when non-zero, else `ifSpeed`, for resources that carry either.
+| The exact `ifSpeed` while it is below the OID's maximum of 4,294,967,295, else `ifHighSpeed × 1,000,000`, for resources that carry either.
   A multiplier as-is, so no string conversion at query time.
   Neither source attribute becomes a row.
 |===
@@ -65,6 +65,12 @@ onms_resource_ifspeed{resourceId="…"} 1000000000
 Every metadata series carries `onms_instance_id` when `instance.id` is set, like the data series, and the metric name prefix of `metric.prefix` is not applied to them.
 
 What never becomes a row: `mtype` (it stays a label), `categories` and the two speed attributes (they have series of their own), context keys with a `:` (those are the <<configuration,metadata passthrough>>), keys matching the built-in credential denylist (`*password*`, `*secret*`, `*token*`, `snmp-community`), and attributes with an empty value, such as an unset `ifAlias`.
+
+Nor do `nodeLabel`, `foreignSource`, `foreignId` and `location`, while their label is on the wire: every data series of the resource carries them as `node_label`, `foreign_source`, `foreign_id` and `location`, and no report OpenNMS ships dereferences them as a `{placeholder}`, so a row would say nothing a join cannot get from the data series.
+If `labels.exclude` removes one of those labels, its key is a row again, so the value is never on neither series.
+The same goes for the `cat_<Name>=Name` tags OpenNMS emits next to `categories`; the category rows are their wire form (a custom attribute that merely starts with `cat_` stays a row).
+`ifName` is a label too but stays a row, because the flow reports dereference `{ifName}`; `nodeId` stays a row because its label `node` carries `foreignSource:foreignId`, not the id.
+A custom report that dereferences one of the skipped keys still resolves: the read path hands them back from the data series' labels.
 
 === When they are emitted
 
@@ -74,7 +80,7 @@ The re-emission is what keeps a join inside a lookback window: query with a look
 A resource whose data series has been silent for 24 hours is forgotten and re-emitted on its next sample.
 
 The metadata samples go through the same queues, batches and disk tier as the data samples and are counted in `store_samples_offered_total`.
-Each emission is one sample per row, category, column series and speed gauge, about ten per SNMP interface, so the rate they add is roughly `resources × 10 ÷ cadence in seconds`: 220,000 resources at the default cadence is about 2,400 samples per second.
+Each emission is one sample per row, category, column series and speed gauge, about six per SNMP interface, so the rate they add is roughly `resources × 6 ÷ cadence in seconds`: 220,000 resources at the default cadence is about 1,500 samples per second.
 
 == Configuration
 
@@ -90,7 +96,7 @@ Each emission is one sample per row, category, column series and speed gauge, ab
 The default column list covers the string attributes OpenNMS's shipped datacollection emits for its standard resource types, one column per key, so enabling host-resources storage or the PostgreSQL collector needs no edit.
 A custom datacollection names its own column.
 The collector attribute `name` becomes `resource_name`, because a label called `name` next to `__name__` is a trap in every legend and query; `name=…` is rejected with that hint.
-A column must be a valid label name, cannot be `resourceId`, `__name__` or `onms_instance_id`, cannot repeat, and its key must be something the rows can carry (not `mtype`, `categories`, `ifSpeed`, `ifHighSpeed`, a context key or a denied key).
+A column must be a valid label name, cannot be `resourceId`, `__name__` or `onms_instance_id`, cannot repeat, and its key must be something the rows can carry (not `mtype`, `categories`, `ifSpeed`, `ifHighSpeed`, a key the data series carry as a label, a `cat_*` key, a context key or a denied key); the rejection names the label that carries the value.
 Two columns may read the same key.
 Changing the list forks only the info series, one per resource, and leaves the data series untouched.
 
@@ -223,13 +229,15 @@ And on VictoriaMetrics this is the one path that does require `vmalert`, since G
 
 OpenNMS resolves graph placeholders (`${ifAlias}`, `${hrStorageDescr}`, `${name}`, …) from the string attributes on the `Metric` objects that `findMetrics` returns.
 The plugin restores them from the rows: after discovery, one `POST /api/v1/query` per batch of `read.discovery-batch-size` resources, never one per metric, asks for every `onms_resource_attr` and `onms_resource_category` row of those resources inside the last 24 hours (never less than two cadences), scoped to `instance.id` when set.
+A second query per batch reads `onms_resource_ifspeed` over the same window, and the plugin deposits the two strings OpenNMS's SNMP collector would have stored, `ifHighSpeed` (the gauge in whole Mbit/s) and `ifSpeed` (the gauge capped at 4,294,967,295): the interface utilisation reports OpenNMS ships (`mib2.traffic`, `mib2.traffic-inout`, `mib2.HCtraffic-inout`) dereference `{ifSpeed}` and `{ifHighSpeed}`, and the gauge stays the only wire form of the speed.
+Both queries count against the cap of 100 calls per `findMetrics`.
 Each row comes back valued with its newest sample time, so after a rename the resource's newest emission wins; rows within half a cadence of the newest stamp count as one emission, and the newest row per key wins.
 A removed attribute or category therefore lingers until the next cadence emission.
 
 Enrichment is best effort.
 A failed or malformed metadata query is logged (at most once a minute) and the metrics of that batch go back without attributes; a resource listing never fails because its aliases could not be read.
 More than 100 batches in one call skips enrichment rather than issuing them.
-`find_metrics_enrichment_batches_total` counts the queries.
+`find_metrics_enrichment_batches_total` counts the queries, two per batch.
 
 Two things to know about the window.
 It is the write path's 24-hour memory, which is shorter than the 90-day discovery lookback, so a resource the write path has not seen for longer than that is still listed but comes back without attributes.
@@ -249,12 +257,12 @@ Substitute real figures before committing to limits.
 | resources | ~220,000 |
 | data series | ~3,300,000 | unchanged by this design
 | `onms_resource_info` | ~220,000 | one per resource with a column value
-| `onms_resource_attr` | ~1,760,000 | at 8 attributes per resource
+| `onms_resource_attr` | ~880,000 | at 4 attributes per resource (`ifName`, `ifDescr`, `ifAlias` and one more; the node identity is not a row)
 | `onms_resource_category` | ~ resources × categories | node-level resources only, in practice
 |===
 
 Series count is the number to watch, and `metadata.attr-budget` controls it directly.
-Sample rate is about ten samples per resource per cadence, and the cadence is tunable against the query idiom: emit every 15 minutes and query with `last_over_time(…[30m])` rather than emitting every 2 minutes to stay inside the default 5-minute lookback.
+Sample rate is about six samples per resource per cadence, and the cadence is tunable against the query idiom: emit every 15 minutes and query with `last_over_time(…[30m])` rather than emitting every 2 minutes to stay inside the default 5-minute lookback.
 
 [cols="2,2,4",options="header"]
 |===
@@ -277,5 +285,5 @@ Remote Write v2's symbol table interns strings across a request and is a materia
 | `metadata_series_emitted_total` | Metadata samples handed to the pipeline (rows, categories, info and speed alike).
 | `metadata_attrs_dropped_total` | Attributes past `metadata.attr-budget`, per emission. A steadily rising value names a resource type whose attributes outgrow the budget.
 | `metadata_resources` | Resources the write path currently remembers metadata for.
-| `find_metrics_enrichment_batches_total` | Metadata queries the read path issued to restore attributes.
+| `find_metrics_enrichment_batches_total` | Metadata queries the read path issued to restore attributes: two per batch, the rows and the speed gauge.
 |===

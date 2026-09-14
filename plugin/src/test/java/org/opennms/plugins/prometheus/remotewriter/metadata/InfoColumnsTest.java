@@ -88,6 +88,16 @@ class InfoColumnsTest {
     }
 
     @Test
+    void a_key_the_data_series_carry_as_a_label_is_rejected_naming_the_label() {
+        assertThatThrownBy(() -> InfoColumns.parse("node=nodeLabel"))
+                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("node_label");
+        assertThatThrownBy(() -> InfoColumns.parse("c=cat_Routers"))
+                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("onms_resource_category");
+        // With the label excluded from the wire the key is a row again, and a column may read it.
+        assertThat(InfoColumns.parse("node=nodeLabel", java.util.Set.of())).containsEntry("node", "nodeLabel");
+    }
+
+    @Test
     void a_duplicate_column_is_rejected() {
         assertThatThrownBy(() -> InfoColumns.parse("alias=ifAlias, alias=ifDescr"))
                 .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("alias");

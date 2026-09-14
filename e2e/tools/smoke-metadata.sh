@@ -93,11 +93,21 @@ check_count() {  # <gate> <min> <expr> <what>
     case "$n" in ''|ERR|*[!0-9]*) n=0 ;; esac
     if [ "$n" -ge "$2" ]; then pass "$1" "$n $4"; else fail "$1" "$n $4 (wanted >= $2): $3"; fi
 }
+check_zero() {   # <gate> <expr> <what>: the query must succeed and match nothing
+    local n; n=$(q n "$2")
+    case "$n" in
+        0)              pass "$1" "no $3" ;;
+        ''|ERR|*[!0-9]*) fail "$1" "query failed: $2" ;;
+        *)              fail "$1" "$n $3: $2" ;;
+    esac
+}
 if [ "$fleet_ok" = 1 ]; then
 check_count attr     1 "onms_resource_attr{resourceId=~\"$node_re\",key=\"ifDescr\",value=\"eth0\"}" "ifDescr=eth0 row(s) for snmpd-1"
 check_count category 1 "onms_resource_category{resourceId=~\"$node_re\",category=\"Routers\"}"       "Routers category row(s) for snmpd-1"
 check_count category 1 "onms_resource_category{resourceId=~\"$node_re\",category=\"Production\"}"    "Production category row(s) for snmpd-1"
 check_count info     1 "onms_resource_info{resourceId=~\"$node_re\",if_descr=\"eth0\"}"              "info series with if_descr=eth0 for snmpd-1"
+check_count attr     1 "onms_resource_attr{resourceId=~\"$node_re\",key=\"ifName\"}"                   "ifName row(s) for snmpd-1 (a label too, but the flow reports read it)"
+check_zero  attr       "onms_resource_attr{resourceId=~\"$node_re\",key=~\"nodeLabel|foreignSource|foreignId|location|cat_.*\"}" "row(s) repeat a data-series label or a category for snmpd-1 (#204)"
 # The gauge must be the agent's own ifHighSpeed for eth0 (ifIndex 2) times
 # a million: read it from snmpd rather than pinning what a veth reports.
 hs=$(docker compose $cf exec -T snmpd snmpget -v2c -c public -Oqv localhost IF-MIB::ifHighSpeed.2 2>/dev/null | tr -d '[:space:]')

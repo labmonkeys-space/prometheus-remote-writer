@@ -337,7 +337,8 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
             m  = new PluginMetrics();
             // metadata.cadence-ms = 0 switches the metadata series off: no
             // registry work on the hot path, no emitter thread.
-            MetadataRegistry registry = config.getMetadataCadenceMs() > 0 ? new MetadataRegistry() : null;
+            MetadataRegistry registry = config.getMetadataCadenceMs() > 0
+                    ? new MetadataRegistry(System::currentTimeMillis, config.metadataRowlessKeys()) : null;
             lm = new LabelMapper(config, m, registry);
             wc = new RemoteWriteHttpClient(config, httpHeadersConfig);
             rc = new PrometheusReadClient(config, m, httpHeadersConfig);

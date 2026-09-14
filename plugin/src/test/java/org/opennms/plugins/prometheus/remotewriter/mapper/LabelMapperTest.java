@@ -994,6 +994,27 @@ class LabelMapperTest {
     // ---------- drift guard -------------------------------------------------
 
     @Test
+    void the_registry_skips_exactly_the_consumed_keys_no_report_dereferences() {
+        // The metadata rows skip what the data series carry as labels. The
+        // two lists must move together: a new default label here is a new
+        // skip candidate there, decided against what OpenNMS's shipped
+        // reports dereference (ifName is read by the flow reports, so it
+        // stays a row; ifDescr, the speed pair and categories have homes
+        // of their own).
+        Map<String, String> tags = new LinkedHashMap<>();
+        tags.put(IntrinsicTagNames.name, "m");
+        tags.put(IntrinsicTagNames.resourceId, "nodeSource[NOC:r].interfaceSnmp[eth0]");
+        java.util.Set<String> consumed = new java.util.HashSet<>(
+                LabelMapper.buildDefaults("m", tags, null, null).consumedSourceKeys());
+        // nodeId's label `node` carries foreignSource:foreignId when both are
+        // set, so the numeric id stays a row.
+        consumed.removeAll(java.util.Set.of(IntrinsicTagNames.name, IntrinsicTagNames.resourceId,
+                "mtype", "ifName", "ifDescr", "ifSpeed", "ifHighSpeed", "categories", "nodeId"));
+        assertThat(consumed).containsExactlyInAnyOrderElementsOf(
+                org.opennms.plugins.prometheus.remotewriter.metadata.MetadataRegistry.LABEL_KEYS.keySet());
+    }
+
+    @Test
     void consumed_keys_covers_all_buildDefaults_source_reads() {
         // Given a fixture carrying every source key buildDefaults currently
         // reads, the returned consumedSourceKeys set must equal that set

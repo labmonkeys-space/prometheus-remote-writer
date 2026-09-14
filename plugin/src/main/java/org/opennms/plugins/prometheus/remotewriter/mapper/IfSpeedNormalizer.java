@@ -27,6 +27,14 @@ public final class IfSpeedNormalizer {
      * @return normalised bits-per-second, or {@code null} if neither is usable
      */
     public static Long normalize(String highSpeedRaw, String speedRaw) {
+        Long s = parseNonNegative(speedRaw);
+        // ifSpeed is exact in bits per second until it saturates at the
+        // OID's 32-bit maximum; ifHighSpeed is whole megabits, so a T1
+        // (1,544,000) would come out as 2,000,000 from it. Prefer the exact
+        // value while it is below the cap.
+        if (s != null && s > 0 && s < IF_SPEED_MAX) {
+            return s;
+        }
         Long hs = parseNonNegative(highSpeedRaw);
         if (hs != null && hs > 0) {
             try {
@@ -36,12 +44,11 @@ public final class IfSpeedNormalizer {
                 // fall through to ifSpeed, and if that's absent too return null.
             }
         }
-        Long s = parseNonNegative(speedRaw);
-        if (s != null) {
-            return s;
-        }
-        return null;
+        return s;
     }
+
+    /** The SNMP {@code ifSpeed} OID saturates here. */
+    public static final long IF_SPEED_MAX = 4_294_967_295L;
 
     private static Long parseNonNegative(String raw) {
         if (raw == null || raw.isEmpty()) return null;
