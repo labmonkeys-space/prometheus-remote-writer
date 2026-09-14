@@ -75,6 +75,20 @@ class CheckpointTest {
     }
 
     @Test
+    void advance_past_moves_only_when_behind_and_never_backwards(@TempDir Path dir) throws IOException {
+        Checkpoint cp = Checkpoint.loadOrCreate(dir);
+        assertThat(cp.advancePast(100L)).isEqualTo(0L);    // moved, from 0
+        assertThat(cp.lastSentOffset()).isEqualTo(100L);
+        // Already past: a no-op rather than the backward-move error, which is
+        // what lets an eviction and an acknowledgement race without a throw.
+        assertThat(cp.advancePast(40L)).isEqualTo(-1L);
+        assertThat(cp.advancePast(100L)).isEqualTo(-1L);
+        assertThat(cp.lastSentOffset()).isEqualTo(100L);
+        assertThat(cp.advancePast(250L)).isEqualTo(100L);  // the delta's base, read under the lock
+        assertThat(Checkpoint.loadOrCreate(dir).lastSentOffset()).isEqualTo(250L);
+    }
+
+    @Test
     void corrupt_checkpoint_file_surfaces_as_ioexception(@TempDir Path dir) throws IOException {
         Files.writeString(dir.resolve(Checkpoint.FILE_NAME),
                 "{\"last_sent_offset\":123,\"last_sent_at\":\"not-a-date\"}\n");

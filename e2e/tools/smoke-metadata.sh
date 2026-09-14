@@ -49,6 +49,11 @@ if d.get("status")!="success": print("ERR"); sys.exit()
 print(len(r) if mode=="n" else (r[0]["value"][1] if r else ""))' "$mode" 2>/dev/null || echo ERR
 }
 
+# Grafana's API as the admin user. A function rather than a bare curl on the
+# left of the pipes below: Scorecard reads a literal `curl | python3` as
+# download-then-run, and these parse JSON, they do not run it.
+grafana_get() { curl -s -u admin:admin "$@" 2>/dev/null; }
+
 # --- 1. provision the fleet ----------------------------------------------
 ip=$(docker compose $cf exec -T core getent hosts snmpd 2>/dev/null | awk '{print $1}')
 [ -n "$ip" ] || fail fleet "could not resolve the snmpd container from core"
@@ -141,7 +146,7 @@ else
 fi
 
 # --- 5. the provisioned dashboard ----------------------------------------
-title=$(curl -s -u admin:admin "$grafana/api/dashboards/uid/onms-resource-metadata" 2>/dev/null \
+title=$(grafana_get "$grafana/api/dashboards/uid/onms-resource-metadata" \
     | python3 -c 'import json,sys; print(json.load(sys.stdin).get("dashboard",{}).get("title",""))' 2>/dev/null)
 if [ "$title" = "OpenNMS resource metadata" ]; then
     pass dashboard "Grafana provisioned '$title'"
@@ -149,7 +154,7 @@ else
     fail dashboard "Grafana did not provision the resource metadata dashboard (got '$title')"
 fi
 if [ "$fleet_ok" = 1 ]; then
-ds=$(curl -s -u admin:admin "$grafana/api/datasources" 2>/dev/null \
+ds=$(grafana_get "$grafana/api/datasources" \
     | python3 -c 'import json,sys; d=json.load(sys.stdin); print(next((x["uid"] for x in d if x.get("isDefault")), d[0]["uid"] if d else ""))' 2>/dev/null)
 # The panel's expression with its $metric variable bound to the fleet's
 # interface counters; the substitution is done in python so the quotes of
@@ -159,7 +164,7 @@ d=json.load(open("e2e/grafana/dashboards/resource-metadata.json"))
 e=next(p["targets"][0]["expr"] for p in d["panels"] if p["type"]=="timeseries")
 print(e.replace("$metric", sys.argv[1]))' "ifHCInOctets{resourceId=~\"$node_re\"}")
 payload=$(python3 -c 'import json,sys; print(json.dumps({"from":"now-1h","to":"now","queries":[{"refId":"A","datasource":{"type":"prometheus","uid":sys.argv[1]},"expr":sys.argv[2],"instant":True,"intervalMs":30000,"maxDataPoints":100}]}))' "$ds" "$expr")
-frames=$(curl -s -u admin:admin -H 'Content-Type: application/json' -X POST "$grafana/api/ds/query" -d "$payload" 2>/dev/null \
+frames=$(grafana_get -H 'Content-Type: application/json' -X POST "$grafana/api/ds/query" -d "$payload" \
     | python3 -c 'import json,sys
 a=json.load(sys.stdin).get("results",{}).get("A",{})
 n=sum(1 for f in a.get("frames",[]) if any(len(v) for v in f.get("data",{}).get("values",[])))

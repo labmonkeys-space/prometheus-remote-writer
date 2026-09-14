@@ -8,7 +8,7 @@
 # interface alias, so the rows carry no ifAlias and the info series no
 # if_alias for this node, which is exactly what the docs say about an
 # empty value.
-FROM alpine:3.22
+FROM alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce
 RUN apk add --no-cache net-snmp net-snmp-tools
 COPY snmpd.conf /etc/snmp/snmpd.conf
 EXPOSE 161/udp
