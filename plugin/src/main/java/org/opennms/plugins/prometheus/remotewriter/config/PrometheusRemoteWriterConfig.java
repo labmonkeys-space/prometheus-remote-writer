@@ -11,6 +11,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -49,21 +50,6 @@ public class PrometheusRemoteWriterConfig {
     public enum DiscoveryStrategy { SINGLE_PASS, LABEL_VALUES_FIRST }
 
     /**
-     * Interface-speed label emission mode. {@code NORMALIZED} (default)
-     * emits a single {@code if_speed} label in bits per second, computed as
-     * {@code ifHighSpeed × 1_000_000} when non-zero, else {@code ifSpeed} —
-     * the v0.4.x default and the right shape for greenfield Prometheus
-     * dashboards. {@code RAW} emits the source tags verbatim as two labels
-     * ({@code ifSpeed} and {@code ifHighSpeed}) and skips {@code if_speed}
-     * entirely; matches the AGPL {@code opennms-cortex-tss-plugin}'s wire
-     * shape so cortex-fielded dashboards and alert rules keep working
-     * without a value-semantics rewrite. The two camelCase label names
-     * are reserved against {@code labels.rename}/{@code labels.copy}
-     * targets in both modes.
-     */
-    public enum IfSpeedMode { NORMALIZED, RAW }
-
-    /**
      * What {@code store()} does when a shard's queue is full (queue mode
      * only). {@code PARTIAL}: attempt every sample, count the refused ones,
      * throw once. Right for a caller that drops the call on exception, such
@@ -82,60 +68,6 @@ public class PrometheusRemoteWriterConfig {
      *  for the retrying writer. Not set on Sentinel, where the value lives in
      *  ConfigAdmin, so {@code AUTO} resolves to {@code PARTIAL} there. */
     public static final String OPENNMS_BUFFER_TYPE_PROPERTY = "org.opennms.timeseries.config.buffer_type";
-
-    /**
-     * Surveillance-categories label emission mode. {@code PER_CATEGORY}
-     * (default) splits the OpenNMS-supplied {@code categories} source tag
-     * on {@code ,} and emits one {@code onms_cat_<sanitized-name>="true"}
-     * label per category — the v0.4.x default and the right shape for
-     * set-membership PromQL ({@code {onms_cat_Server="true"}}). {@code RAW}
-     * emits a single {@code categories="<verbatim-comma-joined>"} label
-     * matching the AGPL {@code opennms-cortex-tss-plugin}'s wire shape so
-     * cortex-fielded dashboards keep working without rewrite. {@code BOTH}
-     * emits BOTH encodings on every sample carrying the {@code categories}
-     * source tag — a migration scaffold for operators porting dashboards
-     * from {@code onms_cat_X="true"} to {@code categories=~".*X.*"}.
-     *
-     * <p>The plugin delegates ordering to OpenNMS-core's
-     * {@code MetaTagDataLoader.mapCategories()} which alphabetically sorts
-     * the category list before joining with {@code ","} (no space) — see
-     * {@code openspec/changes/add-cortex-categories-compat/design.md} §Spike
-     * for the upstream-contract reference.
-     *
-     * <p>The {@code categories} (singular) label name and the
-     * {@code onms_cat_*} label-name prefix are reserved against
-     * {@code labels.rename} / {@code labels.copy} targets in all three
-     * modes; flipping the mode does not unmask a previously-accepted
-     * rename collision.
-     */
-    public enum CategoriesMode { PER_CATEGORY, RAW, BOTH }
-
-    /**
-     * Baseline label schema. {@code NATIVE} (default) emits the curated,
-     * bounded default set (see the metric-mapping spec: identity labels
-     * derived from the resourceId plus metatag-backed human-readable
-     * labels; ≤ ~15 label names regardless of deployment size).
-     * {@code LEGACY} emits the wire schema of the AGPL
-     * {@code opennms-prometheus-remotewrite-plugin}, pinned by an
-     * empirically captured fixture, so migrating deployments continue
-     * their existing series with a one-line config change. All other
-     * {@code labels.*} knobs apply on top of the selected baseline.
-     */
-    public enum LabelProfile { NATIVE, LEGACY }
-
-    /**
-     * Resource string-attribute round-trip mode. {@code OFF} (default since
-     * v0.5.0) emits no {@code onms_attr_*} / {@code onms_extattr_*} labels —
-     * attribute keys that embed per-resource identity (e.g. latency
-     * {@code ICMP/<ip>}, JMX mbean paths) otherwise create one label NAME
-     * per key, which at scale explodes the backend's label-name index
-     * (observed: 5,646 names vs 8; see issue #112). {@code EXTERNAL} emits
-     * {@code onms_extattr_*} only for keys matching {@link #labelsAttrInclude}
-     * — restores OpenNMS graph placeholder substitution ({@code ${name}},
-     * {@code ${datname}}) for the attributes an operator actually needs.
-     * {@code BOTH} restores the unfiltered v0.4 emission of both prefixes.
-     */
-    public enum AttrMode { OFF, EXTERNAL, BOTH }
 
     // --- Endpoint ---
     private String writeUrl;
@@ -267,17 +199,31 @@ public class PrometheusRemoteWriterConfig {
     private String labelsRename;
     private String labelsCopy;
     private String metricPrefix;
-    private IfSpeedMode ifSpeedMode = IfSpeedMode.NORMALIZED;
 
     /** {@code queue.store-policy}; see {@link StorePolicy}. */
     private StorePolicy storePolicy = StorePolicy.AUTO;
-    private CategoriesMode categoriesMode = CategoriesMode.PER_CATEGORY;
-    private LabelProfile labelProfile = LabelProfile.NATIVE;
-    private AttrMode attrMode = AttrMode.OFF;
-    /** Allowlist of attribute-key globs for {@link AttrMode#EXTERNAL} —
-     *  matched against the RAW source-tag key (pre-sanitization), since
-     *  that's the spelling operators see in their datacollection configs. */
-    private String labelsAttrInclude;
+    /** The v0.x attribute-label keys a {@code .cfg} still sets. Blueprint
+     *  binds them so they reach {@link #validate()}, which rejects any that
+     *  is set; see {@link #validateRemovedLabelKeys()}. */
+    private final Set<String> removedLabelKeys = new LinkedHashSet<>();
+
+    /** Thrown by {@link #validate()} for a {@code .cfg} that still carries a
+     *  v0.x key or label name removed in 1.0.0, so the storage can tell a
+     *  delivered-but-rejected configuration from one not delivered yet. */
+    public static final class RemovedKeyException extends IllegalStateException {
+        RemovedKeyException(String message) { super(message); }
+    }
+
+    /** Label names the data series carried before 1.0.0. */
+    private static final Set<String> REMOVED_LABELS =
+            Set.of("if_descr", "if_speed", "ifSpeed", "ifHighSpeed", "categories");
+    private static final List<String> REMOVED_LABEL_PREFIXES =
+            List.of("onms_cat_", "onms_attr_", "onms_extattr_");
+    /** Source tags that were labels before 1.0.0 and are consumed without
+     *  being emitted now, so a literal {@code labels.include} of one would
+     *  be a silent no-op. */
+    private static final Set<String> REMOVED_SOURCE_KEYS =
+            Set.of("ifDescr", "ifSpeed", "ifHighSpeed", "categories");
 
     // --- Parsed-map caches ---
     // labelsRenameMap() / labelsCopyMap() are called multiple times per
@@ -560,8 +506,7 @@ public class PrometheusRemoteWriterConfig {
         }
 
         validateDiscovery();
-        validateIfSpeedMode();
-        validateLabelProfile();
+        validateRemovedLabelKeys();
         // Shards first: the overflow budget is divided by writer.shards, so an
         // out-of-range shard count has to be rejected before that arithmetic.
         validateWriterShards();
@@ -596,72 +541,39 @@ public class PrometheusRemoteWriterConfig {
     }
 
     /**
-     * Cross-key rules for {@code labels.profile} / {@code labels.attr-mode} /
-     * {@code labels.attr-include}. Value parsing already happened in the
-     * setters (which throw on bad input); this enforces the combinations:
-     * the legacy profile is defined as the legacy plugin's exact wire schema,
-     * which never carried attribute labels, so enabling the round-trip under
-     * it is a contradiction we refuse rather than silently resolve. The
-     * allowlist only participates in {@code external} mode, so setting it
-     * under any other mode is a dormant config that would surprise on a
-     * later mode flip — reject with the fix spelled out.
+     * The v0.x attribute labels were removed in 1.0.0: resource attributes,
+     * categories and the interface speed travel as metadata series, not as
+     * labels on the data series. A {@code .cfg} that still sets one of the
+     * keys that shaped them, renames or copies from one of the labels, or
+     * includes one of their source tags by name, must not start and quietly
+     * emit a different schema than the operator expects, so each is a
+     * validation error that names the replacement.
      */
-    private void validateLabelProfile() {
-        if (labelProfile == LabelProfile.LEGACY && attrMode != AttrMode.OFF) {
-            throw new IllegalStateException(
-                "labels.profile=legacy requires labels.attr-mode=off — the legacy wire schema "
-                + "has no attribute labels. Remove labels.attr-mode or switch labels.profile "
-                + "to native.");
+    private void validateRemovedLabelKeys() {
+        List<String> found = new ArrayList<>(removedLabelKeys);
+        for (String from : labelsRenameMap().keySet()) {
+            if (isRemovedLabel(from)) found.add("labels.rename source '" + from + "'");
         }
-        if (labelProfile == LabelProfile.LEGACY) {
-            // Temporary guard until the fixture-pinned legacy baseline lands
-            // (openspec change label-profiles, task group 5). Validation-level
-            // — after the conflict rule above, which is permanent — so
-            // PrometheusRemoteWriterStorage.start()'s existing catch turns it
-            // into a WARN-and-wait instead of a blueprint container failure.
-            // Remove together with the legacy implementation.
-            throw new IllegalStateException(
-                "labels.profile=legacy is not implemented yet — the legacy wire schema is "
-                + "pinned by an empirical fixture that has not been captured. Use "
-                + "labels.profile=native until the legacy profile ships.");
+        for (String from : labelsCopyMap().keySet()) {
+            if (isRemovedLabel(from)) found.add("labels.copy source '" + from + "'");
         }
-        if (attrMode == AttrMode.EXTERNAL && labelsAttrInclude == null) {
-            // Not a rejection — an operator staging a rollout may flip the
-            // mode first and add the allowlist next reload. But external
-            // mode with no allowlist emits nothing, which reads as "the
-            // knob doesn't work" without this breadcrumb.
-            org.slf4j.LoggerFactory.getLogger(PrometheusRemoteWriterConfig.class).warn(
-                "labels.attr-mode=external with no labels.attr-include emits no attribute "
-                + "labels — add labels.attr-include globs for the attribute keys your "
-                + "graph placeholders need (e.g. 'name, datname, spcname').");
+        for (String entry : labelsIncludeGlobs()) {
+            if (REMOVED_SOURCE_KEYS.contains(entry)) found.add("labels.include entry '" + entry + "'");
         }
-        if (labelsAttrInclude != null && attrMode != AttrMode.EXTERNAL) {
-            throw new IllegalStateException(
-                "labels.attr-include is set but labels.attr-mode is '"
-                + attrMode.name().toLowerCase(java.util.Locale.ROOT)
-                + "' — the allowlist only applies to labels.attr-mode=external. "
-                + "Set labels.attr-mode=external or remove labels.attr-include.");
-        }
+        if (found.isEmpty()) return;
+        throw new RemovedKeyException(
+            String.join(", ", found)
+            + ": removed in 1.0.0. Resource string attributes are the onms_resource_attr rows "
+            + "and the onms_resource_info columns (metadata.info-columns), categories are "
+            + "onms_resource_category rows and the interface speed is the onms_resource_ifspeed "
+            + "gauge; none of them are labels on the data series any more. Remove the "
+            + "entries from the .cfg.");
     }
 
-    /**
-     * Validate the {@code labels.if-speed-mode} knob. Mode parsing already
-     * happened in {@link #setIfSpeedMode(String)} (which throws on bad
-     * input); this method emits a one-shot WARN when the operator set a
-     * {@code labels.rename = if_speed -> X} entry while the mode is
-     * {@code raw} (the rename is a no-op there since {@code if_speed} is
-     * not emitted in raw mode). Don't reject — operators flipping the mode
-     * mid-deployment may keep the rename briefly during transition.
-     */
-    private void validateIfSpeedMode() {
-        if (ifSpeedMode == IfSpeedMode.RAW
-                && labelsRenameMap().containsKey("if_speed")) {
-            org.slf4j.LoggerFactory.getLogger(PrometheusRemoteWriterConfig.class).warn(
-                "labels.rename = if_speed -> {} is a no-op when labels.if-speed-mode=raw, "
-                + "since 'if_speed' is not emitted in raw mode. Remove the rename or set "
-                + "labels.if-speed-mode=normalized.",
-                labelsRenameMap().get("if_speed"));
-        }
+    private static boolean isRemovedLabel(String name) {
+        if (REMOVED_LABELS.contains(name)) return true;
+        for (String p : REMOVED_LABEL_PREFIXES) if (name.startsWith(p)) return true;
+        return false;
     }
 
     /**
@@ -797,30 +709,14 @@ public class PrometheusRemoteWriterConfig {
                 + "[a-zA-Z_][a-zA-Z0-9_]*.";
         }
         if (LabelMapper.RESERVED_LABEL_NAMES.contains(to)) {
-            String base = primitiveKey + " target '" + to + "' collides with the default label '" + to
+            return primitiveKey + " target '" + to + "' collides with the default label '" + to
                 + "'. The plugin already emits this label; " + verbIng + " onto it would silently "
                 + "clobber the default value. Pick a different 'to' name.";
-            if ("ifSpeed".equals(to) || "ifHighSpeed".equals(to)) {
-                base += " To recover cortex-compatible interface-speed labels,"
-                      + " set 'labels.if-speed-mode = raw' instead of a rename.";
-            } else if ("categories".equals(to)) {
-                base += " To recover cortex-compatible categories labels,"
-                      + " set 'labels.categories-mode = raw' (or 'both' during"
-                      + " migration) instead of a rename.";
-            }
-            return base;
         }
         for (String prefix : LabelMapper.RESERVED_LABEL_PREFIXES) {
             if (to.startsWith(prefix)) {
-                String reason;
-                switch (prefix) {
-                    case "onms_cat_":     reason = "surveillance categories";                       break;
-                    case "onms_attr_":    reason = "resource string attributes (meta partition)";   break;
-                    case "onms_extattr_": reason = "resource string attributes (external partition)"; break;
-                    default:              reason = "metadata passthrough";                          break;
-                }
                 return primitiveKey + " target '" + to + "' collides with the reserved prefix '"
-                    + prefix + "*' (" + reason + "). Pick a different 'to' name.";
+                    + prefix + "*' (metadata passthrough). Pick a different 'to' name.";
             }
         }
         return null;
@@ -874,7 +770,6 @@ public class PrometheusRemoteWriterConfig {
 
     public List<String> labelsIncludeGlobs() { return parseCsv(labelsInclude); }
     public List<String> labelsExcludeGlobs() { return parseCsv(labelsExclude); }
-    public List<String> labelsAttrIncludeGlobs() { return parseCsv(labelsAttrInclude); }
     public List<String> metadataIncludeGlobs() { return parseCsv(metadataInclude); }
     public List<String> metadataExcludeGlobs() { return parseCsv(metadataExclude); }
 
@@ -1093,11 +988,6 @@ public class PrometheusRemoteWriterConfig {
         diffStr(out, "labels.exclude",            other.labelsExclude,         labelsExclude);
         diffStr(out, "labels.rename",             other.labelsRename,          labelsRename);
         diffStr(out, "labels.copy",               other.labelsCopy,            labelsCopy);
-        diffStr(out, "labels.if-speed-mode",      other.ifSpeedMode.name(),    ifSpeedMode.name());
-        diffStr(out, "labels.categories-mode",    other.categoriesMode.name(), categoriesMode.name());
-        diffStr(out, "labels.profile",            other.labelProfile.name(),   labelProfile.name());
-        diffStr(out, "labels.attr-mode",          other.attrMode.name(),       attrMode.name());
-        diffStr(out, "labels.attr-include",       other.labelsAttrInclude,     labelsAttrInclude);
         diffStr(out, "metric.prefix",             other.metricPrefix,          metricPrefix);
         diffBool(out, "metadata.enabled",         other.metadataEnabled,       metadataEnabled);
         diffStr(out, "metadata.include",          other.metadataInclude,       metadataInclude);
@@ -1196,27 +1086,6 @@ public class PrometheusRemoteWriterConfig {
         // operator-supplied "my-prefix." can't produce an invalid label name
         // downstream.
         String sanitized = Sanitizer.labelName(trimmed);
-        // Reject prefixes that collide with another emitter's reserved
-        // namespace (e.g. onms_cat_, onms_attr_). onms_meta_ itself is the
-        // default and is intentionally exempt — that's this emitter's own
-        // canonical home.
-        //
-        // Comparison is lowercased so an operator value like ONMS_ATTR_ is
-        // caught — the rejection's intent is "namespace ownership", not
-        // "byte equality on the wire". And the subsumption check goes both
-        // ways so a SHORTER operator prefix that the reserved namespace
-        // starts with (e.g. metadata.label-prefix = onms_) is also rejected,
-        // since it would emit metadata into the same wire shape as the
-        // reserved emitter.
-        String lc = sanitized.toLowerCase(java.util.Locale.ROOT);
-        for (String reserved : LabelMapper.RESERVED_LABEL_PREFIXES) {
-            if ("onms_meta_".equals(reserved)) continue;
-            if (lc.equals(reserved) || lc.startsWith(reserved) || reserved.startsWith(lc)) {
-                throw new IllegalStateException(
-                    "metadata.label-prefix '" + sanitized + "' collides with the reserved '"
-                    + reserved + "*' namespace owned by another emitter. Pick a different prefix.");
-            }
-        }
         metadataLabelPrefix = sanitized;
     }
     public void setMetadataCase(String v) {
@@ -1231,30 +1100,6 @@ public class PrometheusRemoteWriterConfig {
             throw new IllegalStateException(
                 "metadata.case must be 'preserve' or 'snake_case', got: " + v);
         }
-    }
-
-    public void setIfSpeedMode(String v) {
-        if (isBlank(v)) {
-            ifSpeedMode = IfSpeedMode.NORMALIZED;
-            return;
-        }
-        // Locale.ROOT — under tr_TR, default-locale toUpperCase() turns lowercase
-        // 'i' into dotted-İ which IfSpeedMode.valueOf would reject. Same precedent
-        // as setDiscoveryStrategy's toLowerCase(Locale.ROOT).
-        String normalized = v.trim().toUpperCase(java.util.Locale.ROOT).replace('-', '_');
-        try {
-            ifSpeedMode = IfSpeedMode.valueOf(normalized);
-        } catch (IllegalArgumentException e) {
-            throw new IllegalStateException(
-                "labels.if-speed-mode must be 'normalized' or 'raw', got: " + v);
-        }
-    }
-
-    // Aries Blueprint requires at least one setter to match the getter's
-    // return type. Same pattern as setMetadataCase / setDiscoveryStrategy /
-    // setWireProtocolVersion(int).
-    public void setIfSpeedMode(IfSpeedMode v) {
-        ifSpeedMode = v == null ? IfSpeedMode.NORMALIZED : v;
     }
 
     public void setStorePolicy(String v) {
@@ -1290,72 +1135,19 @@ public class PrometheusRemoteWriterConfig {
                 : StorePolicy.PARTIAL;
     }
 
-    public void setCategoriesMode(String v) {
-        if (isBlank(v)) {
-            categoriesMode = CategoriesMode.PER_CATEGORY;
-            return;
-        }
-        // Locale.ROOT — same Turkish-locale-bug avoidance as setIfSpeedMode.
-        String normalized = v.trim().toUpperCase(java.util.Locale.ROOT).replace('-', '_');
-        try {
-            categoriesMode = CategoriesMode.valueOf(normalized);
-        } catch (IllegalArgumentException e) {
-            throw new IllegalStateException(
-                "labels.categories-mode must be 'per-category', 'raw', or 'both', got: " + v);
-        }
-    }
+    // --- Removed in 1.0.0 ----------------------------------------------------
+    // Blueprint still binds these keys so a v0.x .cfg that sets one reaches
+    // validateRemovedLabelKeys() instead of being silently ignored.
 
-    // Aries Blueprint setter overload — same pattern as setIfSpeedMode(IfSpeedMode).
-    public void setCategoriesMode(CategoriesMode v) {
-        categoriesMode = v == null ? CategoriesMode.PER_CATEGORY : v;
-    }
+    public void setIfSpeedMode(String v)        { recordRemoved("labels.if-speed-mode", v); }
+    public void setCategoriesMode(String v)     { recordRemoved("labels.categories-mode", v); }
+    public void setLabelProfile(String v)       { recordRemoved("labels.profile", v); }
+    public void setAttrMode(String v)           { recordRemoved("labels.attr-mode", v); }
+    public void setLabelsAttrInclude(String v)  { recordRemoved("labels.attr-include", v); }
 
-    public void setLabelProfile(String v) {
-        // blankToNull (not isBlank) so a whitespace-only operator value falls
-        // back to the default instead of throwing — mirrors setWireProtocolVersion.
-        String value = blankToNull(v);
-        if (value == null) {
-            labelProfile = LabelProfile.NATIVE;
-            return;
-        }
-        // Locale.ROOT — same Turkish-locale-bug avoidance as setIfSpeedMode.
-        String normalized = value.toUpperCase(java.util.Locale.ROOT);
-        try {
-            labelProfile = LabelProfile.valueOf(normalized);
-        } catch (IllegalArgumentException e) {
-            throw new IllegalStateException(
-                "labels.profile must be 'native' or 'legacy', got: " + v);
-        }
+    private void recordRemoved(String key, String v) {
+        if (blankToNull(v) == null) removedLabelKeys.remove(key); else removedLabelKeys.add(key);
     }
-
-    // Aries Blueprint setter overload — same pattern as setIfSpeedMode(IfSpeedMode).
-    public void setLabelProfile(LabelProfile v) {
-        labelProfile = v == null ? LabelProfile.NATIVE : v;
-    }
-
-    public void setAttrMode(String v) {
-        // blankToNull for the same whitespace-only fallback as setLabelProfile.
-        String value = blankToNull(v);
-        if (value == null) {
-            attrMode = AttrMode.OFF;
-            return;
-        }
-        // Locale.ROOT — same Turkish-locale-bug avoidance as setIfSpeedMode.
-        String normalized = value.toUpperCase(java.util.Locale.ROOT);
-        try {
-            attrMode = AttrMode.valueOf(normalized);
-        } catch (IllegalArgumentException e) {
-            throw new IllegalStateException(
-                "labels.attr-mode must be 'off', 'external', or 'both', got: " + v);
-        }
-    }
-
-    // Aries Blueprint setter overload — same pattern as setIfSpeedMode(IfSpeedMode).
-    public void setAttrMode(AttrMode v) {
-        attrMode = v == null ? AttrMode.OFF : v;
-    }
-
-    public void setLabelsAttrInclude(String v) { labelsAttrInclude = blankToNull(v); }
 
     // --- Overflow tier setters -----------------------------------------------
 
@@ -1503,12 +1295,7 @@ public class PrometheusRemoteWriterConfig {
     public String  getLabelsRename()          { return labelsRename; }
     public String  getLabelsCopy()            { return labelsCopy; }
     public String  getMetricPrefix()          { return metricPrefix; }
-    public IfSpeedMode getIfSpeedMode()       { return ifSpeedMode; }
     public StorePolicy getStorePolicy()       { return storePolicy; }
-    public CategoriesMode getCategoriesMode() { return categoriesMode; }
-    public LabelProfile getLabelProfile()     { return labelProfile; }
-    public AttrMode getAttrMode()             { return attrMode; }
-    public String  getLabelsAttrInclude()     { return labelsAttrInclude; }
     public boolean isMetadataEnabled()        { return metadataEnabled; }
     public String  getMetadataInclude()       { return metadataInclude; }
     public String  getMetadataExclude()       { return metadataExclude; }

@@ -905,269 +905,78 @@ class PrometheusRemoteWriterConfigTest {
 
     // ---------- labels.if-speed-mode ----------------------------------------
 
-    @Test
-    void if_speed_mode_default_is_normalized() {
-        PrometheusRemoteWriterConfig c = minimal();
-        assertThat(c.getIfSpeedMode())
-            .isEqualTo(PrometheusRemoteWriterConfig.IfSpeedMode.NORMALIZED);
-    }
+    // ---------- labels.categories-mode --------------------------------------
+
+    // ---------- labels.rename reserved-target validation --------------------
+
+    // ---------- removed v0.x attribute-label keys (1.0.0) ----------------------
 
     @Test
-    void if_speed_mode_accepts_normalized_and_raw_spellings() {
-        PrometheusRemoteWriterConfig c = minimal();
-        c.setIfSpeedMode("normalized");
-        assertThat(c.getIfSpeedMode()).isEqualTo(PrometheusRemoteWriterConfig.IfSpeedMode.NORMALIZED);
-        c.setIfSpeedMode("Normalized");
-        assertThat(c.getIfSpeedMode()).isEqualTo(PrometheusRemoteWriterConfig.IfSpeedMode.NORMALIZED);
-        c.setIfSpeedMode("NORMALIZED");
-        assertThat(c.getIfSpeedMode()).isEqualTo(PrometheusRemoteWriterConfig.IfSpeedMode.NORMALIZED);
-        c.setIfSpeedMode("raw");
-        assertThat(c.getIfSpeedMode()).isEqualTo(PrometheusRemoteWriterConfig.IfSpeedMode.RAW);
-        c.setIfSpeedMode("Raw");
-        assertThat(c.getIfSpeedMode()).isEqualTo(PrometheusRemoteWriterConfig.IfSpeedMode.RAW);
-        c.setIfSpeedMode("RAW");
-        assertThat(c.getIfSpeedMode()).isEqualTo(PrometheusRemoteWriterConfig.IfSpeedMode.RAW);
-    }
-
-    @Test
-    void if_speed_mode_empty_string_resets_to_normalized() {
-        // Mirrors setMetadataCase semantics — empty / null reset to default;
-        // whitespace-only is not treated as blank (matches every other
-        // String-enum setter in this class).
-        PrometheusRemoteWriterConfig c = minimal();
-        c.setIfSpeedMode("raw");
-        c.setIfSpeedMode("");
-        assertThat(c.getIfSpeedMode()).isEqualTo(PrometheusRemoteWriterConfig.IfSpeedMode.NORMALIZED);
-        c.setIfSpeedMode("raw");
-        c.setIfSpeedMode((String) null);
-        assertThat(c.getIfSpeedMode()).isEqualTo(PrometheusRemoteWriterConfig.IfSpeedMode.NORMALIZED);
-    }
-
-    @Test
-    void if_speed_mode_rejects_unknown_value() {
-        PrometheusRemoteWriterConfig c = minimal();
-        assertThatThrownBy(() -> c.setIfSpeedMode("preserve"))
-            .isInstanceOf(IllegalStateException.class)
-            .hasMessageContaining("labels.if-speed-mode")
-            .hasMessageContaining("preserve")
-            .hasMessageContaining("normalized")
-            .hasMessageContaining("raw");
-    }
-
-    @Test
-    void if_speed_mode_rejects_cortex_alias() {
-        // We deliberately do not alias `cortex` to `raw`; users typing `cortex`
-        // get a clear error pointing at the right value via the accepted-list.
-        PrometheusRemoteWriterConfig c = minimal();
-        assertThatThrownBy(() -> c.setIfSpeedMode("cortex"))
-            .isInstanceOf(IllegalStateException.class)
-            .hasMessageContaining("labels.if-speed-mode");
-    }
-
-    @Test
-    void if_speed_mode_setter_null_defaults_to_normalized() {
-        // Aries Blueprint contract overload — see setIfSpeedMode(IfSpeedMode).
-        PrometheusRemoteWriterConfig c = minimal();
-        c.setIfSpeedMode(PrometheusRemoteWriterConfig.IfSpeedMode.RAW);
-        c.setIfSpeedMode((PrometheusRemoteWriterConfig.IfSpeedMode) null);
-        assertThat(c.getIfSpeedMode())
-            .isEqualTo(PrometheusRemoteWriterConfig.IfSpeedMode.NORMALIZED);
-    }
-
-    @Test
-    void reserved_rename_target_ifspeed_is_rejected_in_normalized_mode() {
-        PrometheusRemoteWriterConfig c = minimal();
-        c.setLabelsRename("foo -> ifSpeed");
-        assertThatThrownBy(c::validate)
-            .isInstanceOf(IllegalStateException.class)
-            .hasMessageContaining("labels.rename")
-            .hasMessageContaining("'ifSpeed'")
-            .hasMessageContaining("default label")
-            .hasMessageContaining("labels.if-speed-mode = raw");
-    }
-
-    @Test
-    void reserved_rename_target_ifspeed_is_rejected_in_raw_mode() {
-        PrometheusRemoteWriterConfig c = minimal();
-        c.setIfSpeedMode("raw");
-        c.setLabelsRename("foo -> ifSpeed");
-        assertThatThrownBy(c::validate)
-            .isInstanceOf(IllegalStateException.class)
-            .hasMessageContaining("labels.rename")
-            .hasMessageContaining("'ifSpeed'");
-    }
-
-    @Test
-    void reserved_rename_target_ifhighspeed_is_rejected_in_both_modes() {
-        for (PrometheusRemoteWriterConfig.IfSpeedMode mode :
-                PrometheusRemoteWriterConfig.IfSpeedMode.values()) {
+    void a_removed_v0x_label_key_fails_validation_naming_the_replacement() {
+        // A v0.x .cfg must not start and quietly emit a different schema.
+        record Removed(String key, java.util.function.BiConsumer<PrometheusRemoteWriterConfig, String> set) {}
+        java.util.List<Removed> removed = java.util.List.of(
+                new Removed("labels.attr-mode",       PrometheusRemoteWriterConfig::setAttrMode),
+                new Removed("labels.attr-include",    PrometheusRemoteWriterConfig::setLabelsAttrInclude),
+                new Removed("labels.categories-mode", PrometheusRemoteWriterConfig::setCategoriesMode),
+                new Removed("labels.profile",         PrometheusRemoteWriterConfig::setLabelProfile),
+                new Removed("labels.if-speed-mode",   PrometheusRemoteWriterConfig::setIfSpeedMode));
+        for (Removed r : removed) {
             PrometheusRemoteWriterConfig c = minimal();
-            c.setIfSpeedMode(mode);
-            c.setLabelsRename("foo -> ifHighSpeed");
+            r.set().accept(c, "external");
             assertThatThrownBy(c::validate)
-                .as("rename target 'ifHighSpeed' should be rejected in mode %s", mode)
+                .as(r.key())
                 .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("labels.rename")
-                .hasMessageContaining("'ifHighSpeed'")
-                .hasMessageContaining("labels.if-speed-mode = raw");
+                .hasMessageContaining(r.key())
+                .hasMessageContaining("removed in 1.0.0")
+                .hasMessageContaining("metadata.info-columns")
+                .hasMessageContaining("onms_resource_attr");
         }
     }
 
     @Test
-    void rename_from_if_speed_in_raw_mode_validates() {
-        // The rename is harmless in raw mode (no `if_speed` label to rename).
-        // Validation accepts; a one-shot WARN fires (not asserted here — the
-        // project has no SLF4J binding on the test classpath, same as the
-        // discovery-batch-size unused-knob WARN test).
+    void every_set_removed_key_is_named_at_once_and_a_blank_one_is_ignored() {
         PrometheusRemoteWriterConfig c = minimal();
-        c.setIfSpeedMode("raw");
-        c.setLabelsRename("if_speed -> link_speed");
-        assertThatCode(c::validate).doesNotThrowAnyException();
-    }
-
-    @Test
-    void rename_from_if_speed_in_normalized_mode_validates() {
-        // Pin the conditional-on-mode behavior: in normalized mode the rename
-        // is functional (renames the emitted `if_speed` label); validation
-        // accepts and no WARN fires. Symmetric to the raw-mode case.
-        PrometheusRemoteWriterConfig c = minimal();
-        c.setLabelsRename("if_speed -> link_speed");
-        assertThatCode(c::validate).doesNotThrowAnyException();
-    }
-
-    @Test
-    void cortex_compat_recipe_with_if_speed_mode_raw_validates() {
-        // The new recommended recipe for cortex migrants: drop the
-        // `if_speed -> ifSpeed` rename from the v0.4.2 list, set
-        // labels.if-speed-mode = raw instead. This is the canonical
-        // post-this-change recipe; the doc section publishes it.
-        PrometheusRemoteWriterConfig c = minimal();
-        c.setIfSpeedMode("raw");
-        c.setLabelsRename(
-            "node_label -> nodeLabel, "
-            + "foreign_source -> foreignSource, "
-            + "foreign_id -> foreignId, "
-            + "if_name -> ifName, "
-            + "if_descr -> ifDescr");
-        assertThatCode(c::validate).doesNotThrowAnyException();
-    }
-
-    // ---------- labels.categories-mode --------------------------------------
-
-    @Test
-    void categories_mode_default_is_per_category() {
-        PrometheusRemoteWriterConfig c = minimal();
-        assertThat(c.getCategoriesMode())
-            .isEqualTo(PrometheusRemoteWriterConfig.CategoriesMode.PER_CATEGORY);
-    }
-
-    @Test
-    void categories_mode_accepts_per_category_raw_both_spellings() {
-        PrometheusRemoteWriterConfig c = minimal();
-        c.setCategoriesMode("per-category");
-        assertThat(c.getCategoriesMode()).isEqualTo(PrometheusRemoteWriterConfig.CategoriesMode.PER_CATEGORY);
-        c.setCategoriesMode("Per-Category");
-        assertThat(c.getCategoriesMode()).isEqualTo(PrometheusRemoteWriterConfig.CategoriesMode.PER_CATEGORY);
-        c.setCategoriesMode("PER_CATEGORY");
-        assertThat(c.getCategoriesMode()).isEqualTo(PrometheusRemoteWriterConfig.CategoriesMode.PER_CATEGORY);
-        c.setCategoriesMode("raw");
-        assertThat(c.getCategoriesMode()).isEqualTo(PrometheusRemoteWriterConfig.CategoriesMode.RAW);
-        c.setCategoriesMode("RAW");
-        assertThat(c.getCategoriesMode()).isEqualTo(PrometheusRemoteWriterConfig.CategoriesMode.RAW);
-        c.setCategoriesMode("both");
-        assertThat(c.getCategoriesMode()).isEqualTo(PrometheusRemoteWriterConfig.CategoriesMode.BOTH);
-        c.setCategoriesMode("Both");
-        assertThat(c.getCategoriesMode()).isEqualTo(PrometheusRemoteWriterConfig.CategoriesMode.BOTH);
-        c.setCategoriesMode("BOTH");
-        assertThat(c.getCategoriesMode()).isEqualTo(PrometheusRemoteWriterConfig.CategoriesMode.BOTH);
-    }
-
-    @Test
-    void categories_mode_empty_string_resets_to_per_category() {
-        PrometheusRemoteWriterConfig c = minimal();
-        c.setCategoriesMode("raw");
-        c.setCategoriesMode("");
-        assertThat(c.getCategoriesMode()).isEqualTo(PrometheusRemoteWriterConfig.CategoriesMode.PER_CATEGORY);
-        c.setCategoriesMode("raw");
-        c.setCategoriesMode((String) null);
-        assertThat(c.getCategoriesMode()).isEqualTo(PrometheusRemoteWriterConfig.CategoriesMode.PER_CATEGORY);
-    }
-
-    @Test
-    void categories_mode_rejects_unknown_value() {
-        PrometheusRemoteWriterConfig c = minimal();
-        assertThatThrownBy(() -> c.setCategoriesMode("legacy"))
-            .isInstanceOf(IllegalStateException.class)
-            .hasMessageContaining("labels.categories-mode")
-            .hasMessageContaining("legacy")
-            .hasMessageContaining("per-category")
-            .hasMessageContaining("raw")
-            .hasMessageContaining("both");
-    }
-
-    @Test
-    void categories_mode_setter_null_defaults_to_per_category() {
-        PrometheusRemoteWriterConfig c = minimal();
-        c.setCategoriesMode(PrometheusRemoteWriterConfig.CategoriesMode.RAW);
-        c.setCategoriesMode((PrometheusRemoteWriterConfig.CategoriesMode) null);
-        assertThat(c.getCategoriesMode())
-            .isEqualTo(PrometheusRemoteWriterConfig.CategoriesMode.PER_CATEGORY);
-    }
-
-    @Test
-    void reserved_rename_target_categories_is_rejected_in_per_category_mode() {
-        PrometheusRemoteWriterConfig c = minimal();
-        c.setLabelsRename("foo -> categories");
+        c.setAttrMode("both");
+        c.setLabelProfile("native");
+        c.setCategoriesMode("   ");   // the blueprint default, not an operator value
         assertThatThrownBy(c::validate)
-            .isInstanceOf(IllegalStateException.class)
-            .hasMessageContaining("labels.rename")
-            .hasMessageContaining("'categories'")
-            .hasMessageContaining("default label")
-            .hasMessageContaining("labels.categories-mode = raw");
+            .isInstanceOf(PrometheusRemoteWriterConfig.RemovedKeyException.class)
+            .hasMessageContaining("labels.attr-mode, labels.profile: removed in 1.0.0")
+            .satisfies(e -> assertThat(e.getMessage()).doesNotContain("labels.categories-mode"));
+        c.setAttrMode("");
+        c.setLabelProfile(null);
+        c.validate();
     }
 
     @Test
-    void reserved_rename_target_categories_is_rejected_in_raw_mode() {
-        PrometheusRemoteWriterConfig c = minimal();
-        c.setCategoriesMode("raw");
-        c.setLabelsRename("foo -> categories");
-        assertThatThrownBy(c::validate)
-            .isInstanceOf(IllegalStateException.class)
-            .hasMessageContaining("labels.rename")
-            .hasMessageContaining("'categories'");
+    void a_rename_copy_or_include_of_a_removed_label_fails_validation_too() {
+        // Otherwise the entry validates and silently does nothing: the label
+        // it names is never on the data series any more.
+        for (String rename : new String[] {"if_descr -> ifDescr", "if_speed -> ifSpeed", "onms_cat_Routers -> routers"}) {
+            PrometheusRemoteWriterConfig c = minimal();
+            c.setLabelsRename(rename);
+            assertThatThrownBy(c::validate).as(rename)
+                .isInstanceOf(PrometheusRemoteWriterConfig.RemovedKeyException.class)
+                .hasMessageContaining("labels.rename source '" + rename.split(" ")[0] + "'")
+                .hasMessageContaining("onms_resource_attr");
+        }
+        PrometheusRemoteWriterConfig copy = minimal();
+        copy.setLabelsCopy("categories -> cats");
+        assertThatThrownBy(copy::validate)
+            .isInstanceOf(PrometheusRemoteWriterConfig.RemovedKeyException.class)
+            .hasMessageContaining("labels.copy source 'categories'");
+        PrometheusRemoteWriterConfig include = minimal();
+        include.setLabelsInclude("ifAlias, ifDescr");
+        assertThatThrownBy(include::validate)
+            .isInstanceOf(PrometheusRemoteWriterConfig.RemovedKeyException.class)
+            .hasMessageContaining("labels.include entry 'ifDescr'")
+            .satisfies(e -> assertThat(e.getMessage()).doesNotContain("ifAlias"));
+        // A glob is not a literal opt-in and stays allowed.
+        PrometheusRemoteWriterConfig glob = minimal();
+        glob.setLabelsInclude("if*");
+        glob.validate();
     }
-
-    @Test
-    void reserved_rename_target_categories_is_rejected_in_both_mode() {
-        PrometheusRemoteWriterConfig c = minimal();
-        c.setCategoriesMode("both");
-        c.setLabelsRename("foo -> categories");
-        assertThatThrownBy(c::validate)
-            .isInstanceOf(IllegalStateException.class)
-            .hasMessageContaining("labels.rename")
-            .hasMessageContaining("'categories'");
-    }
-
-    @Test
-    void cortex_compat_recipe_post_categories_mode_validates() {
-        // Sibling to cortex_compat_recipe_with_if_speed_mode_raw_validates —
-        // pins the canonical post-categories-mode published recipe: the
-        // v0.4.3 5-line rename block PLUS labels.if-speed-mode = raw PLUS
-        // labels.categories-mode = raw. Decoupled from the v0.4.3 sibling so
-        // a future change to either mode knob breaks only its own test.
-        PrometheusRemoteWriterConfig c = minimal();
-        c.setIfSpeedMode("raw");
-        c.setCategoriesMode("raw");
-        c.setLabelsRename(
-            "node_label -> nodeLabel, "
-            + "foreign_source -> foreignSource, "
-            + "foreign_id -> foreignId, "
-            + "if_name -> ifName, "
-            + "if_descr -> ifDescr");
-        assertThatCode(c::validate).doesNotThrowAnyException();
-    }
-
-    // ---------- labels.rename reserved-target validation --------------------
 
     @Test
     void labels_rename_target_matching_default_label_name_is_rejected() {
@@ -1176,7 +985,7 @@ class PrometheusRemoteWriterConfigTest {
             "__name__", "resourceId", "node",
             "foreign_source", "foreign_id", "node_label", "location",
             "resource_type", "resource_instance",
-            "if_name", "if_descr", "if_speed",
+            "if_name",
             "onms_instance_id",
             "mtype"
         };
@@ -1192,17 +1001,6 @@ class PrometheusRemoteWriterConfigTest {
     }
 
     @Test
-    void labels_rename_target_matching_onms_cat_prefix_is_rejected() {
-        PrometheusRemoteWriterConfig c = minimal();
-        c.setLabelsRename("foo -> onms_cat_Router");
-        assertThatThrownBy(c::validate)
-            .isInstanceOf(IllegalStateException.class)
-            .hasMessageContaining("labels.rename")
-            .hasMessageContaining("onms_cat_")
-            .hasMessageContaining("surveillance categories");
-    }
-
-    @Test
     void labels_rename_target_matching_onms_meta_prefix_is_rejected() {
         PrometheusRemoteWriterConfig c = minimal();
         c.setLabelsRename("foo -> onms_meta_custom");
@@ -1211,28 +1009,6 @@ class PrometheusRemoteWriterConfigTest {
             .hasMessageContaining("labels.rename")
             .hasMessageContaining("onms_meta_")
             .hasMessageContaining("metadata passthrough");
-    }
-
-    @Test
-    void labels_rename_target_matching_onms_attr_prefix_is_rejected() {
-        PrometheusRemoteWriterConfig c = minimal();
-        c.setLabelsRename("foo -> onms_attr_name");
-        assertThatThrownBy(c::validate)
-            .isInstanceOf(IllegalStateException.class)
-            .hasMessageContaining("labels.rename")
-            .hasMessageContaining("onms_attr_")
-            .hasMessageContaining("meta partition");
-    }
-
-    @Test
-    void labels_rename_target_matching_onms_extattr_prefix_is_rejected() {
-        PrometheusRemoteWriterConfig c = minimal();
-        c.setLabelsRename("foo -> onms_extattr_name");
-        assertThatThrownBy(c::validate)
-            .isInstanceOf(IllegalStateException.class)
-            .hasMessageContaining("labels.rename")
-            .hasMessageContaining("onms_extattr_")
-            .hasMessageContaining("external partition");
     }
 
     @Test
@@ -1267,72 +1043,19 @@ class PrometheusRemoteWriterConfigTest {
     }
 
     @Test
-    void labels_rename_cortex_compat_recipe_validates_and_parses() {
-        // Pin the published "Migration from opennms-cortex-tss-plugin" recipe
-        // (docs/src/docs/asciidoc/sections/_label-mapping.adoc) so a future
-        // change to RESERVED_LABEL_NAMES, the rename parser, or the sanitizer
-        // that would silently break the recipe fails CI instead of shipping
-        // a doc that no longer works. If this test changes, the doc section
-        // must change in lockstep.
-        //
-        // Note: as of the labels.if-speed-mode change, the v0.4.2 recipe's
-        // `if_speed -> ifSpeed` line was dropped (ifSpeed is now reserved
-        // unconditionally; the recipe relies on `labels.if-speed-mode = raw`
-        // for that label instead). The other five rename lines are unchanged.
-        PrometheusRemoteWriterConfig c = minimal();
-        c.setLabelsRename(
-            "node_label -> nodeLabel, "
-            + "foreign_source -> foreignSource, "
-            + "foreign_id -> foreignId, "
-            + "if_name -> ifName, "
-            + "if_descr -> ifDescr");
-        assertThatCode(c::validate).doesNotThrowAnyException();
-        assertThat(c.labelsRenameMap()).containsExactlyInAnyOrderEntriesOf(Map.of(
-            "node_label",     "nodeLabel",
-            "foreign_source", "foreignSource",
-            "foreign_id",     "foreignId",
-            "if_name",        "ifName",
-            "if_descr",       "ifDescr"));
-    }
-
-    @Test
-    void labels_rename_v04_2_cortex_recipe_collides_after_if_speed_mode_lands() {
-        // The v0.4.2 cortex-migration recipe verbatim — the if_speed -> ifSpeed
-        // line collides with the reserved-target set added by the
-        // labels.if-speed-mode change. Pinning the rejection makes the version
-        // transition explicit: an operator who upgrades carrying the v0.4.2
-        // recipe sees this exact failure shape, with the pointer at the new
-        // knob baked into the message body.
-        PrometheusRemoteWriterConfig c = minimal();
-        c.setLabelsRename(
-            "node_label -> nodeLabel, "
-            + "foreign_source -> foreignSource, "
-            + "foreign_id -> foreignId, "
-            + "if_name -> ifName, "
-            + "if_descr -> ifDescr, "
-            + "if_speed -> ifSpeed");
-        assertThatThrownBy(c::validate)
-            .isInstanceOf(IllegalStateException.class)
-            .hasMessageContaining("labels.rename")
-            .hasMessageContaining("'ifSpeed'")
-            .hasMessageContaining("default label")
-            .hasMessageContaining("labels.if-speed-mode = raw");
-    }
-
-    @Test
     void labels_rename_multiple_errors_are_accumulated_into_one_exception() {
         // foo -> __name__     -> reserved exact
-        // bar -> onms_cat_x   -> reserved prefix
+        // bar -> onms_meta_x  -> reserved prefix
         // baz -> cluster      -> ok (first time)
         // qux -> cluster      -> duplicate target of baz
         // Expect 3 distinct errors reported in one IllegalStateException.
         PrometheusRemoteWriterConfig c = minimal();
-        c.setLabelsRename("foo -> __name__, bar -> onms_cat_x, baz -> cluster, qux -> cluster");
+        c.setLabelsRename("foo -> __name__, bar -> onms_meta_x, baz -> cluster, qux -> cluster");
         assertThatThrownBy(c::validate)
             .isInstanceOf(IllegalStateException.class)
             .hasMessageContaining("labels.rename has 3 errors")
             .hasMessageContaining("__name__")
-            .hasMessageContaining("onms_cat_")
+            .hasMessageContaining("onms_meta_")
             .hasMessageContaining("same target");
     }
 
@@ -1737,64 +1460,6 @@ class PrometheusRemoteWriterConfigTest {
     }
 
     @Test
-    void copy_target_with_reserved_prefix_is_rejected() {
-        PrometheusRemoteWriterConfig c = minimal();
-        c.setLabelsCopy("foo -> onms_cat_router");
-        assertThatThrownBy(c::validate)
-            .isInstanceOf(IllegalStateException.class)
-            .hasMessageContaining("labels.copy")
-            .hasMessageContaining("onms_cat_")
-            .hasMessageContaining("surveillance categories");
-    }
-
-    @Test
-    void copy_target_matching_onms_attr_prefix_is_rejected() {
-        PrometheusRemoteWriterConfig c = minimal();
-        c.setLabelsCopy("node -> onms_attr_name");
-        assertThatThrownBy(c::validate)
-            .isInstanceOf(IllegalStateException.class)
-            .hasMessageContaining("labels.copy")
-            .hasMessageContaining("onms_attr_")
-            .hasMessageContaining("meta partition");
-    }
-
-    @Test
-    void copy_target_matching_onms_extattr_prefix_is_rejected() {
-        PrometheusRemoteWriterConfig c = minimal();
-        c.setLabelsCopy("node -> onms_extattr_name");
-        assertThatThrownBy(c::validate)
-            .isInstanceOf(IllegalStateException.class)
-            .hasMessageContaining("labels.copy")
-            .hasMessageContaining("onms_extattr_")
-            .hasMessageContaining("external partition");
-    }
-
-    @Test
-    void metadata_label_prefix_colliding_with_reserved_namespace_is_rejected() {
-        // The metadata processor's prefix may not collide with another
-        // emitter's reserved namespace (onms_cat_ for category expansion,
-        // onms_attr_ for resource string attributes). The default
-        // onms_meta_ is intentionally exempt — it's this emitter's own home.
-        PrometheusRemoteWriterConfig c = minimal();
-        assertThatThrownBy(() -> c.setMetadataLabelPrefix("onms_attr_"))
-            .isInstanceOf(IllegalStateException.class)
-            .hasMessageContaining("metadata.label-prefix")
-            .hasMessageContaining("onms_attr_");
-
-        assertThatThrownBy(() -> c.setMetadataLabelPrefix("onms_cat_"))
-            .isInstanceOf(IllegalStateException.class)
-            .hasMessageContaining("metadata.label-prefix")
-            .hasMessageContaining("onms_cat_");
-
-        // Subsumption: a prefix that *starts with* a reserved prefix is also
-        // rejected (an operator-set "onms_attr_extra_" would still write into
-        // the reserved namespace).
-        assertThatThrownBy(() -> c.setMetadataLabelPrefix("onms_attr_extra_"))
-            .isInstanceOf(IllegalStateException.class)
-            .hasMessageContaining("onms_attr_");
-    }
-
-    @Test
     void metadata_label_prefix_default_onms_meta_is_accepted() {
         PrometheusRemoteWriterConfig c = minimal();
         // Setting the default explicitly must not trip the reserved-prefix
@@ -1810,48 +1475,6 @@ class PrometheusRemoteWriterConfigTest {
         assertThatCode(() -> c.setMetadataLabelPrefix("custom_"))
             .doesNotThrowAnyException();
         assertThat(c.getMetadataLabelPrefix()).isEqualTo("custom_");
-    }
-
-    @Test
-    void metadata_label_prefix_uppercase_reserved_form_is_rejected() {
-        // The rejection's intent is "namespace ownership", not "byte
-        // equality on the wire". An uppercase ONMS_ATTR_ is bytes-distinct
-        // from onms_attr_ (Prometheus preserves case in label names) but
-        // semantically claims the same namespace, so it must be caught.
-        PrometheusRemoteWriterConfig c = minimal();
-        assertThatThrownBy(() -> c.setMetadataLabelPrefix("ONMS_ATTR_"))
-            .isInstanceOf(IllegalStateException.class)
-            .hasMessageContaining("onms_attr_");
-    }
-
-    @Test
-    void metadata_label_prefix_shorter_subsuming_value_is_rejected() {
-        // A shorter operator prefix that every reserved namespace starts
-        // with (e.g. onms_) would emit metadata under the same wire shape
-        // as onms_cat_*, onms_attr_*, and onms_meta_*. The setter must
-        // reject this both ways: sanitized.startsWith(reserved) covers the
-        // longer-side case; reserved.startsWith(sanitized) covers this one.
-        PrometheusRemoteWriterConfig c = minimal();
-        assertThatThrownBy(() -> c.setMetadataLabelPrefix("onms_"))
-            .isInstanceOf(IllegalStateException.class)
-            .hasMessageContaining("metadata.label-prefix");
-    }
-
-    @Test
-    void metadata_label_prefix_colliding_with_onms_extattr_is_rejected() {
-        PrometheusRemoteWriterConfig c = minimal();
-        assertThatThrownBy(() -> c.setMetadataLabelPrefix("onms_extattr_"))
-            .isInstanceOf(IllegalStateException.class)
-            .hasMessageContaining("metadata.label-prefix")
-            .hasMessageContaining("onms_extattr_");
-    }
-
-    @Test
-    void metadata_label_prefix_subsumed_by_onms_extattr_is_rejected() {
-        PrometheusRemoteWriterConfig c = minimal();
-        assertThatThrownBy(() -> c.setMetadataLabelPrefix("onms_extattr_extra_"))
-            .isInstanceOf(IllegalStateException.class)
-            .hasMessageContaining("onms_extattr_");
     }
 
     @Test
@@ -1895,12 +1518,12 @@ class PrometheusRemoteWriterConfigTest {
     @Test
     void copy_multiple_errors_are_accumulated_into_one_message() {
         PrometheusRemoteWriterConfig c = minimal();
-        c.setLabelsCopy("a -> node, b -> onms_cat_x, c -> cluster, d -> cluster");
+        c.setLabelsCopy("a -> node, b -> onms_meta_x, c -> cluster, d -> cluster");
         assertThatThrownBy(c::validate)
             .isInstanceOf(IllegalStateException.class)
             .hasMessageContaining("labels.copy has 3 error")
             .hasMessageContaining("'node'")
-            .hasMessageContaining("onms_cat_")
+            .hasMessageContaining("onms_meta_")
             .hasMessageContaining("'cluster'");
     }
 
@@ -2356,127 +1979,6 @@ class PrometheusRemoteWriterConfigTest {
     // ---------- helpers -----------------------------------------------------
 
     // ---------- labels.profile / labels.attr-mode ---------------------------
-
-    @Test
-    void label_profile_defaults_to_native() {
-        PrometheusRemoteWriterConfig c = minimal();
-        assertThatCode(c::validate).doesNotThrowAnyException();
-        assertThat(c.getLabelProfile()).isEqualTo(PrometheusRemoteWriterConfig.LabelProfile.NATIVE);
-        assertThat(c.getAttrMode()).isEqualTo(PrometheusRemoteWriterConfig.AttrMode.OFF);
-        assertThat(c.labelsAttrIncludeGlobs()).isEmpty();
-    }
-
-    @Test
-    void label_profile_parses_both_values_case_insensitively() {
-        PrometheusRemoteWriterConfig c = minimal();
-        c.setLabelProfile("Native");
-        assertThat(c.getLabelProfile()).isEqualTo(PrometheusRemoteWriterConfig.LabelProfile.NATIVE);
-        c.setLabelProfile("LEGACY");
-        assertThat(c.getLabelProfile()).isEqualTo(PrometheusRemoteWriterConfig.LabelProfile.LEGACY);
-    }
-
-    @Test
-    void blank_label_profile_falls_back_to_native() {
-        PrometheusRemoteWriterConfig c = minimal();
-        c.setLabelProfile("   ");
-        assertThat(c.getLabelProfile()).isEqualTo(PrometheusRemoteWriterConfig.LabelProfile.NATIVE);
-    }
-
-    @Test
-    void unknown_label_profile_is_rejected_with_key_name() {
-        PrometheusRemoteWriterConfig c = minimal();
-        assertThatThrownBy(() -> c.setLabelProfile("cortex"))
-            .isInstanceOf(IllegalStateException.class)
-            .hasMessageContaining("labels.profile")
-            .hasMessageContaining("native")
-            .hasMessageContaining("legacy");
-    }
-
-    @Test
-    void attr_mode_parses_all_values() {
-        PrometheusRemoteWriterConfig c = minimal();
-        c.setAttrMode("external");
-        assertThat(c.getAttrMode()).isEqualTo(PrometheusRemoteWriterConfig.AttrMode.EXTERNAL);
-        c.setAttrMode("BOTH");
-        assertThat(c.getAttrMode()).isEqualTo(PrometheusRemoteWriterConfig.AttrMode.BOTH);
-        c.setAttrMode("off");
-        assertThat(c.getAttrMode()).isEqualTo(PrometheusRemoteWriterConfig.AttrMode.OFF);
-    }
-
-    @Test
-    void unknown_attr_mode_is_rejected_with_key_name() {
-        PrometheusRemoteWriterConfig c = minimal();
-        assertThatThrownBy(() -> c.setAttrMode("all"))
-            .isInstanceOf(IllegalStateException.class)
-            .hasMessageContaining("labels.attr-mode");
-    }
-
-    @Test
-    void legacy_profile_with_attr_mode_is_a_validation_error() {
-        PrometheusRemoteWriterConfig c = minimal();
-        c.setLabelProfile("legacy");
-        c.setAttrMode("both");
-        assertThatThrownBy(c::validate)
-            .isInstanceOf(IllegalStateException.class)
-            .hasMessageContaining("labels.profile")
-            .hasMessageContaining("labels.attr-mode");
-    }
-
-    @Test
-    void legacy_profile_is_rejected_until_the_fixture_lands() {
-        // Temporary guard (openspec change label-profiles, task group 5):
-        // validation-level so the storage's config-error catch turns it into
-        // WARN-and-wait. When the legacy baseline ships, this test flips to
-        // assert legacy+off passes validation.
-        PrometheusRemoteWriterConfig c = minimal();
-        c.setLabelProfile("legacy");
-        c.setAttrMode("off");
-        assertThatThrownBy(c::validate)
-            .isInstanceOf(IllegalStateException.class)
-            .hasMessageContaining("not implemented yet");
-    }
-
-    @Test
-    void attr_include_without_external_mode_is_a_validation_error() {
-        PrometheusRemoteWriterConfig c = minimal();
-        c.setLabelsAttrInclude("ifName, datname");
-        assertThatThrownBy(c::validate)
-            .isInstanceOf(IllegalStateException.class)
-            .hasMessageContaining("labels.attr-include")
-            .hasMessageContaining("labels.attr-mode");
-    }
-
-    @Test
-    void attr_include_with_both_mode_is_a_validation_error() {
-        PrometheusRemoteWriterConfig c = minimal();
-        c.setAttrMode("both");
-        c.setLabelsAttrInclude("ifName");
-        assertThatThrownBy(c::validate)
-            .isInstanceOf(IllegalStateException.class)
-            .hasMessageContaining("labels.attr-include");
-    }
-
-    @Test
-    void attr_include_with_external_mode_parses_globs() {
-        PrometheusRemoteWriterConfig c = minimal();
-        c.setAttrMode("external");
-        c.setLabelsAttrInclude("ifName, dat*");
-        assertThatCode(c::validate).doesNotThrowAnyException();
-        assertThat(c.labelsAttrIncludeGlobs()).containsExactly("ifName", "dat*");
-    }
-
-    @Test
-    void profile_and_attr_mode_show_up_in_diff() {
-        PrometheusRemoteWriterConfig before = minimal();
-        PrometheusRemoteWriterConfig after = minimal();
-        after.setLabelProfile("legacy");
-        after.setAttrMode("external");
-        after.setLabelsAttrInclude("ifName");
-        List<String> diff = after.diff(before);
-        assertThat(diff).anyMatch(l -> l.startsWith("labels.profile:"));
-        assertThat(diff).anyMatch(l -> l.startsWith("labels.attr-mode:"));
-        assertThat(diff).anyMatch(l -> l.startsWith("labels.attr-include:"));
-    }
 
     // ---------- writer.shards ------------------------------------------------
 

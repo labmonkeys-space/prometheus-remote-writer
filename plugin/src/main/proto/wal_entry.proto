@@ -12,7 +12,7 @@ option java_multiple_files = true;
 // One record in the Write-Ahead Log. Mirrors the fields of MappedSample
 // (the plugin's post-label-mapping representation of a time series sample)
 // so the WAL stores post-mapping state: labels are already the emitted
-// names (e.g. "node", "job", "onms_cat_Routers"), not source-side tag
+// names (e.g. "node", "job", "if_name"), not source-side tag
 // keys. On replay, entries go straight to the wire builder without
 // re-running LabelMapper.
 //

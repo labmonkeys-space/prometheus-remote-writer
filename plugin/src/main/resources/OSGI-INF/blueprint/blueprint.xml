@@ -61,11 +61,12 @@
             <cm:property name="labels.exclude" value=""/>
             <cm:property name="labels.rename"  value=""/>
             <cm:property name="labels.copy"    value=""/>
-            <cm:property name="labels.if-speed-mode" value="normalized"/>
-            <cm:property name="labels.categories-mode" value="per-category"/>
-            <cm:property name="labels.profile"      value="native"/>
-            <cm:property name="labels.attr-mode"    value="off"/>
-            <cm:property name="labels.attr-include" value=""/>
+            <!-- Removed in 1.0.0; still bound so a .cfg that sets one fails validation -->
+            <cm:property name="labels.if-speed-mode"   value=""/>
+            <cm:property name="labels.categories-mode" value=""/>
+            <cm:property name="labels.profile"         value=""/>
+            <cm:property name="labels.attr-mode"       value=""/>
+            <cm:property name="labels.attr-include"    value=""/>
             <cm:property name="metric.prefix"  value=""/>
             <!-- Metadata passthrough -->
             <cm:property name="metadata.enabled"       value="false"/>

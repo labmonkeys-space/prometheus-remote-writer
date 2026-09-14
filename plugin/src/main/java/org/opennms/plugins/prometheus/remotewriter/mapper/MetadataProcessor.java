@@ -50,12 +50,11 @@ public final class MetadataProcessor {
             "*:*key*",
             "*:snmp-community");
 
-    /** Plain-key (no {@code context:} prefix) denylist, applied by
-     *  {@link LabelMapper#emitAttrLabels} when round-tripping arbitrary
-     *  Sample meta tags through the {@code onms_attr_} namespace. Same
-     *  intent as {@link #BUILTIN_DENYLIST} but matches keys that don't
-     *  carry the OpenNMS context prefix (e.g. a raw {@code password}
-     *  meta tag).
+    /** Plain-key (no {@code context:} prefix) denylist, applied by the
+     *  metadata registry before a resource attribute becomes an
+     *  {@code onms_resource_attr} row. Same intent as
+     *  {@link #BUILTIN_DENYLIST} but matches keys that don't carry the
+     *  OpenNMS context prefix (e.g. a raw {@code password} meta tag).
      *
      *  <p>Deliberately narrower than {@link #BUILTIN_DENYLIST}: the
      *  context-tag form has {@code *:*key*} to catch credential
@@ -76,10 +75,9 @@ public final class MetadataProcessor {
     private static final List<Pattern> BUILTIN_PLAIN_DENYLIST_GLOBS =
             compileCaseInsensitive(BUILTIN_PLAIN_DENYLIST);
 
-    /** Package-private predicate used by {@link LabelMapper} to filter
-     *  plain-key meta tags before emitting them under the {@code onms_attr_}
-     *  prefix. Case-insensitive so the safety net can't be bypassed by an
-     *  unusual casing. */
+    /** Whether a plain attribute key is credential-shaped and must never
+     *  reach the wire. Case-insensitive so the safety net can't be bypassed
+     *  by an unusual casing. */
     public static boolean isPlainKeyDenied(String key) {
         return matchesAny(key, BUILTIN_PLAIN_DENYLIST_GLOBS);
     }
