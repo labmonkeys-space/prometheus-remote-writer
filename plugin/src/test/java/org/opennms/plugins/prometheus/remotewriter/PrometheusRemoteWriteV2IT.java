@@ -53,12 +53,12 @@ class PrometheusRemoteWriteV2IT {
 
     // Prometheus 3.0 ships stable v2 receiver support (2.50 was
     // experimental; 2.55 stabilised; 3.0 promoted to default-enabled).
-    // The IT pins 3.0.1 to give v2 a known-supported environment;
+    // The IT pins PrometheusImages.V2_REFERENCE to give v2 a known-supported environment;
     // PrometheusRemoteWriteIT continues to exercise v1 against the
-    // older 2.53.2 image.
+    // older V1_REFERENCE image.
     @Container
     static GenericContainer<?> prometheus =
-            new GenericContainer<>(DockerImageName.parse("prom/prometheus:v3.0.1"))
+            new GenericContainer<>(DockerImageName.parse(PrometheusImages.V2_REFERENCE))
                     .withExposedPorts(9090)
                     .withCommand(
                             "--config.file=/etc/prometheus/prometheus.yml",

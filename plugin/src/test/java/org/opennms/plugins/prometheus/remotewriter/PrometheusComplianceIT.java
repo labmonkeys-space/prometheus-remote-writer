@@ -51,7 +51,7 @@ public class PrometheusComplianceIT extends AbstractStorageIntegrationTest {
     @Override
     protected TimeSeriesStorage createStorage() {
         if (prometheus == null) {
-            prometheus = new GenericContainer<>(DockerImageName.parse("prom/prometheus:v2.53.2"))
+            prometheus = new GenericContainer<>(DockerImageName.parse(PrometheusImages.V1_REFERENCE))
                     .withExposedPorts(9090)
                     .withCommand(
                             "--config.file=/etc/prometheus/prometheus.yml",

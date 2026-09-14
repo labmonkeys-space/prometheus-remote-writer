@@ -57,7 +57,7 @@ jobs:
           retention-days: 7
 
   badge-drift:
-    # Two declaration-drift checks. Both exist because the files involved are
+    # Declaration-drift checks. They exist because the files involved are
     # edited independently — a Dependabot bump touches one and nothing
     # notices the others fell out of step. That is how the KAR ended up
     # unable to install on Horizon 36.0.4 (#139).
@@ -72,6 +72,9 @@ jobs:
 
       - name: Verify README badge matches the e2e Horizon pin
         run: make verify-badge
+
+      - name: Verify the backend versions the docs quote match the compose pins and the IT references
+        run: make verify-versions
 
       - name: Verify the integration-api floor agrees across pom, feature and bundle
         run: make verify-compat
