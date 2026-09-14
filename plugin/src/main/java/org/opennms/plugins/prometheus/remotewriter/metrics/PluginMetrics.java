@@ -138,6 +138,7 @@ public final class PluginMetrics {
     public static final String FIND_METRICS_SINGLE_PASS_TOTAL  = "find_metrics_single_pass_total";
     public static final String FIND_METRICS_TWO_PHASE_TOTAL    = "find_metrics_two_phase_total";
     public static final String FIND_METRICS_PHASE2_BATCHES_TOTAL = "find_metrics_phase2_batches_total";
+    public static final String FIND_METRICS_ENRICHMENT_BATCHES_TOTAL = "find_metrics_enrichment_batches_total";
 
     private final MetricRegistry registry = new MetricRegistry();
     private final Counter samplesWritten;
@@ -162,6 +163,7 @@ public final class PluginMetrics {
     private final Counter findMetricsSinglePass;
     private final Counter findMetricsTwoPhase;
     private final Counter findMetricsPhase2Batches;
+    private final Counter findMetricsEnrichmentBatches;
 
     /** Nanoseconds, summed exactly; exposed as a millisecond gauge so sub-ms
      *  polls do not round to zero and vanish. */
@@ -200,6 +202,7 @@ public final class PluginMetrics {
         this.findMetricsSinglePass        = registry.counter(FIND_METRICS_SINGLE_PASS_TOTAL);
         this.findMetricsTwoPhase          = registry.counter(FIND_METRICS_TWO_PHASE_TOTAL);
         this.findMetricsPhase2Batches     = registry.counter(FIND_METRICS_PHASE2_BATCHES_TOTAL);
+        this.findMetricsEnrichmentBatches = registry.counter(FIND_METRICS_ENRICHMENT_BATCHES_TOTAL);
         registerLongGauge(FLUSHER_IDLE_MS, () -> flusherIdleNanos.get() / 1_000_000L);
         registerLongGauge(FLUSHER_LINGER_MS, () -> flusherLingerNanos.get() / 1_000_000L);
         registerLongGauge(FLUSHER_BUILD_MS, () -> flusherBuildNanos.get() / 1_000_000L);
@@ -239,6 +242,7 @@ public final class PluginMetrics {
     public void findMetricsSinglePass()                { findMetricsSinglePass.inc(); }
     public void findMetricsTwoPhase()                  { findMetricsTwoPhase.inc(); }
     public void findMetricsPhase2Batches(long n)       { if (n > 0) findMetricsPhase2Batches.inc(n); }
+    public void findMetricsEnrichmentBatches(long n)   { if (n > 0) findMetricsEnrichmentBatches.inc(n); }
 
     public void flusherIdleNanos(long n)               { if (n > 0) flusherIdleNanos.addAndGet(n); }
     public void flusherLingerNanos(long n)             { if (n > 0) flusherLingerNanos.addAndGet(n); }

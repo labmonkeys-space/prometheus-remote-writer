@@ -46,6 +46,9 @@ class PrometheusReadClientTest {
         PrometheusRemoteWriterConfig c = new PrometheusRemoteWriterConfig();
         c.setWriteUrl(server.url("/api/v1/push").toString());
         c.setReadUrl(server.url("").toString().replaceAll("/$", ""));
+        // Metadata off: these cases enqueue exactly the discovery responses
+        // they expect. The enrichment query has its own case below.
+        c.setMetadataCadenceMs(0);
         c.validate();
         client = new PrometheusReadClient(c);
     }
@@ -78,6 +81,43 @@ class PrometheusReadClientTest {
         assertThat(req.getPath()).startsWith("/api/v1/series?match[]=");
         assertThat(req.getPath()).contains("__name__%3D%22ifHCInOctets%22");
         assertThat(req.getPath()).contains("&start=");
+    }
+
+    @Test
+    void find_metrics_enriches_its_result_from_the_metadata_rows() throws Exception {
+        server.enqueue(new MockResponse().setResponseCode(200)
+                .setBody("{\"status\":\"success\",\"data\":["
+                       + "{\"__name__\":\"ifHCInOctets\",\"resourceId\":\"node[1].interfaceSnmp[eth0]\",\"mtype\":\"counter\"}"
+                       + "]}"));
+        server.enqueue(new MockResponse().setResponseCode(200)
+                .setBody("{\"status\":\"success\",\"data\":{\"resultType\":\"vector\",\"result\":["
+                       + "{\"metric\":{\"resourceId\":\"node[1].interfaceSnmp[eth0]\","
+                       + "\"key\":\"ifAlias\",\"value\":\"uplink\"},\"value\":[1700000000,\"1700000000\"]}"
+                       + "]}}"));
+
+        PrometheusRemoteWriterConfig c = new PrometheusRemoteWriterConfig();
+        c.setWriteUrl(server.url("/api/v1/push").toString());
+        c.setReadUrl(server.url("").toString().replaceAll("/$", ""));
+        c.validate();   // metadata.cadence-ms at its default: enrichment on
+        PrometheusReadClient enriching = new PrometheusReadClient(c);
+        TagMatcher m = ImmutableTagMatcher.builder().type(TagMatcher.Type.EQUALS).key("name").value("ifHCInOctets").build();
+        List<Metric> out;
+        try {
+            out = enriching.findMetrics(List.of(m));
+        } finally {
+            enriching.shutdown();
+        }
+
+        assertThat(out).hasSize(1);
+        assertThat(out.get(0).getExternalTags()).anySatisfy(t -> {
+            assertThat(t.getKey()).isEqualTo("ifAlias");
+            assertThat(t.getValue()).isEqualTo("uplink");
+        });
+        assertThat(server.takeRequest().getPath()).startsWith("/api/v1/series?");
+        RecordedRequest enrichment = server.takeRequest();
+        assertThat(enrichment.getMethod()).isEqualTo("POST");
+        assertThat(enrichment.getPath()).isEqualTo("/api/v1/query");
+        assertThat(enrichment.getBody().readUtf8()).startsWith("query=timestamp");
     }
 
     @Test
@@ -515,6 +555,7 @@ class PrometheusReadClientTest {
         c.setWriteUrl(server.url("/api/v1/push").toString());
         c.setReadUrl(server.url("").toString().replaceAll("/$", ""));
         c.setDiscoveryStrategy("label-values-first");
+        c.setMetadataCadenceMs(0);   // these cases enqueue exactly the discovery responses
         c.setDiscoveryBatchSize(1);
         c.validate();
         org.opennms.plugins.prometheus.remotewriter.metrics.PluginMetrics m =
@@ -744,6 +785,7 @@ class PrometheusReadClientTest {
         c.setWriteUrl(server.url("/api/v1/push").toString());
         c.setReadUrl(server.url("").toString().replaceAll("/$", ""));
         c.setDiscoveryStrategy("label-values-first");
+        c.setMetadataCadenceMs(0);   // these cases enqueue exactly the discovery responses
         c.setDiscoveryBatchSize(batchSize);
         c.validate();
         return new PrometheusReadClient(c);

@@ -176,6 +176,53 @@ class PrometheusRemoteWriteIT {
         assertThat(points.get(0).getValue()).isEqualTo(42.0);
     }
 
+    /**
+     * The metadata round trip end to end: an attribute the write path saw
+     * becomes an onms_resource_attr row in Prometheus, and findMetrics hands
+     * it back as the external tag OpenNMS's placeholder substitution reads.
+     * No configuration names the attribute anywhere.
+     */
+    @Test
+    void a_resource_attribute_round_trips_through_the_metadata_rows() throws Exception {
+        Instant now = Instant.now();
+        String metricName = "onms_meta_rt_" + System.nanoTime();
+        String resourceId = "nodeSource[NOC:meta-rt].interfaceSnmp[eth7]";
+        storage.store(List.of(ImmutableSample.builder()
+                .metric(ImmutableMetric.builder()
+                        .intrinsicTag("name", metricName)
+                        .intrinsicTag("resourceId", resourceId)
+                        .externalTag("foreignSource", "NOC")
+                        .externalTag("foreignId", "meta-rt")
+                        .externalTag("ifName", "eth7")
+                        .externalTag("ifAlias", "uplink to core-sw-1")
+                        .externalTag("categories", "Routers,Production")
+                        .build())
+                .time(now)
+                .value(7.0)
+                .build()));
+
+        PluginMetrics m = storage.getMetrics();
+        await().atMost(Duration.ofSeconds(20))
+               .until(() -> m.snapshot().get(PluginMetrics.SAMPLES_WRITTEN).longValue() >= 1L
+                         && m.snapshot().get(PluginMetrics.METADATA_SERIES_EMITTED).longValue() >= 1L);
+
+        TagMatcher nameMatcher = ImmutableTagMatcher.builder()
+                .type(TagMatcher.Type.EQUALS).key("name").value(metricName).build();
+        Metric found = await().atMost(Duration.ofSeconds(20))
+                .until(() -> storage.findMetrics(List.of(nameMatcher)),
+                       list -> !list.isEmpty()
+                            && list.get(0).getExternalTags().stream().anyMatch(t -> t.getKey().equals("ifAlias")))
+                .get(0);
+        assertThat(found.getExternalTags()).anySatisfy(t -> {
+            assertThat(t.getKey()).isEqualTo("ifAlias");
+            assertThat(t.getValue()).isEqualTo("uplink to core-sw-1");
+        });
+        assertThat(found.getMetaTags()).anySatisfy(t -> {
+            assertThat(t.getKey()).isEqualTo("categories");
+            assertThat(t.getValue()).isEqualTo("Production,Routers");
+        });
+    }
+
     @Test
     void sharded_pipeline_delivers_all_samples_in_per_series_order() throws Exception {
         // writer.shards=4: samples of 20 series with 5 increasing timestamps
