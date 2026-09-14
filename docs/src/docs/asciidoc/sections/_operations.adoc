@@ -29,7 +29,7 @@ and prints them through the Karaf shell command
 | `samples_synthesized_mtype_total`          | Reads where the Prometheus response lacked an `mtype` label and the plugin synthesized `mtype="gauge"` to keep graphs renderable. Ticks once per Metric reconstruction — per matched series in `findMetrics`, once per fetch in `getTimeSeriesData`. See <<mtype-roundtrip>>. Should drop to flat once Prometheus retention has aged out pre-fix data, or rise indefinitely if `labels.exclude = mtype` is configured.
 | `store_calls_total`                        | Calls to `store()`. With `store_calls_failed_total` this is the caller-side failure rate that #154 had to borrow from OpenNMS's own timers.
 | `store_calls_failed_total`                 | `store()` calls that threw. Under `queue.store-policy = partial` a call that was partially accepted still counts as failed.
-| `store_samples_offered_total`              | Samples handed to `store()` before label mapping. Over a window, `offered = written + samples_dropped_unmapped_total + Σ dropped_* + queue_depth + overflow_pending_samples`. It is exact between scrapes rather than at every instant: depth and pending are read per shard without a global lock, so a scrape taken mid-spill can miss a sample in flight between the two. It also does not hold across a restart, since a recovered bucket writes in the new process what was offered in the old.
+| `store_samples_offered_total`              | Samples handed to `store()` before label mapping, plus the metadata samples the plugin emits itself (see <<resource-metadata>>). Over a window, `offered = written + samples_dropped_unmapped_total + Σ dropped_* + queue_depth + overflow_pending_samples`. It is exact between scrapes rather than at every instant: depth and pending are read per shard without a global lock, so a scrape taken mid-spill can miss a sample in flight between the two. It also does not hold across a restart, since a recovered bucket writes in the new process what was offered in the old.
 | `samples_dropped_shutdown_total`           | Samples that had left the queue (built, or in the builder's hand) when a forced shutdown interrupted the flusher before they could be sent. Non-zero only when `shutdown.grace-period-ms` expired.
 | `samples_dropped_unmapped_total`           | Samples the label mapper could not map because the metric had no name. Never offered to a queue or a bucket. Only a non-OpenNMS caller of the TimeSeriesStorage API produces these.
 | `http_write_duration_ms_total`             | Wall milliseconds spent inside remote-write HTTP calls, retries and backoff included. Mean round-trip: `rate(http_write_duration_ms_total) / rate(http_writes_successful_total + http_writes_failed_total)`. Sender utilisation per shard: `rate(http_write_duration_ms_total) / (1000 × writer.shards)`; the builder's share is `flusher_build_ms_total`. Samples per write: `rate(samples_written_total) / rate(http_writes_successful_total)`.
@@ -89,6 +89,10 @@ See <<overflow-caller-cost,What an outage costs the writer threads>> for why a s
 
 | `delete_noop_total`                | `delete(Metric)` calls (Remote Write has no delete semantic).
 | `metadata_denylist_blocked_total`  | Metadata keys blocked by the built-in credential denylist.
+| `metadata_series_emitted_total`    | Metadata samples (`onms_resource_attr`, `onms_resource_category`, `onms_resource_info`, `onms_resource_ifspeed`) handed to the pipeline. See <<resource-metadata>>.
+| `metadata_attrs_dropped_total`     | Attributes past `metadata.attr-budget`, per emission. A steadily rising value names a resource type whose attributes outgrow the budget.
+| `metadata_resources`               | Gauge: resources the write path currently remembers metadata for.
+| `find_metrics_enrichment_batches_total` | Metadata queries `findMetrics` issued to restore attributes from the rows, one per `read.discovery-batch-size` resources.
 | `wal_replay_samples_total`         | Samples recovered from the disk tier at startup, summed over shards. They ship before anything offered after the restart. Approximate by a few samples either way — it sums the per-segment index counts, which over-count a segment spanning the checkpoint and under-count one whose index lagged its last append. Read it as "recovery found work", not as an accounting input; it is deliberately not a term in the reconciliation identity.
 |===
 
@@ -106,6 +110,7 @@ These are starting points — tune to your deployment's noise floor.
 | Recovery falling behind the budget                      | `overflow_oldest_pending_age_ms > 300000` for 10m — the oldest unwritten sample is more than five minutes old
 | Queue full (no-WAL deployments)                         | `rate(samples_dropped_queue_full_total[5m]) > 0`
 | `job="opennms"` cardinality exploded                    | `rate(samples_unparseable_resource_id_total[1h]) > 0` — parser regression or new resourceId shape
+| Attributes silently truncated                           | `rate(metadata_attrs_dropped_total[1h]) > 0`. A resource type carries more attributes than `metadata.attr-budget`; raise the budget or add a column.
 | Endpoint persistently unhappy                           | `rate(http_writes_failed_total[5m]) / rate(http_writes_successful_total[5m]) > 0.1`
 | TLS skip-verify left on in production                   | log-based — the plugin emits a WARN every hour
 |===
@@ -221,7 +226,7 @@ outage_window = overflow.max-size-bytes / (samples_per_second × bytes_per_sampl
 ----
 
 `bytes_per_sample` depends on your label set, because the bucket stores every sample's metric name and labels uncompressed.
-On a native-profile OpenNMS fleet of SNMP interface data it measured about 340 bytes, so at 64,000 samples/sec the default 4 GiB buys about 3 to 4 minutes.
+On an OpenNMS fleet of SNMP interface data under the 0.8 label set it measured about 340 bytes, so at 64,000 samples/sec the default 4 GiB buys about 3 to 4 minutes.
 Halving the offered rate doubles the window.
 Measure your own figure from `overflow_bytes` and `overflow_pending_samples`; <<overflow-sizing,Sizing the disk tier>> explains how, including the baseline to subtract.
 
@@ -248,6 +253,8 @@ deployment.
 | 5k–25k samples/sec    | `queue.capacity = 50000`, `batch.size = 2000`, `http.max-connections = 32` | Raise `overflow.max-size-bytes` if you want the same outage window at the higher rate.
 | 25k+ samples/sec      | `writer.shards = 4`, `queue.capacity = 40000`, `batch.size = 1000`, `batch.linger-ms = 100` | Single-process Karaf is the bottleneck before the wire. Size the tier from the outage window you actually want, not from a round number.
 |===
+
+The metadata series add about `resources × 10 ÷ cadence in seconds` samples per second (about 2,400 for 220,000 resources at the default 15 minutes) and, more importantly, about ten series per resource on the backend; see <<resource-metadata>> for the arithmetic and the backend limits to check.
 
 == Karaf shell commands
 

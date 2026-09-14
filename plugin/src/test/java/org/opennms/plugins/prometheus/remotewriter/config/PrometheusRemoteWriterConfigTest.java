@@ -941,7 +941,7 @@ class PrometheusRemoteWriterConfigTest {
         c.setLabelProfile("native");
         c.setCategoriesMode("   ");   // the blueprint default, not an operator value
         assertThatThrownBy(c::validate)
-            .isInstanceOf(PrometheusRemoteWriterConfig.RemovedKeyException.class)
+            .isInstanceOf(IllegalStateException.class)
             .hasMessageContaining("labels.attr-mode, labels.profile: removed in 1.0.0")
             .satisfies(e -> assertThat(e.getMessage()).doesNotContain("labels.categories-mode"));
         c.setAttrMode("");
@@ -957,21 +957,26 @@ class PrometheusRemoteWriterConfigTest {
             PrometheusRemoteWriterConfig c = minimal();
             c.setLabelsRename(rename);
             assertThatThrownBy(c::validate).as(rename)
-                .isInstanceOf(PrometheusRemoteWriterConfig.RemovedKeyException.class)
+                .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("labels.rename source '" + rename.split(" ")[0] + "'")
                 .hasMessageContaining("onms_resource_attr");
         }
         PrometheusRemoteWriterConfig copy = minimal();
         copy.setLabelsCopy("categories -> cats");
         assertThatThrownBy(copy::validate)
-            .isInstanceOf(PrometheusRemoteWriterConfig.RemovedKeyException.class)
+            .isInstanceOf(IllegalStateException.class)
             .hasMessageContaining("labels.copy source 'categories'");
         PrometheusRemoteWriterConfig include = minimal();
         include.setLabelsInclude("ifAlias, ifDescr");
         assertThatThrownBy(include::validate)
-            .isInstanceOf(PrometheusRemoteWriterConfig.RemovedKeyException.class)
+            .isInstanceOf(IllegalStateException.class)
             .hasMessageContaining("labels.include entry 'ifDescr'")
             .satisfies(e -> assertThat(e.getMessage()).doesNotContain("ifAlias"));
+        PrometheusRemoteWriterConfig exclude = minimal();
+        exclude.setLabelsExclude("node_label, onms_cat_*");
+        assertThatThrownBy(exclude::validate)
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("labels.exclude entry 'onms_cat_*'");
         // A glob is not a literal opt-in and stays allowed.
         PrometheusRemoteWriterConfig glob = minimal();
         glob.setLabelsInclude("if*");

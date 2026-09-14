@@ -412,8 +412,8 @@ here as a missing entry; check the log immediately after activation.
 | Key                          | Default | Purpose
 
 | `max-series-lookback-seconds`| `7776000` (90 d) | `findMetrics` lookback when no time window is supplied.
-| `read.discovery-strategy`    | `single-pass` | Resource-discovery flow for `findMetrics`. `single-pass` issues one `GET /api/v1/series` per call. `label-values-first` opts into a two-phase path that enumerates `resourceId` values via `/api/v1/label/resourceId/values` first, then issues batched series queries with exact-match alternation. See <<resource-discovery>>.
-| `read.discovery-batch-size`  | `50`    | Maximum `resourceId` values exact-match-alternated into one phase-2 selector when `read.discovery-strategy = label-values-first`. Bounds `[1, 200]`. Default 50 is comfortably below the typical 8 KiB HTTP request-line cap; the upper bound 200 holds at ~30 KiB worst case (fits cloud LB defaults; safe ceiling above default nginx / Mimir 8 KiB limits). Ignored under `single-pass` (logs a WARN at validate time).
+| `read.discovery-strategy`    | `single-pass` | Resource-discovery flow for `findMetrics`. `single-pass` issues one `GET /api/v1/series` per call. `label-values-first` opts into a two-phase path that enumerates `resourceId` values via `/api/v1/label/resourceId/values` first, then issues batched series queries with exact-match alternation. Under either strategy the result is then enriched from the metadata rows. See <<resource-discovery>>.
+| `read.discovery-batch-size`  | `50`    | Maximum `resourceId` values exact-match-alternated into one selector: the phase-2 selector under `label-values-first`, and the metadata enrichment query under either strategy (see <<metadata-read-path>>). Bounds `[1, 200]`. Default 50 is comfortably below the typical 8 KiB HTTP request-line cap for the phase-2 GET; the upper bound 200 holds at ~30 KiB worst case (fits cloud LB defaults; safe ceiling above default nginx / Mimir 8 KiB limits). The enrichment query is a POST and not bound by the request line.
 |===
 
 [#resource-discovery]
@@ -468,6 +468,14 @@ identical to single-pass error semantics. Enable the toggle only when you
 trust the backend's `/api/v1/label/<name>/values` endpoint to answer
 correctly under your `match[]` shape.
 
+==== Enrichment from the metadata rows
+
+Whichever strategy found the metrics, `findMetrics` then restores each
+resource's string attributes and categories from the `onms_resource_attr`
+and `onms_resource_category` rows, one `POST /api/v1/query` per
+`read.discovery-batch-size` resources, best effort. See
+<<metadata-read-path>>.
+
 == Label policy
 
 [cols="2,1,4",options="header"]
@@ -484,6 +492,26 @@ correctly under your `match[]` shape.
 NOTE: Pipeline order is `defaults → exclude → include → copy → rename →
 metadata`. See <<label-mapping>> for the full mental model and worked
 recipes.
+
+The v0.x keys `labels.attr-mode`, `labels.attr-include`,
+`labels.categories-mode`, `labels.if-speed-mode` and `labels.profile`
+were removed in 1.0.0. A `.cfg` that still sets one fails validation
+with a message naming the replacement, and the plugin stays inactive
+until the line is removed; see <<migration>>.
+
+== Resource metadata
+
+[cols="2,1,4",options="header"]
+|===
+| Key                          | Default | Purpose
+
+| `metadata.cadence-ms`        | `900000` | How often an unchanged resource's metadata series are re-emitted (15 min). `0` switches them off, and OpenNMS graph placeholders stop resolving.
+| `metadata.attr-budget`       | `16`    | `onms_resource_attr` rows per resource, lowest keys first; the remainder is counted in `metadata_attrs_dropped_total`.
+| `metadata.info-columns`      | `if_alias=ifAlias, if_descr=ifDescr, resource_name=name, hr_storage_descr=hrStorageDescr, dsk_path=dskPath, datname=datname, spcname=spcname` | `column=key` entries for the `onms_resource_info` series. Empty means no info series.
+|===
+
+See <<resource-metadata>> for the series, the query patterns and the
+column grammar.
 
 == Metadata passthrough
 
@@ -528,7 +556,7 @@ outage  = overflow.max-size-bytes / (samples_per_second × bytes_per_sample)
 ----
 
 `bytes_per_sample` depends on the label set.
-On a native-profile OpenNMS fleet it measured about 340 bytes, so at 64,000 samples/sec the shipped defaults buy about 3 to 4 minutes of backend outage with no loss.
+On an OpenNMS fleet under the 0.8 label set it measured about 340 bytes, so at 64,000 samples/sec the shipped defaults buy about 3 to 4 minutes of backend outage with no loss.
 Measure yours from `overflow_bytes` and `overflow_pending_samples`; see <<overflow-sizing,Sizing the disk tier>>.
 
 The activation log names the whole resolved write path on one line, so

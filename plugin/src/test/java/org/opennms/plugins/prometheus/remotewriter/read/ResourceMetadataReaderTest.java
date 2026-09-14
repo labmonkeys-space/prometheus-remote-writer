@@ -209,10 +209,10 @@ class ResourceMetadataReaderTest {
     }
 
     @Test
-    void a_failed_batch_leaves_only_its_own_resources_unenriched() {
+    void a_failed_or_malformed_batch_leaves_only_its_own_resources_unenriched() {
         List<Metric> in = List.of(metric("m", "first"), metric("m", "second"));
         ResourceMetadataReader r = new ResourceMetadataReader(config(900_000, 1), (url, form) -> {
-            if (form.contains("first")) throw new StorageException("timeout");
+            if (form.contains("first")) return "{\"status\":\"error\",\"error\":\"nope\"}";
             return vector(row("onms_resource_attr", "second", "key", "ifAlias", "value", "still enriched"));
         });
         List<Metric> out = r.enrich(in);

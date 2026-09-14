@@ -1,64 +1,66 @@
 [[migration]]
 = Migration
 
+== To 1.0.0 from a 0.x release of this plugin
+
+1.0.0 is a cutover, not a migration.
+Resource string attributes, surveillance categories and the interface speed now travel as metadata series joined on `resourceId` (see <<resource-metadata>>), and the data series lose the labels that carried them: `if_descr`, `if_speed`, `ifSpeed`, `ifHighSpeed`, `categories`, `onms_cat_*`, `onms_attr_*` and `onms_extattr_*`.
+`if_name` is the only interface label left.
+There is no compatibility mode, no dual emission and no read-path support for the old prefixes.
+
+What that means, once:
+
+* The identity of every affected series changes at the cutover.
+  Series written before it keep their old identity for the retention window and are not joined to the new ones; a `rate()` span across the boundary starts fresh.
+* OpenNMS graph rendering is unaffected across the boundary.
+  The read path resolves resources by `__name__` and `resourceId`, both of which stay, and restores `${…}` placeholders from the rows.
+* Dashboards and alert rules that filtered on a removed label move to a join:
+
+[cols="2,3",options="header"]
+|===
+| You had | You write now
+
+| `{if_descr="Ethernet1"}` on a data series | `* on(resourceId) group_left(if_descr) last_over_time(onms_resource_info[30m])`, then filter on `if_descr`
+| `if_speed` as a divisor | `/ on(resourceId) (last_over_time(onms_resource_ifspeed[30m]) > 0)`
+| `{onms_cat_Routers="true"}` | `* on(resourceId) group_left() last_over_time(onms_resource_category{category="Routers"}[30m])`
+| `{categories=~".*Routers.*"}` | the same exact match on `onms_resource_category`
+| `{onms_extattr_name="…"}` or `{onms_attr_<key>="…"}` | `* on(resourceId) group_left(value) last_over_time(onms_resource_attr{key="<key>"}[30m])`, or a column in `metadata.info-columns`
+|===
+
+The `last_over_time(…[30m])` is not optional: the metadata series are emitted every 15 minutes and a bare selector sees only the 5-minute lookback delta.
+See <<resource-metadata>> for the idioms, including the one to use in alert rules.
+
+The configuration keys that shaped the removed labels are gone with them.
+A `{cfg-file}` that still carries one does not start silently: validation fails with a message naming the replacement, the plugin logs it at ERROR as a rejected configuration (any validation failure of a delivered file is; only a file with no `write.url` yet is the WARN of the startup race) and stays inactive until the line is removed, then activates on the next save of the file.
+
+[cols="2,3",options="header"]
+|===
+| Removed | Do instead
+
+| `labels.attr-mode`, `labels.attr-include` | Delete. Every attribute is on the `onms_resource_attr` rows; the ones you queried by name become columns in `metadata.info-columns`.
+| `labels.categories-mode` | Delete. Categories are `onms_resource_category` rows.
+| `labels.if-speed-mode` | Delete. The speed is the `onms_resource_ifspeed` gauge in bits per second.
+| `labels.profile` | Delete. The 1.0.0 schema is the only schema; the `legacy` profile was never finished and is dropped.
+| `labels.rename`, `labels.copy` or `labels.exclude` naming `if_descr`, `if_speed`, `ifSpeed`, `ifHighSpeed`, `categories` or a removed prefix (`onms_cat_*`, …) | Delete the entry; the label no longer exists.
+| `labels.include = ifDescr` (or `ifSpeed`, `ifHighSpeed`, `categories`) | Delete the entry; those source tags feed the metadata series and are never labels.
+| `labels.exclude` or `labels.rename` touching `resourceId` | Delete the entry; `resourceId` is the join key of every metadata series.
+|===
+
+Everything else in the file is unchanged, and the `.cfg` hot-reloads as before.
+One overflow-tier caveat: a bucket stores samples after mapping, so a backlog pending at the upgrade flushes in the old schema; new samples use the new one.
+
 == From the legacy `opennms-prometheus-remotewrite-plugin`
 
-[WARNING]
-====
-The `legacy` profile is *not available yet*: its wire schema is pinned
-by an empirically captured fixture that has not been recorded, and
-configuration validation rejects `labels.profile = legacy` with a
-clear message until it ships. Until then, migrate with
-`labels.profile = native` (a one-time series changeover — old history
-stays readable, see the note below).
-====
-
-Once available, set one line in `{cfg-file}` and deploy the KAR:
-
-[source,properties]
-----
-labels.profile = legacy
-----
-
-The `legacy` profile emits the legacy plugin's wire schema — label
-names, value formats, and metric names — pinned by an empirically
-captured fixture of observed output (never by reading the legacy
-plugin's AGPL source). Existing series continue across the switchover,
-so dashboards, alerts, and `rate()` spans keep working.
+There is no compatibility profile.
+Install this plugin with its default schema; the switchover is a one-time series changeover, the same one described above.
 
 [NOTE]
 ====
-History written by the legacy plugin stays readable through this
-plugin's read path under *either* profile: the read side needs only
-`__name__` and `resourceId` and treats all other labels as meta tags.
-Choose `legacy` only if you need new samples to *continue the same
-series*; choose `native` if a one-time series changeover is acceptable
-and you want the leaner schema.
+History written by the other plugin stays readable through this plugin's read path: the read side needs only `__name__` and `resourceId` and treats every other label as a meta tag.
+Its graph placeholders resolve only for resources this plugin has seen, since attributes come from the rows this plugin writes.
+Read-side continuity for that history, so a dashboard sees one series across the switchover, is an optional follow-up ({project-repo-url}/issues/197[#197]) and not on the 1.0.0 line.
 ====
 
-== From v0.4.x of this plugin
+== From `opennms-cortex-tss-plugin`
 
-v0.5.0 changes the default emission (breaking):
-
-[cols="1,2", options="header"]
-|===
-| You want | Do
-
-| The new bounded default
-| Nothing. Note that `onms_attr_*` / `onms_extattr_*` labels stop being
-  written — series carrying them end and leaner replacements begin.
-
-| Graph placeholder substitution (`${name}`, `${datname}`, …)
-| `labels.attr-mode = external` plus `labels.attr-include` globs for
-  the keys your graphs use (e.g. `name, datname, spcname`).
-
-| The exact v0.4 attribute emission
-| `labels.attr-mode = both`. The v0.4 duplicate emission of metatag
-  aliases (`onms_attr_nodeLabel` alongside `node_label`) is otherwise
-  gone by design; use `labels.copy` if you queried a duplicate name.
-|===
-
-Profile and attr-mode changes hot-reload like the rest of the file.
-One overflow-tier caveat: a bucket stores samples *after* mapping, so a profile
-flip with a pending backlog flushes that backlog in the old schema;
-new samples use the new one.
+See <<migration-from-cortex-tss>> for the `labels.rename` recipe that restores the camelCase spellings, and for which cortex labels are not labels on this plugin's data series.

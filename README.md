@@ -7,8 +7,9 @@
 An OpenNMS Horizon plugin that pushes performance data to any
 Prometheus-compatible Remote Write endpoint — Prometheus, Cortex, Grafana
 Mimir, VictoriaMetrics, Thanos Receive — and surfaces OpenNMS resource
-context (node identity, foreign-source qualification, surveillance
-categories, interface descriptors) as native Prometheus labels. Query
+context: node identity and the interface name as labels, and the resource's
+string attributes, surveillance categories and interface speed as metadata
+series joined on `resourceId`. Query
 your OpenNMS time-series data with PromQL directly from Grafana's
 Prometheus data source — no OpenNMS REST round-trip at query time.
 

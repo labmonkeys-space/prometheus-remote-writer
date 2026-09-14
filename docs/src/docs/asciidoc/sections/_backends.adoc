@@ -19,10 +19,29 @@ the wire-format selection knob and the Prometheus 2.50–2.54 caveat.
 | Grafana Cloud                  | Compatible — not in CI     | Compatible — not in CI     |
 |===
 
+== The `@` modifier
+
+Only one documented query uses PromQL's `@` modifier: applying today's
+alias to historical data,
+`last_over_time(onms_resource_attr{key="ifAlias"}[1h] @ end())`
+(see <<resource-metadata>>). The everyday `group_left` join needs
+nothing beyond plain PromQL. Minimum versions for that one idiom:
+
+[cols="2,3,2",options="header"]
+|===
+| Backend          | `@` modifier                                              | Minimum
+
+| Prometheus       | behind a flag from 2.25, always on from 2.33, flag removed in 3.0 | 2.33 (CI references 2.53.2 and 3.0.1)
+| Grafana Mimir    | always on, every release                                  | none
+| VictoriaMetrics  | from v1.72.0                                              | v1.72.0
+| Cortex           | 1.8 to 1.13 behind `-querier.at-modifier-enabled` (default off); always on from 1.14, flag removed in 1.18 | 1.14, or the flag on 1.8 to 1.13
+|===
+
 == `read.url` shapes per backend
 
-The plugin appends `/api/v1/series` and `/api/v1/query_range` itself —
-do *not* include `/api/v1` in the configured value.
+The plugin appends `/api/v1/series`, `/api/v1/query` and
+`/api/v1/query_range` itself. Do *not* include `/api/v1` in the
+configured value.
 
 [cols="2,3",options="header"]
 |===

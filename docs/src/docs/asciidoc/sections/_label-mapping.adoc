@@ -23,22 +23,17 @@ the corresponding source data is available:
 | `location`             | external                                | OpenNMS monitoring location.
 | `resource_type`        | parsed from `resourceId`                | e.g. `interfaceSnmp`, `hrStorageIndex`, `nodeSnmp`.
 | `resource_instance`    | parsed from `resourceId`                | e.g. `en0`, `1`, or empty for node-level.
-| `if_name`              | external `ifName`                       |
-| `if_descr`             | external `ifDescr`                      |
-| `if_speed`             | derived                                 | *Default mode (`labels.if-speed-mode = normalized`).* Bits-per-second: `ifHighSpeed × 1_000_000` when non-zero, else `ifSpeed`. Replaced by two raw labels in `raw` mode — see next two rows.
-| `ifSpeed`              | external `ifSpeed`                      | *Only when `labels.if-speed-mode = raw`.* SNMP `ifSpeed` source value verbatim (bps, 32-bit-capped at ~4.29 Gbps). Cortex-compatible spelling and value semantics. Reserved against `labels.rename` / `labels.copy` targets in both modes.
-| `ifHighSpeed`          | external `ifHighSpeed`                  | *Only when `labels.if-speed-mode = raw`.* SNMP `ifHighSpeed` source value verbatim (Mbps). Cortex-compatible. Reserved against `labels.rename` / `labels.copy` targets in both modes.
-| `onms_cat_<name>`      | surveillance categories                 | *Default mode (`labels.categories-mode = per-category`) and `both` mode.* One `onms_cat_<sanitized-name>="true"` label per category. Replaced by a single `categories` label in `raw` mode.
-| `categories`           | surveillance categories (joined)        | *Only when `labels.categories-mode = raw` or `both`.* Single comma-joined value `"<sortedNames>"` — emitted verbatim from the OpenNMS-supplied source tag (OpenNMS-core pre-sorts alphabetically and joins with `","` — see <<migration-from-cortex-tss>>). Cortex-compatible. Reserved against `labels.rename` / `labels.copy` targets in all three modes.
+| `if_name`              | external `ifName`                       | The one interface field no operator sets, so the only interface label on the data series.
 | `mtype`                | meta tag `MetaTagNames.mtype`           | Metric type (`gauge`, `counter`, `count`, `rate`, `timestamp`). Set by the OpenNMS writer on every Sample. *Load-bearing for graph rendering* — see <<mtype-roundtrip>>.
-| `onms_attr_<key>`      | plain-key Sample meta tags              | MATE-scope tags (`${node:…}` / `${asset:…}` / etc.) and any other plain-key meta tag. One label per plain-key meta tag — see <<attr-roundtrip>>.
-| `onms_extattr_<key>`   | plain-key Sample external tags          | Resource string attributes attached by collectors (JMX bean Name properties, JDBC `datname`, …). The values `${name}` / `${datname}` / `${spcname}` resolve against. One label per plain-key external tag — see <<attr-roundtrip>>.
 |===
 
-*Deliberately excluded by default* — available via `labels.include` if
-you want them: `if_alias` (user-editable, churns), `sys_descr`,
-`sys_object_id`, asset-record fields, OpenNMS metadata (see
-<<configuration>> for the metadata gating rules).
+That is the whole label set, and it is bounded: whatever a sample carries, the data series get only these names.
+Everything else about a resource, its string attributes (`ifAlias`, `ifDescr`, `hrStorageDescr`, `name`, …), its surveillance categories and its interface speed, travels as series of its own, joined on `resourceId`; see <<resource-metadata>>.
+The source tags `ifDescr`, `ifSpeed`, `ifHighSpeed` and `categories` are consumed by that path and cannot be surfaced with `labels.include` (a literal entry naming one fails validation).
+
+`labels.include` can still promote any other source tag to a label, `sys_descr`, `sys_object_id`, asset-record fields.
+Do that only for values that do not change: a label is part of the series identity, and an operator editing the value splits every series of the resource.
+`ifAlias` is the example not to follow; it is on the rows and in the `if_alias` column for that reason.
 
 [#mtype-roundtrip]
 === `mtype` round-trip and the read-time fallback
@@ -83,110 +78,11 @@ every fetch indefinitely. Either remove the exclude rule or treat the
 rising counter as expected for your deployment.
 
 [#attr-roundtrip]
-=== Resource string attributes (`onms_attr_*` and `onms_extattr_*`)
+=== Resource string attributes
 
-[IMPORTANT]
-.Opt-in since v0.5.0 (`labels.attr-mode`, default `off`)
-====
-The round-trip described below no longer runs by default. Every
-attribute key becomes a distinct label *name*, and keys that embed a
-per-resource identity — latency attributes like `ICMP/<ip>`, JMX mbean
-paths — create one label name per resource. On a real deployment this
-produced 5,646 distinct label names against a comparable plugin's 8,
-with measurable backend memory and index cost (issue
-https://github.com/labmonkeys-space/prometheus-remote-writer/issues/112[#112]).
-Set `labels.attr-mode = external` with a `labels.attr-include`
-allowlist to restore placeholder substitution for the attribute keys
-your graphs actually use (typically `name, datname, spcname`), or
-`labels.attr-mode = both` to restore the unfiltered v0.4 emission.
-====
-
-OpenNMS resource-graph templates substitute shell-style placeholders
-like `${name}`, `${datname}`, and `${spcname}` against *string
-attributes* attached to a resource. On the integration-API write path,
-those attributes arrive on the `Metric` partition system: meta tags
-carry MATE-scope values, external tags carry collector-emitted resource
-properties. The motivating case for the round-trip is that the
-resource-string-attribute named `name` (the *Eventd Processing Stats*
-row, the JDBC datasource label, etc.) collides with the intrinsic
-`name` (metric-name) tag the plugin emits as `__name__` — and OpenNMS-
-core's `TimeseriesResourceStorageDao.getStringAttributes()` reads only
-from `Metric.getExternalTags()` for placeholder substitution, so
-partition fidelity is required end-to-end.
-
-The plugin makes the round-trip work via two reserved label prefixes,
-one per partition:
-
-* `onms_attr_<key>` carries the META partition (MATE-scope tags,
-  `mtype` aside). Read side strips and deposits on
-  `Metric.getMetaTags()`.
-* `onms_extattr_<key>` carries the EXTERNAL partition (collector-
-  emitted resource string attributes — the values placeholder
-  substitution actually reads). Read side strips and deposits on
-  `Metric.getExternalTags()`.
-
-Concretely:
-
-* *Write* — for each non-intrinsic partition, every Sample tag whose
-  key is non-empty, contains no `:` (context tags use `onms_meta_`
-  instead — they're owned by the metadata processor regardless of
-  partition), is not `mtype`, is not blocked by the built-in plain-key
-  secret denylist (`*password*`, `*secret*`, `*token*`, `snmp-community`,
-  all case-insensitive), and is not already represented under a
-  canonical default-label name (for the external-partition pass — the
-  meta pass uses an empty consumed-keys set to preserve v0.4.0
-  behavior) is emitted as `<prefix><sanitized_key>=<sanitized_value>`.
-  The walks read the partition lists directly off the source `Metric`,
-  bypassing the intrinsic-wins shadow merge that otherwise drops
-  collisions.
-+
-[NOTE]
-====
-The plain-key denylist is deliberately narrower than the context-tag
-form (`metadata.label-prefix`'s denylist also includes `*:*key*`).
-Resource string attributes commonly shaped like `primary_key`,
-`partition_key`, or `foreign_key` are exactly the attributes that
-resource graphs substitute via `${...}` placeholders, so the plain-key
-path lets them through. Only credential-shaped names (password /
-secret / token / `snmp-community`) are blocked from the `onms_attr_`
-and `onms_extattr_` namespaces.
-====
-* *Read* — labels matching `onms_attr_<key>` reconstruct as a meta tag
-  with key `<key>`; labels matching `onms_extattr_<key>` reconstruct as
-  an external tag with key `<key>`. The prefixed forms are not also
-  surfaced under their raw names — single source of truth, per
-  partition.
-
-[NOTE]
-.Sanitization is one-way for non-identifier source keys
-====
-The plugin sanitizes the meta-tag key into the Prometheus label-name
-grammar (`[a-zA-Z_][a-zA-Z0-9_]*`) before applying the prefix. For
-identifier-shaped keys like `name`, `datname`, `spcname` (the standard
-OpenNMS placeholder set), sanitization is a no-op and the key
-round-trips identically. A meta tag named `rack-unit` ends up as
-`onms_attr_rack_unit` on the wire and reconstructs as a meta tag with
-key `rack_unit` (not `rack-unit`). Adjust your placeholder references
-accordingly if you use non-identifier attribute names.
-====
-
-[NOTE]
-.No retroactive synthesis
-====
-Unlike the `mtype` round-trip, there is no read-side fallback for
-samples written before this fix. Pre-fix data continues to render
-literal `${name}` (or empty) in resource-graph row labels until it
-ages out of the backend's retention window. Operators with long
-retention can either re-collect or accept that legacy data graphs
-without resolved placeholders.
-====
-
-Operators who want to opt out of either namespace altogether (cost-
-sensitive backends, no resource-graph use case) can set
-`labels.exclude = onms_attr_*` and / or `labels.exclude = onms_extattr_*`.
-Excluding `onms_extattr_*` reverts resource-graph placeholder
-substitution to literal placeholders; excluding `onms_attr_*` mostly
-just drops MATE-scope label duplication. Other graphs are unaffected.
+OpenNMS resource-graph templates substitute shell-style placeholders like `${name}`, `${datname}` and `${spcname}` against string attributes attached to a resource.
+The plugin puts those attributes on the wire as `onms_resource_attr` rows and restores them on `findMetrics` from the rows, so every placeholder resolves and nothing has to be curated.
+The v0.x `onms_attr_*` / `onms_extattr_*` labels and the `labels.attr-mode` / `labels.attr-include` keys are gone; see <<resource-metadata>> and <<migration>>.
 
 == Label enrichment is two-sided
 
@@ -237,17 +133,8 @@ org.opennms.timeseries.tin.metatags.tag.ifName  = ${interface:if-name}
 org.opennms.timeseries.tin.metatags.tag.ifDescr = ${interface:if-description}
 ----
 
-[NOTE]
-.`labels.if-speed-mode = raw` needs SNMP-speed source tags
-====
-Operators planning to use the cortex-compat `labels.if-speed-mode = raw`
-emission also need `ifSpeed` and `ifHighSpeed` source tags in their
-metatag config — without them, the raw-mode emission has nothing to
-emit. The two normalized-mode source attributes are read from the same
-SNMP `ifTable` / `ifXTable` columns; check your OpenNMS MATE docs for
-the exact attribute names available in your Horizon release before
-adding them here.
-====
+`ifDescr` does not become a label: it goes on the `onms_resource_attr` rows and into the `if_descr` column of `onms_resource_info`.
+The same holds for `ifAlias`, and for `ifSpeed` and `ifHighSpeed`, which feed the `onms_resource_ifspeed` gauge; configure them as tags too if you want those series (see <<resource-metadata>>).
 
 === Surveillance categories
 
@@ -259,9 +146,10 @@ org.opennms.timeseries.tin.metatags.exposeCategories = true
 ----
 
 Setting this causes OpenNMS to attach a `categories` sample tag
-(comma-separated list of surveillance-category names). The plugin's
-default allowlist already expands that single tag into one
-`onms_cat_<sanitized-name>` label per value — no additional plugin
+(comma-separated list of surveillance-category names). The plugin turns
+it into one `onms_resource_category{resourceId, category}` row per
+value, never into a label on the data series; set membership is then an
+exact match in a join (see <<resource-metadata>>). No additional plugin
 config needed.
 
 [NOTE]
@@ -354,7 +242,7 @@ defaults  →  exclude  →  include  →  copy  →  rename  →  metadata
 Copy is one-pass (sees labels that exist at its stage entry; does not
 recurse) and operates on pre-rename names. Reserved-target rules apply
 symmetrically to both — a `to` value that collides with a default label
-name, a reserved prefix (`onms_cat_*`, `onms_meta_*`), another rename
+name, the reserved prefix `onms_meta_*`, another rename
 target, or another copy target is rejected at startup with an actionable
 error.
 
@@ -459,16 +347,14 @@ targets:
 | Exact  | `node_label`                                          | Node's human-readable name.
 | Exact  | `location`                                            | OpenNMS monitoring location.
 | Exact  | `resource_type`, `resource_instance`                  | Parsed from `resourceId`.
-| Exact  | `if_name`, `if_descr`, `if_speed`                     | SNMP interface descriptors.
-| Exact  | `ifSpeed`, `ifHighSpeed`                              | Always reserved; emitted as defaults when `labels.if-speed-mode = raw`. Reserved unconditionally so a hot-reload from `normalized` to `raw` cannot unmask a previously-accepted rename collision. To recover cortex-compatible interface-speed labels, set `labels.if-speed-mode = raw` instead of a rename.
-| Exact  | `categories`                                          | Always reserved; emitted as a default when `labels.categories-mode = raw` or `both`. Reserved unconditionally for the same hot-reload-footgun-closure reason as `ifSpeed`/`ifHighSpeed`. To recover cortex-compatible categories labels, set `labels.categories-mode = raw` (or `both` during migration) instead of a rename.
+| Exact  | `if_name`                                             | SNMP interface name.
 | Exact  | `job`, `instance`                                     | Default labels (since 0.2.0).
 | Exact  | `onms_instance_id`                                    | Multi-instance origin stamp (reserved even when `instance.id` is unset).
-| Prefix | `onms_cat_*`                                          | Per-surveillance-category expansion.
 | Prefix | `onms_meta_*`                                         | Default metadata-passthrough prefix.
-| Prefix | `onms_attr_*`                                         | Resource string attributes — meta partition (see <<attr-roundtrip>>).
-| Prefix | `onms_extattr_*`                                      | Resource string attributes — external partition (see <<attr-roundtrip>>).
 |===
+
+Sources are checked too: a `labels.rename`, `labels.copy` or `labels.exclude` entry naming a label the data series no longer carry (`if_descr`, `if_speed`, `ifSpeed`, `ifHighSpeed`, `categories`, `onms_cat_*`, `onms_attr_*`, `onms_extattr_*`) is rejected rather than accepted as a silent no-op.
+`resourceId` cannot be renamed or excluded either: it is the join key of every metadata series.
 
 Duplicate rename targets (`foo -> cluster, bar -> cluster`) and
 duplicate `from` keys (`a -> cluster, a -> tenant`) are also rejected.
@@ -486,21 +372,6 @@ non-colliding targets by inspection. The default prefix is what the
 vast majority of deployments use.
 ====
 
-[NOTE]
-.`metadata.label-prefix` itself is now collision-checked
-====
-While the `onms_meta_*` reservation is conditional on the default
-prefix, the *operator-supplied* value of `metadata.label-prefix` is
-checked at startup against every other reserved prefix. A
-`metadata.label-prefix` set to `onms_attr_`, `onms_extattr_`,
-`onms_cat_`, any case variant (e.g. `ONMS_ATTR_`), or a shorter prefix
-that subsumes one of them (e.g. bare `onms_`) is rejected with an
-actionable message. The default `onms_meta_` and any unrelated value
-(e.g. `custom_`) are accepted. This stops an operator from silently
-emitting metadata into another emitter's namespace and breaking the
-read-side reconstruction.
-====
-
 [#migration-from-cortex-tss]
 == Migration from `opennms-cortex-tss-plugin`
 
@@ -508,10 +379,12 @@ If you're moving from the AGPL
 https://github.com/OpenNMS/opennms-cortex-tss-plugin[`opennms-cortex-tss-plugin`]
 and want existing dashboards and alert rules to keep working without a
 wholesale label rewrite, the camelCase label spellings cortex emitted
-(`nodeLabel`, `foreignSource`, `foreignId`, `ifName`, `ifDescr`,
-`ifSpeed`) can be recovered with `labels.rename`. This plugin's defaults
-follow Prometheus naming conventions (snake_case); the rename recipe is
-opt-in.
+(`nodeLabel`, `foreignSource`, `foreignId`, `ifName`) can be recovered
+with `labels.rename`. This plugin's defaults follow Prometheus naming
+conventions (snake_case); the rename recipe is opt-in. The interface
+description, the two speed values and the categories are not labels on
+this plugin's data series at all (see <<resource-metadata>>), so those
+dashboards move to a join rather than a rename.
 
 === Recipe
 
@@ -523,185 +396,11 @@ labels.rename = \
   node_label     -> nodeLabel,     \
   foreign_source -> foreignSource, \
   foreign_id     -> foreignId,     \
-  if_name        -> ifName,        \
-  if_descr       -> ifDescr
-
-labels.if-speed-mode   = raw
-labels.categories-mode = raw
+  if_name        -> ifName
 ----
 
 Restart the plugin. Subsequent samples emit the cortex-style spellings;
-the snake_case names disappear from the wire. The `labels.if-speed-mode = raw`
-directive switches the SNMP interface-speed emission from this plugin's
-default single-`if_speed`-bps shape to the cortex-equivalent two-raw-label
-shape — see the *Interface-speed labels in raw mode* subsection for the
-per-input emission table and the source-presence filter rules. The
-`labels.categories-mode = raw` directive does the analogous switch for
-surveillance categories: instead of N `onms_cat_<name>="true"` labels,
-the plugin emits one `categories="<comma-joined-names>"` label exactly
-as cortex did — see *Categories labels in raw and both modes* below.
-Use `both` instead of `raw` during dashboard transition to emit BOTH
-encodings on every sample. The `ifSpeed`, `ifHighSpeed`, and
-`categories` label names are all reserved against `labels.rename` /
-`labels.copy` targets in every mode — see <<reserved-rename-copy-targets>>.
-
-[NOTE]
-.Overflow-tier flip semantics + series identity
-====
-Plan a brief flip window when changing `labels.if-speed-mode` or
-`labels.categories-mode` — a bucket drains in seconds at default
-cadence; pre-flip samples flush under the old mode, post-flip samples
-emit under the new mode. Backends see briefly mixed-mode series
-identity during the flip. *Series identity also changes permanently*
-on the affected labels: a series previously identified by
-`{…, if_speed="40000000000"}` becomes
-`{…, ifSpeed="4294967295", ifHighSpeed="40000"}` after an
-if-speed-mode flip; a series previously identified by
-`{…, onms_cat_Routers="true"}` becomes
-`{…, categories="ProductionSites,Routers"}` after a categories-mode
-flip. The backend treats these as new series with the same name; old
-series age out of retention naturally.
-====
-
-=== Interface-speed labels in raw mode
-
-`labels.if-speed-mode = raw` emits the SNMP `ifSpeed` and `ifHighSpeed`
-source values as two separate camelCase labels, matching cortex's wire
-shape. Concretely, for the same SNMP source row:
-
-[cols="1,1,1,1",options="header"]
-|===
-| SNMP source                         | Cortex                                     | Normalized (default)            | Raw
-
-| `ifSpeed=100000000` (100 Mbps), `ifHighSpeed=0`
-                                      | `ifSpeed=100000000`, `ifHighSpeed=0`       | `if_speed=100000000`           | `ifSpeed=100000000`, `ifHighSpeed=0`
-| `ifSpeed=4294967295` (32-bit cap), `ifHighSpeed=10000` (10 Gbps)
-                                      | `ifSpeed=4294967295`, `ifHighSpeed=10000`  | `if_speed=10000000000`         | `ifSpeed=4294967295`, `ifHighSpeed=10000`
-| `ifHighSpeed=40000` (40 Gbps), `ifSpeed` absent
-                                      | `ifHighSpeed=40000`                        | `if_speed=40000000000` (synthesised) | `ifHighSpeed=40000` (no `ifSpeed`)
-| `ifSpeed=0`, `ifHighSpeed=0` (loopback / unknown)
-                                      | `ifSpeed=0`, `ifHighSpeed=0`               | `if_speed=0`                   | `ifSpeed=0`, `ifHighSpeed=0`
-| `ifSpeed="   "` (whitespace) or `"abc"` (non-numeric) or `"-100"` (negative)
-                                      | label emitted verbatim with the garbage value | label dropped (parser rejects) | label dropped — *divergence from cortex* (see next paragraph)
-|===
-
-==== Source-presence filter — narrow divergence from cortex
-
-Raw mode is **not** literally byte-for-byte verbatim. The plugin applies
-the same source-presence grammar to both modes: `ifSpeed` /
-`ifHighSpeed` are emitted only when the source value is non-null,
-non-empty, and parseable as a non-negative `long` (after trimming).
-Whitespace-only, non-numeric, and negative source values are *dropped*
-in raw mode rather than emitted verbatim. The filter is per-label, not
-per-pair: one parseable source still emits its own label even if the
-other is garbage.
-
-This is a deliberate, narrow divergence from cortex. Cortex's literal
-verbatim emission would let a misconfigured upstream agent inject
-arbitrary text into a series-identity label and blow up cardinality at
-the backend. The filter closes that footgun while preserving cortex
-parity for every interface that reports valid SNMP values — i.e. every
-real-world interface. If your existing cortex dashboards depend on
-sentinel garbage values appearing as labels, you'll need to surface
-them another way; they were a wire artifact, not informative data.
-
-[NOTE]
-.No `ifSpeed` synthesis from `ifHighSpeed × 1_000_000` in raw mode
-====
-When only `ifHighSpeed` is present (no `ifSpeed` source tag), raw mode
-emits **only** `ifHighSpeed` — it does NOT synthesise an `ifSpeed`
-label from `ifHighSpeed × 1_000_000`. This mirrors cortex behaviour and
-is pinned by a unit test specifically so future contributors don't
-"helpfully" add the synthesis and silently break parity. A cortex-fielded
-dashboard that assumed `ifSpeed` always exists will see no `ifSpeed`
-label for high-speed interfaces under either cortex or this plugin's
-raw mode — that's pre-existing behaviour, not something this plugin
-introduced.
-
-If you need a single canonical bps value for high-speed interfaces, use
-`labels.if-speed-mode = normalized` (the default) — that's exactly
-what `if_speed` is for.
-====
-
-==== When to use which mode
-
-* **Greenfield Prometheus dashboards** — leave the default
-  (`normalized`). One canonical `if_speed` label in bps, immediately
-  rateable, no PromQL ternary.
-* **Migrating cortex-fielded dashboards / alert rules** — set
-  `labels.if-speed-mode = raw`. Existing PromQL of the
-  `ifHighSpeed > 0 ? ifHighSpeed × 1e6 : ifSpeed` shape continues to
-  work without rewrite.
-* **Mixed estate** — the mode is plugin-global. Run separate plugin
-  instances if a single OpenNMS needs to feed both a cortex-style
-  backend and a greenfield backend with different label shapes.
-
-=== Categories labels in raw and both modes
-
-`labels.categories-mode = raw` emits a single `categories="<comma-joined>"`
-label matching cortex's wire shape, instead of the per-category boolean
-labels (`onms_cat_<name>="true"`) the plugin emits by default.
-`labels.categories-mode = both` emits BOTH encodings — useful as a
-migration scaffold while you port dashboards from
-`{onms_cat_X="true"}` to `categories=~".*X.*"`.
-
-For the same surveillance-categories source row:
-
-[cols="1,1,1,1",options="header"]
-|===
-| OpenNMS source                                       | Cortex                                              | per-category (default)                                | raw
-
-| `categories="ProductionSites,Routers"` (alphabetic, comma, no space — OpenNMS-core pre-sorts and joins via `String.join(",", sortedCatList)`) | `categories="ProductionSites,Routers"` (verbatim)   | `onms_cat_ProductionSites="true"`, `onms_cat_Routers="true"` | `categories="ProductionSites,Routers"` (verbatim — same as cortex)
-| Single category `"Server Room-B"` (with internal whitespace and punctuation)                                              | `categories="Server Room-B"` (verbatim, special chars preserved in value) | `onms_cat_Server_Room_B="true"` (sanitized into label name)                | `categories="Server Room-B"` (verbatim — special chars preserved in value)
-| Source absent (operator did not set `exposeCategories=true` or node has no categories)                                | (no category labels)                                | (no category labels)                                  | (no category labels)
-| Source empty (`""`) or whitespace-only                                | (no category labels)                                | (no category labels)                                  | (no category labels)
-|===
-
-`both` mode produces the **union** of the per-category and raw rows for
-each source above — same `onms_cat_*` labels AND the single `categories`
-label.
-
-==== OpenNMS pre-sorts; the plugin doesn't
-
-`MetaTagDataLoader.mapCategories()` in OpenNMS-core sorts the category
-list alphabetically with `Collections.sort(catList)` before joining via
-`String.join(",", catList)`. Cortex received pre-sorted input → cortex
-emitted pre-sorted output. This plugin in `raw` mode receives the same
-pre-sorted input → emits pre-sorted output. **The plugin does not
-re-sort or canonicalize on its side** — series identity is stable
-across samples for the same category set because OpenNMS guarantees the
-ordering upstream. A test (`categories_raw_mode_does_not_resort_source_value`)
-pins this contract: feeding a hypothetical out-of-order source asserts
-verbatim emission, so a future contributor "helpfully" adding a sort
-would break cortex parity at CI time, not in production.
-
-[NOTE]
-.Category names containing commas — cortex-parity gotcha
-====
-A category literally named `"Foo,Bar"` (a single category whose name
-contains a comma) is indistinguishable on the wire from two categories
-named `"Foo"` and `"Bar"` — both produce `categories="Foo,Bar"` in raw
-mode. Cortex broke on this too. Per-category mode would (also
-incorrectly) emit `onms_cat_Foo="true"` and `onms_cat_Bar="true"` for a
-single comma-named category. Avoid commas in category names — same
-constraint as cortex.
-====
-
-==== When to use which mode
-
-* **Greenfield Prometheus dashboards** — leave the default
-  (`per-category`). Set-membership queries (`{onms_cat_Server="true"}`)
-  compose naturally; intersection (`{onms_cat_Server="true",
-  onms_cat_Production="true"}`) is trivial.
-* **Migrating cortex-fielded dashboards / alert rules** — set
-  `labels.categories-mode = raw`. Existing PromQL of the
-  `categories=~".*Server.*"` shape works without rewrite.
-* **Mid-migration with mixed dashboards** — set
-  `labels.categories-mode = both` for one release cycle. Both encodings
-  emit on every sample carrying the `categories` source tag; port
-  dashboards one at a time, then drop to `raw` to shed the
-  `onms_cat_*` cardinality cost. Wire overhead during `both`: ~30-50
-  bytes per sample for nodes with at least one category.
+the snake_case names disappear from the wire.
 
 === What this rename recipe gets you, and what it doesn't
 
@@ -717,10 +416,10 @@ constraint as cortex.
 | `foreignSource` | restored                    | Same value as cortex.
 | `foreignId`     | restored                    | Same value as cortex.
 | `ifName`        | restored                    | Same value as cortex.
-| `ifDescr`       | restored                    | Same value as cortex.
-| `ifSpeed`, `ifHighSpeed` | restored | *Resolved via `labels.if-speed-mode = raw`* — see the dedicated subsection above for the per-input emission table, the source-presence filter (a narrow divergence from cortex that drops whitespace-only / non-numeric / negative values), and the no-synthesis edge case. In default `normalized` mode the plugin emits a single bps-normalized `if_speed` instead.
+| `ifDescr`       | *not a label*               | On the `onms_resource_attr` rows and in the `if_descr` column of `onms_resource_info`; join with `group_left(if_descr) onms_resource_info`. Kept off the data series on purpose: on several platforms it embeds the configured description or follows a rename, and would split the series (see <<resource-metadata>>).
+| `ifSpeed`, `ifHighSpeed` | *not labels*      | The gauge `onms_resource_ifspeed{resourceId}` in bits per second, a divisor as-is: `rate(ifHCInOctets[5m]) * 8 / on(resourceId) (last_over_time(onms_resource_ifspeed[30m]) > 0)`.
 | `nodeId`        | *not directly recoverable*  | This plugin consumes `nodeId` and emits `node` instead. The closest substitute is `labels.copy = node -> nodeId`, but the *value* differs: this plugin's `node` is `<foreignSource>:<foreignId>` when both are set, falling back to the numeric dbId; cortex's `nodeId` was always the raw numeric dbId. Dashboards that expect a purely numeric value must be updated.
-| `categories`    | restored                    | *Resolved via `labels.categories-mode = raw`* — see the dedicated subsection below for the per-mode emission table, the OpenNMS-pre-sort note (the plugin delegates ordering to upstream — no canonicalization here), the comma-in-category-name edge case (cortex-parity gotcha), and the `both`-mode migration scaffold. In default `per-category` mode the plugin emits one `onms_cat_<sanitized-name>="true"` label per category instead — Prometheus-idiomatic for set-membership PromQL.
+| `categories`    | *not a label*               | One `onms_resource_category{resourceId, category}` row per category; set membership is `* on(resourceId) group_left() last_over_time(onms_resource_category{category="Routers"}[30m])` instead of a regex over a joined string.
 |===
 
 === Plugin labels cortex never emitted

@@ -1,0 +1,281 @@
+[#resource-metadata]
+= Resource metadata
+
+A resource's string attributes, its surveillance categories and its interface speed travel in Prometheus as series of their own, not as labels on the data series.
+This section describes those series, the three `metadata.*` keys that shape them, the PromQL that joins them, and what the plugin's own read path does with them.
+
+== Why not labels
+
+A Prometheus series is its label set.
+An attribute on the data series is part of that identity, so changing it forks the series, once per metric on the resource.
+`ifAlias` is the case that matters: a network operator setting or improving an interface description is routine, and nothing about that action suggests it could split a year of throughput history.
+So `ifAlias` stays off the data series on principle, whatever its churn rate.
+The same reasoning removes `ifDescr`: it is stable on Cisco, Juniper and Arista, but on Nokia SR OS and some Huawei releases it embeds the configured description, and on RouterOS and Linux it follows an interface rename.
+`ifName` is the one interface field no operator sets, so `if_name` is the only interface label left on the data series.
+
+The second problem is the key space.
+Under a label encoding every attribute key becomes a distinct label name, and OpenNMS generates keys that embed per-resource identity (latency `ICMP/<ip>`, JMX mbean paths).
+That grows the backend's global label-name index without limit, which is what the v0.x allowlist existed to contain.
+With the key in a label value instead, an unknown attribute cannot add a label name, so nothing an operator fails to curate can hurt the backend.
+
+== What the plugin emits
+
+[source,promql]
+----
+# data series: what is needed to read them, plus the stable identity labels
+ifHCInOctets{resourceId="nodeSource[NOC:core-sw-1].interfaceSnmp[Et1]", mtype="counter",
+             node_label="core-sw-1", if_name="Et1"}
+
+# rows: every attribute, three label names whatever OpenNMS supplies
+onms_resource_attr{resourceId="…", key="ifAlias", value="uplink to core-sw-2"} 1
+onms_resource_attr{resourceId="…", key="ifDescr", value="Ethernet1"} 1
+onms_resource_category{resourceId="…", category="Production"} 1
+
+# columns: the configured subset, one series per resource, for query ergonomics
+onms_resource_info{resourceId="…", if_alias="uplink to core-sw-2", if_descr="Ethernet1"} 1
+
+# the interface speed is a gauge in bits per second, never a string
+onms_resource_ifspeed{resourceId="…"} 1000000000
+----
+
+[cols="2,4",options="header"]
+|===
+| Series | What it carries
+
+| `onms_resource_attr{resourceId, key, value} 1`
+| One row per string attribute of the resource, OpenNMS key spelling, value verbatim (truncated to the label-value cap).
+  The first `metadata.attr-budget` attributes sorted by key; the remainder is counted in `metadata_attrs_dropped_total`.
+  This is what the plugin's read path restores OpenNMS graph placeholders from, so completeness lives here and nothing has to be curated.
+
+| `onms_resource_category{resourceId, category} 1`
+| One row per surveillance category, when OpenNMS exposes them (`org.opennms.timeseries.tin.metatags.exposeCategories = true`).
+  Set membership is an exact match: `onms_resource_category{category="Production"}`.
+
+| `onms_resource_info{resourceId, <columns>} 1`
+| One series per resource with the columns of `metadata.info-columns` the resource has a value for.
+  No series when it has none.
+  Ergonomics only: a key missing from the column list costs one more join and nothing else.
+
+| `onms_resource_ifspeed{resourceId} <bits/s>`
+| `ifHighSpeed × 1,000,000` when non-zero, else `ifSpeed`, for resources that carry either.
+  A multiplier as-is, so no string conversion at query time.
+  Neither source attribute becomes a row.
+|===
+
+Every metadata series carries `onms_instance_id` when `instance.id` is set, like the data series, and the metric name prefix of `metric.prefix` is not applied to them.
+
+What never becomes a row: `mtype` (it stays a label), `categories` and the two speed attributes (they have series of their own), context keys with a `:` (those are the <<configuration,metadata passthrough>>), keys matching the built-in credential denylist (`*password*`, `*secret*`, `*token*`, `snmp-community`), and attributes with an empty value, such as an unset `ifAlias`.
+
+=== When they are emitted
+
+The write path watches every sample's resource.
+A resource's series are emitted when it is first seen, whenever its attributes, categories or speed change, and otherwise every `metadata.cadence-ms`.
+The re-emission is what keeps a join inside a lookback window: query with a lookback of at least twice the cadence, `last_over_time(onms_resource_attr[30m])` at the default 15 minutes.
+A resource whose data series has been silent for 24 hours is forgotten and re-emitted on its next sample.
+
+The metadata samples go through the same queues, batches and disk tier as the data samples and are counted in `store_samples_offered_total`.
+Each emission is one sample per row, category, column series and speed gauge, about ten per SNMP interface, so the rate they add is roughly `resources × 10 ÷ cadence in seconds`: 220,000 resources at the default cadence is about 2,400 samples per second.
+
+== Configuration
+
+[cols="2,1,4",options="header"]
+|===
+| Key | Default | Purpose
+
+| `metadata.cadence-ms` | `900000` (15 min) | How often an unchanged resource's series are re-emitted. New or changed metadata goes out at once. `0` switches the metadata series off; OpenNMS graph placeholders then no longer resolve, since the read path restores attributes from the rows.
+| `metadata.attr-budget` | `16` | Attributes per resource emitted as rows, lowest keys first. An SNMP interface carries about eight; the budget only bites on JMX beans with dozens of properties.
+| `metadata.info-columns` | `if_alias=ifAlias, if_descr=ifDescr, resource_name=name, hr_storage_descr=hrStorageDescr, dsk_path=dskPath, datname=datname, spcname=spcname` | Comma-separated `column=key` entries: the column is the label name on `onms_resource_info`, the key the OpenNMS attribute it is read from. Empty means no info series.
+|===
+
+The default column list covers the string attributes OpenNMS's shipped datacollection emits for its standard resource types, one column per key, so enabling host-resources storage or the PostgreSQL collector needs no edit.
+A custom datacollection names its own column.
+The collector attribute `name` becomes `resource_name`, because a label called `name` next to `__name__` is a trap in every legend and query; `name=…` is rejected with that hint.
+A column must be a valid label name, cannot be `resourceId`, `__name__` or `onms_instance_id`, cannot repeat, and its key must be something the rows can carry (not `mtype`, `categories`, `ifSpeed`, `ifHighSpeed`, a context key or a denied key).
+Two columns may read the same key.
+Changing the list forks only the info series, one per resource, and leaves the data series untouched.
+
+The rows carry the first `metadata.attr-budget` attributes by key, so for a resource inside the budget a missing column costs one join.
+For a key past the budget, a column is the way to put it on the wire.
+
+`resourceId` is the join key on every metadata series, so `labels.exclude` and `labels.rename` cannot remove or rename it; validation rejects the attempt.
+
+== Query patterns
+
+=== Dashboards
+
+The right-hand side of every join is a `last_over_time` over twice the cadence.
+A metadata series has a sample every 15 minutes, and a bare selector sees only the backend's lookback delta, 5 minutes on Prometheus, Mimir and Cortex, so a bare `onms_resource_info` is empty for ten minutes of every fifteen.
+(VictoriaMetrics widens its staleness window to the observed interval, which is why a bare selector appears to work there and not in production Prometheus.)
+
+The column series is the everyday join.
+`group_left` copies the named columns onto the data series:
+
+[source,promql]
+----
+rate(ifHCInOctets[5m]) * 8
+  * on(resourceId) group_left(if_alias, if_descr) last_over_time(onms_resource_info[30m])
+----
+
+Utilisation, with the speed gauge as a plain divisor.
+An interface that reports a speed of 0 (loopbacks, some tunnels) has a gauge of 0, so exclude it or the division yields `+Inf`:
+
+[source,promql]
+----
+rate(ifHCInOctets[5m]) * 8
+  / on(resourceId) (last_over_time(onms_resource_ifspeed[30m]) > 0)
+----
+
+Set membership on categories, exact match instead of a regex over a joined string:
+
+[source,promql]
+----
+rate(ifHCInOctets[5m])
+  * on(resourceId) group_left() last_over_time(onms_resource_category{category="Production"}[30m])
+----
+
+A single attribute from the rows, when it is not a column.
+The `key` matcher is required: without it the selector matches the whole attribute space, which VictoriaMetrics refuses above `-search.maxUniqueTimeseries`:
+
+[source,promql]
+----
+rate(ifHCInOctets[5m])
+  * on(resourceId) group_left(value) last_over_time(onms_resource_attr{key="ifAlias"}[30m])
+----
+
+=== Historical correctness
+
+Point-in-time is the default behaviour of a range-vector join, so a query over old data sees the alias as it was then.
+To apply the current alias to historical data, pin the right-hand side with the `@` modifier:
+
+[source,promql]
+----
+rate(ifHCInOctets[5m])
+  * on(resourceId) group_left(value)
+    last_over_time(onms_resource_attr{key="ifAlias"}[1h] @ end())
+----
+
+Both readings are available from the same data.
+Neither is available when the attribute is part of the data series identity.
+The `@` modifier has minimum backend versions; see <<backends>>.
+
+[#duplicate-match]
+=== Duplicate match during churn
+
+When an attribute changes, the old series stays resolvable for the whole lookback window, so a `group_left` join sees two matches and fails with `found duplicate series for the match group`.
+This is the known sharp edge of the info-series pattern and has no clean fix, because Prometheus has no tombstone.
+The two series differ in the very label you want, so no aggregation over that label can merge them; what tells them apart is which one was written last.
+The documented idiom keeps, per resource, the series with the newest sample:
+
+[source,promql]
+----
+rate(ifHCInOctets[5m]) * 8
+  * on(resourceId) group_left(if_alias, if_descr)
+    group by (resourceId, if_alias, if_descr) (
+      topk by (resourceId) (1, max_over_time(timestamp(onms_resource_info)[30m:1m]))
+    )
+----
+
+`timestamp()` on the raw selector yields each sample's own time, the subquery walks it across the lookback, `topk` keeps the newest series per `resourceId`, and `group` turns it back into a value of 1 with the columns attached.
+The naive join heals on its own once the old series leaves the lookback; this form is correct throughout.
+
+=== Alerting
+
+An alert expression can carry the join itself, so alerting needs no recording rules either.
+This matters most for VictoriaMetrics, where the usual setup has no `vmalert` at all.
+
+[source,promql]
+----
+# the join lives in the alert expression, no recorded series involved
+(
+  rate(ifHCInOctets[5m]) * 8
+    / on(resourceId) (last_over_time(onms_resource_ifspeed[30m]) > 0)
+)
+  * on(resourceId) group_left(if_alias, if_descr)
+    group by (resourceId, if_alias, if_descr) (
+      topk by (resourceId) (1, max_over_time(timestamp(onms_resource_info)[30m:1m]))
+    )
+> 0.9
+----
+
+Two cautions specific to alert expressions.
+Scope the join to the resources the alert covers rather than joining the whole fleet every evaluation, or a minutely alert becomes the most repetitive form of the series-limit problem.
+And use the newest-series form of <<duplicate-match>> here even if you skip it on dashboards: a duplicate match during an `ifAlias` churn window turns a panel visibly red, but it makes an alert rule error out instead of evaluating, which is a silent loss of coverage.
+
+[cols="2,1,1,2",options="header"]
+|===
+| Rule evaluator | Recording rules | Alert rules that join | Needed here
+
+| Grafana-managed alerting | no write-back | yes | sufficient
+| vmalert | yes | yes | not required
+| Mimir ruler | yes | yes | not required
+| Prometheus rule engine | yes | yes | not required
+|===
+
+=== The recording-rule escape hatch
+
+An operator who cannot change the plugin configuration, or who wants a view the plugin cannot express, can still build one with a recording rule against `onms_resource_attr`.
+Two things to know.
+The recorded series must land in the same tenant the plugin writes under, the same `X-Scope-OrgID`, or every join returns empty with no error at all.
+And on VictoriaMetrics this is the one path that does require `vmalert`, since Grafana-managed alerting cannot write series back.
+
+[#metadata-read-path]
+== The plugin's read path
+
+OpenNMS resolves graph placeholders (`${ifAlias}`, `${hrStorageDescr}`, `${name}`, …) from the string attributes on the `Metric` objects that `findMetrics` returns.
+The plugin restores them from the rows: after discovery, one `POST /api/v1/query` per batch of `read.discovery-batch-size` resources, never one per metric, asks for every `onms_resource_attr` and `onms_resource_category` row of those resources inside the last 24 hours (never less than two cadences), scoped to `instance.id` when set.
+Each row comes back valued with its newest sample time, so after a rename the resource's newest emission wins; rows within half a cadence of the newest stamp count as one emission, and the newest row per key wins.
+A removed attribute or category therefore lingers until the next cadence emission.
+
+Enrichment is best effort.
+A failed or malformed metadata query is logged (at most once a minute) and the metrics of that batch go back without attributes; a resource listing never fails because its aliases could not be read.
+More than 100 batches in one call skips enrichment rather than issuing them.
+`find_metrics_enrichment_batches_total` counts the queries.
+
+Two things to know about the window.
+It is the write path's 24-hour memory, which is shorter than the 90-day discovery lookback, so a resource the write path has not seen for longer than that is still listed but comes back without attributes.
+And the query evaluates `timestamp()` at 5-minute steps across the window, the default lookback delta of Prometheus, Mimir and Cortex; a backend configured with a shorter lookback delta can miss emissions between the steps.
+
+There is no plugin-side cache: OpenNMS already caches in front of `findMetrics`, and a second cache would serve a stale alias for its TTL after exactly the operator action these series exist to survive.
+
+== Sizing and backend limits
+
+Illustrative arithmetic for an 11,000-device fleet at roughly 20 interfaces per device.
+Substitute real figures before committing to limits.
+
+[cols="2,1,3",options="header"]
+|===
+| Series | Count | Note
+
+| resources | ~220,000 |
+| data series | ~3,300,000 | unchanged by this design
+| `onms_resource_info` | ~220,000 | one per resource with a column value
+| `onms_resource_attr` | ~1,760,000 | at 8 attributes per resource
+| `onms_resource_category` | ~ resources × categories | node-level resources only, in practice
+|===
+
+Series count is the number to watch, and `metadata.attr-budget` controls it directly.
+Sample rate is about ten samples per resource per cadence, and the cadence is tunable against the query idiom: emit every 15 minutes and query with `last_over_time(…[30m])` rather than emitting every 2 minutes to stay inside the default 5-minute lookback.
+
+[cols="2,2,4",options="header"]
+|===
+| Limit | Applies to | Note
+
+| Labels per series (Mimir `-validation.max-label-names-per-series`, default 30; VictoriaMetrics `-maxLabelsPerTimeseries`, default 40) | the column series | This is why the long tail cannot be columns; keep `metadata.info-columns` short.
+| Series per metric name (Mimir and Cortex `max_global_series_per_metric`, off by default) | the row series | Rows deliberately concentrate millions of series under one metric name, which looks exactly like a runaway metric to this guardrail. If you enable it, exempt the row metrics with `-ingester.ignore-series-limit-for-metric-names`.
+| Series per query (VictoriaMetrics `-search.maxUniqueTimeseries`, 300,000 before v1.104.0, sized from memory since) | joins | Every join on the rows must carry a `key=` matcher or it selects the whole attribute space and is refused.
+|===
+
+Wire cost is string-heavy, since every sample repeats `resourceId`, `key` and `value`.
+Remote Write v2's symbol table interns strings across a request and is a material win for this shape specifically; see <<wire-protocols>>.
+
+== Self-metrics
+
+[cols="2,3",options="header"]
+|===
+| Metric | What it counts
+
+| `metadata_series_emitted_total` | Metadata samples handed to the pipeline (rows, categories, info and speed alike).
+| `metadata_attrs_dropped_total` | Attributes past `metadata.attr-budget`, per emission. A steadily rising value names a resource type whose attributes outgrow the budget.
+| `metadata_resources` | Resources the write path currently remembers metadata for.
+| `find_metrics_enrichment_batches_total` | Metadata queries the read path issued to restore attributes.
+|===
