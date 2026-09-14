@@ -7,6 +7,8 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.0.0] — 2026-09-14
+
 ### Removed
 
 - **BREAKING: the v0.x attribute labels are gone from the data series. 1.0.0 is a cutover, not a migration** (epic #189: #190, #191, #192, #193). Resource string attributes, surveillance categories and the interface speed now travel as series of their own: `onms_resource_attr{resourceId, key, value} 1`, `onms_resource_category{resourceId, category} 1`, `onms_resource_info{resourceId, <columns>} 1` and the gauge `onms_resource_ifspeed{resourceId}` in bits per second. The data series lose `if_descr`, `if_speed`, `ifSpeed`, `ifHighSpeed`, `categories`, `onms_cat_*`, `onms_attr_*` and `onms_extattr_*`; `if_name` is the only interface label left, because `ifName` is the one interface field no operator sets, and an operator editing an interface description must not split a year of throughput history. That changes the identity of every affected series once, at cutover. Series written before it keep their old identity for the retention window and are not joined to the new ones. Dashboards that filtered on a removed label move to the `group_left` join documented under Resource metadata. OpenNMS graph rendering is unaffected across the boundary: the read path resolves resources by `__name__` and `resourceId`, both of which stay, and restores `${…}` placeholders from the rows. No compatibility mode, no dual emission, no read-path support for the old prefixes.
@@ -1735,7 +1737,8 @@ Go sanitization rules.
 - Karaf feature `prometheus-remote-writer` shipping a pre-populated
   `etc/org.opennms.plugins.tss.prometheusremotewriter.cfg` on install.
 
-[Unreleased]: https://github.com/labmonkeys-space/prometheus-remote-writer/compare/v0.8.2...HEAD
+[Unreleased]: https://github.com/labmonkeys-space/prometheus-remote-writer/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/labmonkeys-space/prometheus-remote-writer/compare/v0.8.2...v1.0.0
 [0.8.2]: https://github.com/labmonkeys-space/prometheus-remote-writer/compare/v0.8.1...v0.8.2
 [0.8.1]: https://github.com/labmonkeys-space/prometheus-remote-writer/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/labmonkeys-space/prometheus-remote-writer/compare/v0.7.0...v0.8.0
