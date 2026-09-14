@@ -99,9 +99,10 @@ class MetadataRegistryTest {
     void only_eligible_tags_are_attributes() {
         registry.observe(RID, interfaceMetric("uplink"));
         ResourceMetadata r = registry.dueForEmission(CADENCE).get(0);
-        // Intrinsics, mtype, categories, the speed pair, context keys and
-        // secrets are not attributes; keys keep their OpenNMS spelling.
-        assertThat(r.attributes()).containsOnlyKeys("ifAlias", "ifDescr", "ifName", "nodeLabel");
+        // Intrinsics, mtype, categories, the speed pair, the keys the data
+        // series carry as labels, context keys and secrets are not
+        // attributes; keys keep their OpenNMS spelling.
+        assertThat(r.attributes()).containsOnlyKeys("ifAlias", "ifDescr", "ifName");
         assertThat(r.categories()).containsExactly("ProductionSites", "Routers");
         assertThat(r.ifSpeedBps()).isEqualTo(1_000_000_000L);
         assertThat(r.resourceId()).isEqualTo(RID);
@@ -111,7 +112,66 @@ class MetadataRegistryTest {
     void attributes_are_sorted_by_key() {
         registry.observe(RID, interfaceMetric("uplink"));
         ResourceMetadata r = registry.dueForEmission(CADENCE).get(0);
-        assertThat(r.attributes().keySet()).containsExactly("ifAlias", "ifDescr", "ifName", "nodeLabel");
+        assertThat(r.attributes().keySet()).containsExactly("ifAlias", "ifDescr", "ifName");
+    }
+
+    @Test
+    void what_the_data_series_already_say_is_not_a_row() {
+        // Every data series carries these as node_label, foreign_source,
+        // foreign_id, location and node; the categories are rows of their
+        // own, and OpenNMS's cat_<Name> tags repeat them. ifName stays: the
+        // flow reports dereference {ifName}.
+        Metric m = ImmutableMetric.builder()
+                .intrinsicTag("name", "ifHCInOctets").intrinsicTag("resourceId", RID)
+                .externalTag("nodeLabel", "core-sw-1").externalTag("foreignSource", "NOC")
+                .externalTag("foreignId", "core-sw-1").externalTag("location", "Default")
+                .externalTag("nodeId", "42")
+                .externalTag("categories", "Production,Routers")
+                .externalTag("cat_Production", "Production").externalTag("cat_Routers", "Routers")
+                .externalTag("ifName", "Et1").externalTag("ifDescr", "Ethernet1")
+                .build();
+        registry.observe(RID, m);
+        ResourceMetadata r = registry.dueForEmission(CADENCE).get(0);
+        // nodeId stays: its label `node` carries foreignSource:foreignId, not the id.
+        assertThat(r.attributes()).containsOnlyKeys("ifDescr", "ifName", "nodeId");
+        assertThat(r.categories()).containsExactly("Production", "Routers");
+        assertThat(MetadataRegistry.LABEL_KEYS).containsOnlyKeys("nodeLabel", "foreignSource", "foreignId", "location");
+        java.util.Set<String> all = MetadataRegistry.LABEL_KEYS.keySet();
+        assertThat(MetadataRegistry.whyNotARow("nodeLabel", all)).contains("node_label");
+        assertThat(MetadataRegistry.whyNotARow("cat_Routers", all)).contains("onms_resource_category");
+        assertThat(MetadataRegistry.whyNotARow("ifName", all)).isNull();
+        assertThat(MetadataRegistry.whyNotARow("nodeLabel", java.util.Set.of())).isNull();
+    }
+
+    @Test
+    void a_skipped_key_is_a_row_again_when_its_label_is_not_on_the_wire() {
+        // labels.exclude = node_label: the value would otherwise be nowhere.
+        MetadataRegistry r = new MetadataRegistry(clock::get, java.util.Set.of("foreignSource", "foreignId", "location"));
+        r.observe(RID, interfaceMetric("uplink"));
+        assertThat(r.dueForEmission(CADENCE).get(0).attributes()).containsKeys("nodeLabel", "ifAlias");
+    }
+
+    @Test
+    void only_opennms_category_mirrors_are_skipped_not_every_cat_key() {
+        Metric m = ImmutableMetric.builder()
+                .intrinsicTag("name", "m").intrinsicTag("resourceId", RID)
+                .externalTag("cat_Routers", "Routers")      // OpenNMS's mirror of a category
+                .externalTag("cat_number", "7")             // an operator's own attribute
+                .build();
+        registry.observe(RID, m);
+        assertThat(registry.dueForEmission(CADENCE).get(0).attributes()).containsOnlyKeys("cat_number");
+    }
+
+    @Test
+    void a_change_to_a_skipped_key_alone_is_not_a_change() {
+        Metric before = ImmutableMetric.builder()
+                .intrinsicTag("name", "m").intrinsicTag("resourceId", RID)
+                .externalTag("nodeLabel", "old-name").externalTag("ifAlias", "uplink").build();
+        Metric after = ImmutableMetric.builder()
+                .intrinsicTag("name", "m").intrinsicTag("resourceId", RID)
+                .externalTag("nodeLabel", "new-name").externalTag("ifAlias", "uplink").build();
+        assertThat(registry.observe(RID, before)).isTrue();
+        assertThat(registry.observe(RID, after)).isFalse();
     }
 
     @Test

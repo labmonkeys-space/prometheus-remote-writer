@@ -11,6 +11,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.TreeMap;
 import java.util.TreeSet;
 import java.util.concurrent.ConcurrentHashMap;
@@ -37,9 +38,13 @@ import org.opennms.plugins.prometheus.remotewriter.mapper.MetadataProcessor;
  * <p>What counts as an attribute: every meta or external tag except the
  * intrinsics (not walked), {@code mtype}, {@code categories} (rows of its
  * own), {@code ifSpeed} and {@code ifHighSpeed} (a gauge of their own),
- * context keys containing {@code :} (owned by the metadata processor) and the
- * secret denylist; a tag with an empty value is no attribute either. Keys keep their OpenNMS spelling, because a row is a fact
- * about OpenNMS and a graph placeholder is named after it.
+ * the keys the data series carry as labels ({@link #LABEL_KEYS}, while the
+ * label is on the wire), OpenNMS's {@code cat_<Name>=Name} mirrors of
+ * {@code categories}, context
+ * keys containing {@code :} (owned by the metadata processor) and the secret
+ * denylist; a tag with an empty value is no attribute either. Keys keep
+ * their OpenNMS spelling, because a row is a fact about OpenNMS and a graph
+ * placeholder is named after it.
  */
 public final class MetadataRegistry {
 
@@ -54,9 +59,22 @@ public final class MetadataRegistry {
 
     private final ConcurrentHashMap<String, Entry> entries = new ConcurrentHashMap<>();
     private final LongSupplier clockMillis;
+    /** The {@link #LABEL_KEYS} whose label is on the wire, so no row is needed. */
+    private final Set<String> rowlessKeys;
+
+    /**
+     * @param rowlessKeys the source keys to skip as rows because their label
+     *                    is emitted: {@link #LABEL_KEYS} minus what
+     *                    {@code labels.exclude} removes, see
+     *                    {@code PrometheusRemoteWriterConfig#metadataRowlessKeys()}
+     */
+    public MetadataRegistry(LongSupplier clockMillis, Set<String> rowlessKeys) {
+        this.clockMillis = Objects.requireNonNull(clockMillis, "clockMillis");
+        this.rowlessKeys = Set.copyOf(Objects.requireNonNull(rowlessKeys, "rowlessKeys"));
+    }
 
     public MetadataRegistry(LongSupplier clockMillis) {
-        this.clockMillis = Objects.requireNonNull(clockMillis, "clockMillis");
+        this(clockMillis, LABEL_KEYS.keySet());
     }
 
     public MetadataRegistry() {
@@ -148,7 +166,29 @@ public final class MetadataRegistry {
 
     // -- eligibility and snapshot --------------------------------------------
 
-    /** Whether a meta or external tag key is a resource attribute for the rows. */
+    /**
+     * Source keys whose value every data series of the resource carries as
+     * a label (the mapper's default set), mapped to that label. They are not
+     * rows while the label is on the wire: no shipped OpenNMS report
+     * dereferences them as a {@code {placeholder}} (Horizon 36's
+     * {@code snmp-graph.properties.d} reads {@code ifName} in the flow
+     * reports, {@code ifSpeed}, {@code ifHighSpeed} and the info-column keys,
+     * and none of these), and the read path hands them back from the label.
+     * {@code ifName} stays a row although it is a label too, and
+     * {@code nodeId} is a row because its label {@code node} carries
+     * {@code foreignSource:foreignId} when both are set, not the id.
+     */
+    public static final Map<String, String> LABEL_KEYS = Map.of(
+            "nodeLabel",     "node_label",
+            "foreignSource", "foreign_source",
+            "foreignId",     "foreign_id",
+            "location",      "location");
+
+    /** OpenNMS emits one {@code cat_<Name>=Name} tag per category next to
+     *  {@code categories}; the category rows are their wire form. */
+    static final String CATEGORY_TAG_PREFIX = "cat_";
+
+    /** Whether a meta or external tag key can be a resource attribute at all. */
     static boolean isAttributeKey(String key) {
         if (key == null || key.isEmpty()) return false;
         if (key.indexOf(':') >= 0) return false;
@@ -157,10 +197,38 @@ public final class MetadataRegistry {
         return !MetadataProcessor.isPlainKeyDenied(key);
     }
 
-    /** Whether a tag key contributes to the snapshot at all. */
-    private static boolean isUsedKey(String key) {
-        return "categories".equals(key) || "ifSpeed".equals(key) || "ifHighSpeed".equals(key)
-                || isAttributeKey(key);
+    /** OpenNMS's mirror of a category: {@code cat_<Name>} with the name as value. */
+    static boolean isCategoryMirror(Tag t) {
+        String key = t.getKey();
+        return key != null && key.startsWith(CATEGORY_TAG_PREFIX)
+                && key.substring(CATEGORY_TAG_PREFIX.length()).equals(t.getValue());
+    }
+
+    /** Whether a tag becomes a row for this registry. */
+    private boolean isRow(Tag t) {
+        return isAttributeKey(t.getKey()) && !rowlessKeys.contains(t.getKey()) && !isCategoryMirror(t);
+    }
+
+    /**
+     * Why a key can never be a row for a registry that skips
+     * {@code rowlessKeys}, for a validation message; null when it can be
+     * one, or is excluded for another reason. A {@code cat_*} key is
+     * judged by its prefix here, since the value that tells OpenNMS's
+     * mirror from a custom key is not known at configuration time.
+     */
+    public static String whyNotARow(String key, Set<String> rowlessKeys) {
+        if (key == null) return null;
+        if (rowlessKeys.contains(key)) {
+            return "every data series carries it as the label '" + LABEL_KEYS.get(key) + "'";
+        }
+        if (key.startsWith(CATEGORY_TAG_PREFIX)) return "categories are the onms_resource_category rows";
+        return null;
+    }
+
+    /** Whether a tag contributes to the snapshot at all. */
+    private boolean isUsedTag(Tag t) {
+        String key = t.getKey();
+        return "categories".equals(key) || "ifSpeed".equals(key) || "ifHighSpeed".equals(key) || isRow(t);
     }
 
     /**
@@ -168,11 +236,11 @@ public final class MetadataRegistry {
      * differs between a resource's counter and gauge metrics, so hashing it
      * would flip the hash on every other sample of the same resource.
      */
-    private static long hashOf(Metric metric) {
+    private long hashOf(Metric metric) {
         long sum = 0L;
         int count = 0;
-        for (Tag t : metric.getMetaTags())     { if (isUsedKey(t.getKey())) { sum += tagHash(t); count++; } }
-        for (Tag t : metric.getExternalTags()) { if (isUsedKey(t.getKey())) { sum += tagHash(t); count++; } }
+        for (Tag t : metric.getMetaTags())     { if (isUsedTag(t)) { sum += tagHash(t); count++; } }
+        for (Tag t : metric.getExternalTags()) { if (isUsedTag(t)) { sum += tagHash(t); count++; } }
         return mix(sum) ^ count;
     }
 
@@ -190,7 +258,7 @@ public final class MetadataRegistry {
         return z ^ (z >>> 31);
     }
 
-    private static ResourceMetadata snapshotOf(String resourceId, Metric metric) {
+    private ResourceMetadata snapshotOf(String resourceId, Metric metric) {
         TreeMap<String, String> attributes = new TreeMap<>();
         TreeSet<String> categories = new TreeSet<>();
         String ifSpeed = null, ifHighSpeed = null;
@@ -213,7 +281,7 @@ public final class MetadataRegistry {
                     if (ifSpeed == null) ifSpeed = value;
                 } else if ("ifHighSpeed".equals(key)) {
                     if (ifHighSpeed == null) ifHighSpeed = value;
-                } else if (isAttributeKey(key)) {
+                } else if (isRow(t)) {
                     attributes.putIfAbsent(key, value);
                 }
             }

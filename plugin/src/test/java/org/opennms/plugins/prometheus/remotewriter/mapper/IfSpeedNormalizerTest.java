@@ -13,10 +13,17 @@ import org.junit.jupiter.api.Test;
 class IfSpeedNormalizerTest {
 
     @Test
-    void prefers_high_speed_when_non_zero() {
+    void prefers_high_speed_once_ifspeed_saturates() {
         // ifHighSpeed=10000 (megabits) wins over ifSpeed=4294967295 (saturated 32-bit).
         assertThat(IfSpeedNormalizer.normalize("10000", "4294967295"))
                 .isEqualTo(10_000L * 1_000_000L);
+    }
+
+    @Test
+    void prefers_the_exact_ifspeed_below_the_cap() {
+        // A T1: ifHighSpeed is whole megabits (2), ifSpeed is the truth (1,544,000).
+        assertThat(IfSpeedNormalizer.normalize("2", "1544000")).isEqualTo(1_544_000L);
+        assertThat(IfSpeedNormalizer.normalize("1000", "1000000000")).isEqualTo(1_000_000_000L);
     }
 
     @Test

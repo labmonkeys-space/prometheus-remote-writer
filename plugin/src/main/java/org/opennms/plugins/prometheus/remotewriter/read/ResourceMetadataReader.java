@@ -26,7 +26,9 @@ import org.opennms.integration.api.v1.timeseries.TagMatcher;
 import org.opennms.integration.api.v1.timeseries.immutables.ImmutableMetric;
 import org.opennms.integration.api.v1.timeseries.immutables.ImmutableTagMatcher;
 import org.opennms.plugins.prometheus.remotewriter.config.PrometheusRemoteWriterConfig;
+import org.opennms.plugins.prometheus.remotewriter.mapper.IfSpeedNormalizer;
 import org.opennms.plugins.prometheus.remotewriter.metadata.MetadataEmitter;
+import org.opennms.plugins.prometheus.remotewriter.metadata.MetadataRegistry;
 import org.opennms.plugins.prometheus.remotewriter.metrics.PluginMetrics;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -38,9 +40,11 @@ import org.slf4j.LoggerFactory;
  * placeholders ({@code ${name}}, {@code ${hrStorageDescr}}, …) resolve from
  * what is on the wire and nothing has to be curated for correctness.
  *
- * <p>One instant query per batch of {@code read.discovery-batch-size}
- * resources, never one per metric, capped like two-phase discovery and sent
- * as a POST so the batch is not bounded by a request-line limit. The
+ * <p>Two instant queries per batch of {@code read.discovery-batch-size}
+ * resources (the rows, then the {@code onms_resource_ifspeed} gauge for the
+ * {@code ifSpeed}/{@code ifHighSpeed} strings OpenNMS's utilisation reports
+ * dereference), never one per metric, capped like two-phase discovery and
+ * sent as POSTs so the batch is not bounded by a request-line limit. The
  * selector always carries the resource list, so it never selects the whole
  * attribute space, and it is scoped to this instance when {@code instance.id}
  * is set. The window is the registry's expiry, so a resource that has been
@@ -98,8 +102,9 @@ final class ResourceMetadataReader {
     }
 
     /**
-     * The metrics, each with its resource's attributes and categories added,
-     * or unchanged when the metadata could not be read.
+     * The metrics, each with its resource's attributes, categories and the
+     * speed strings derived from the gauge added, or unchanged when the
+     * metadata could not be read.
      */
     List<Metric> enrich(List<Metric> metrics) {
         if (metrics.isEmpty() || config.getMetadataCadenceMs() <= 0) return metrics;
@@ -121,14 +126,29 @@ final class ResourceMetadataReader {
         }
         if (resourceIds.isEmpty()) return metrics;
 
+        // Two queries per batch (the rows, the speed gauge); the cap bounds
+        // sequential calls on the OpenNMS request thread, so it counts both.
         int batchSize = Math.max(1, config.getDiscoveryBatchSize());
-        int batches = (resourceIds.size() + batchSize - 1) / batchSize;
-        if (batches > PrometheusReadClient.MAX_PHASE2_CALLS) {
+        int calls = 2 * ((resourceIds.size() + batchSize - 1) / batchSize);
+        if (calls > PrometheusReadClient.MAX_PHASE2_CALLS) {
             warn("metadata enrichment would issue {} queries for {} resource(s) at "
                     + "read.discovery-batch-size={} (cap {}); returning them without attributes",
-                    batches, resourceIds.size(), batchSize, PrometheusReadClient.MAX_PHASE2_CALLS);
+                    calls, resourceIds.size(), batchSize, PrometheusReadClient.MAX_PHASE2_CALLS);
             return metrics;
         }
+
+        Map<String, Map<String, String>> attributes = new HashMap<>();
+        Map<String, Set<String>> categories = new HashMap<>();
+
+        // The speed placeholders OpenNMS's utilisation reports dereference
+        // come from the gauge, not from rows: the two strings its SNMP
+        // collector would have stored. Written first, so a row of the same
+        // name (there is none, the registry refuses the keys) would win.
+        forEachBatch(resourceIds, batchSize, this::speedQuery, "interface speeds", s -> {
+            String rid = s.labels().get(IntrinsicTagNames.resourceId);
+            if (rid == null || !Double.isFinite(s.value()) || s.value() < 0) return;
+            attributes.computeIfAbsent(rid, k -> new TreeMap<>()).putAll(speedStrings(s.value()));
+        });
 
         // Per resource: the rows of its newest emission. Every row is valued
         // with its newest sample's stamp; the max per resource identifies the
@@ -137,28 +157,13 @@ final class ResourceMetadataReader {
         // leaves only its own resources unenriched.
         Map<String, Long> newest = new HashMap<>();
         List<Row> rows = new ArrayList<>();
-        String url = config.getReadUrl() + "/api/v1/query";
-        for (int from = 0; from < resourceIds.size(); from += batchSize) {
-            List<String> chunk = resourceIds.subList(from, Math.min(from + batchSize, resourceIds.size()));
-            if (this.metrics != null) this.metrics.findMetricsEnrichmentBatches(1);
-            List<PromResponseParser.InstantSample> samples;
-            try {
-                String body = http.post(url, "query=" + PrometheusReadClient.urlEncode(query(chunk)));
-                samples = PromResponseParser.parseInstantVector(body);
-            } catch (StorageException | RuntimeException e) {
-                warn("metadata rows could not be read for {} resource(s); returning them without attributes: {}",
-                        chunk.size(), e.getMessage());
-                continue;
-            }
-            for (PromResponseParser.InstantSample s : samples) {
-                String rid = s.labels().get(IntrinsicTagNames.resourceId);
-                if (rid == null || !Double.isFinite(s.value())) continue;
-                long stampMs = Math.round(s.value() * 1000.0);
-                rows.add(new Row(rid, s.labels(), stampMs));
-                newest.merge(rid, stampMs, Math::max);
-            }
-        }
-        if (rows.isEmpty()) return metrics;
+        forEachBatch(resourceIds, batchSize, this::query, "metadata rows", s -> {
+            String rid = s.labels().get(IntrinsicTagNames.resourceId);
+            if (rid == null || !Double.isFinite(s.value())) return;
+            long stampMs = Math.round(s.value() * 1000.0);
+            rows.add(new Row(rid, s.labels(), stampMs));
+            newest.merge(rid, stampMs, Math::max);
+        });
 
         // The rows of one emission can land moments apart, so anything within
         // half a cadence of the newest stamp is current; in ascending stamp
@@ -167,8 +172,6 @@ final class ResourceMetadataReader {
         // attribute, category a category.
         long tolerance = config.getMetadataCadenceMs() / 2;
         rows.sort(Comparator.comparingLong(Row::stampMs));
-        Map<String, Map<String, String>> attributes = new HashMap<>();
-        Map<String, Set<String>> categories = new HashMap<>();
         for (Row r : rows) {
             if (r.stampMs() < newest.get(r.resourceId()) - tolerance) continue;
             String key = r.labels().get("key");
@@ -184,14 +187,90 @@ final class ResourceMetadataReader {
         List<Metric> out = new ArrayList<>(metrics.size());
         for (Metric m : metrics) {
             String rid = resourceIdOf(m);
-            Map<String, String> attrs = rid == null ? null : attributes.get(rid);
+            // What the data series carry as labels is no row, but a custom
+            // report may still dereference {nodeLabel}: hand it back from
+            // the label, at no wire cost. Rows and the speed win over it.
+            Map<String, String> attrs = fromLabels(m);
+            if (rid != null && attributes.containsKey(rid)) attrs.putAll(attributes.get(rid));
             Set<String> cats = rid == null ? null : categories.get(rid);
-            out.add(attrs == null && cats == null ? m : withMetadata(m, attrs, cats));
+            out.add(attrs.isEmpty() && cats == null ? m : withMetadata(m, attrs.isEmpty() ? null : attrs, cats));
+        }
+        return out;
+    }
+
+    /**
+     * One POST per batch of resources, parsed into {@code sink}; a batch
+     * that fails is logged and skipped, so only its resources miss what the
+     * query would have added.
+     */
+    private void forEachBatch(List<String> resourceIds, int batchSize,
+                              java.util.function.Function<List<String>, String> query, String what,
+                              java.util.function.Consumer<PromResponseParser.InstantSample> sink) {
+        String url = config.getReadUrl() + "/api/v1/query";
+        for (int from = 0; from < resourceIds.size(); from += batchSize) {
+            List<String> chunk = resourceIds.subList(from, Math.min(from + batchSize, resourceIds.size()));
+            if (this.metrics != null) this.metrics.findMetricsEnrichmentBatches(1);
+            List<PromResponseParser.InstantSample> samples;
+            try {
+                String body = http.post(url, "query=" + PrometheusReadClient.urlEncode(query.apply(chunk)));
+                samples = PromResponseParser.parseInstantVector(body);
+            } catch (StorageException | RuntimeException e) {
+                warn("{} could not be read for {} resource(s); returning them without: {}",
+                        what, chunk.size(), e.getMessage());
+                continue;
+            }
+            samples.forEach(sink);
+        }
+    }
+
+    /** The {@link MetadataRegistry#LABEL_KEYS} of a metric, from its labels. */
+    private static Map<String, String> fromLabels(Metric m) {
+        Map<String, String> out = new TreeMap<>();
+        for (Tag t : m.getMetaTags()) {
+            for (Map.Entry<String, String> e : MetadataRegistry.LABEL_KEYS.entrySet()) {
+                if (e.getValue().equals(t.getKey()) && t.getValue() != null && !t.getValue().isEmpty()) {
+                    out.put(e.getKey(), t.getValue());
+                }
+            }
         }
         return out;
     }
 
     private record Row(String resourceId, Map<String, String> labels, long stampMs) {}
+
+    /**
+     * The {@code ifSpeed} and {@code ifHighSpeed} strings OpenNMS's collector
+     * would have stored for a speed in bits per second: {@code ifHighSpeed}
+     * in whole Mbit/s, {@code ifSpeed} capped at the OID's 32-bit maximum.
+     * Exact because the gauge prefers the exact {@code ifSpeed} below that
+     * cap (see {@code IfSpeedNormalizer}); above it only {@code ifHighSpeed}
+     * carries the speed, and {@code ifSpeed} saturates exactly as the agent's did.
+     */
+    static Map<String, String> speedStrings(double bps) {
+        long bits = Math.round(bps);
+        Map<String, String> out = new TreeMap<>();
+        out.put("ifHighSpeed", Long.toString(Math.round(bps / 1_000_000.0)));
+        out.put("ifSpeed", Long.toString(Math.min(bits, IfSpeedNormalizer.IF_SPEED_MAX)));
+        return out;
+    }
+
+    /** {@code last_over_time(onms_resource_ifspeed{[onms_instance_id="…",] resourceId=~"^(…)$"}[window])}. */
+    private String speedQuery(List<String> resourceIds) {
+        return "last_over_time(" + selector(TagMatcher.Type.EQUALS, MetadataEmitter.IFSPEED_METRIC, resourceIds)
+                + "[" + windowSeconds() + "s])";
+    }
+
+    /** {@code {__name__<op>"…"[, onms_instance_id="…"], resourceId=~"^(…)$"}}, escaping included. */
+    private String selector(TagMatcher.Type nameMatch, String name, List<String> resourceIds) {
+        List<TagMatcher> matchers = new ArrayList<>(2);
+        matchers.add(ImmutableTagMatcher.builder().type(nameMatch).key(IntrinsicTagNames.name).value(name).build());
+        String instanceId = config.getInstanceId();
+        if (instanceId != null && !instanceId.isEmpty()) {
+            matchers.add(ImmutableTagMatcher.builder()
+                    .type(TagMatcher.Type.EQUALS).key(MetadataEmitter.INSTANCE_ID_LABEL).value(instanceId).build());
+        }
+        return PromQLBuilder.fromMatchersWithResourceIdAlternation(matchers, resourceIds);
+    }
 
     /**
      * {@code timestamp(sel) or max_over_time(timestamp(sel)[window:5m])} with
@@ -208,15 +287,7 @@ final class ResourceMetadataReader {
      * discovery uses, escaping included.
      */
     private String query(List<String> resourceIds) {
-        List<TagMatcher> matchers = new ArrayList<>(2);
-        matchers.add(ImmutableTagMatcher.builder()
-                .type(TagMatcher.Type.EQUALS_REGEX).key(IntrinsicTagNames.name).value(ROW_METRICS).build());
-        String instanceId = config.getInstanceId();
-        if (instanceId != null && !instanceId.isEmpty()) {
-            matchers.add(ImmutableTagMatcher.builder()
-                    .type(TagMatcher.Type.EQUALS).key(MetadataEmitter.INSTANCE_ID_LABEL).value(instanceId).build());
-        }
-        String sel = PromQLBuilder.fromMatchersWithResourceIdAlternation(matchers, resourceIds);
+        String sel = selector(TagMatcher.Type.EQUALS_REGEX, ROW_METRICS, resourceIds);
         return "timestamp(" + sel + ") or max_over_time(timestamp(" + sel + ")["
                 + windowSeconds() + "s:" + SUBQUERY_STEP + "])";
     }

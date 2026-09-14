@@ -20,6 +20,7 @@ import java.util.Set;
 import org.opennms.plugins.prometheus.remotewriter.mapper.LabelMapper;
 import org.opennms.plugins.prometheus.remotewriter.sanitize.Sanitizer;
 import org.opennms.plugins.prometheus.remotewriter.metadata.InfoColumns;
+import org.opennms.plugins.prometheus.remotewriter.metadata.MetadataRegistry;
 import org.opennms.plugins.prometheus.remotewriter.queue.OverflowBucket;
 import org.opennms.plugins.prometheus.remotewriter.wal.WalSegment;
 
@@ -442,7 +443,7 @@ public class PrometheusRemoteWriterConfig {
             throw new IllegalStateException("metadata.attr-budget must be >= 1 (got " + metadataAttrBudget + ")");
         }
         try {
-            InfoColumns.parse(metadataInfoColumns);
+            InfoColumns.parse(metadataInfoColumns, metadataRowlessKeys());
         } catch (IllegalArgumentException e) {
             throw new IllegalStateException("metadata.info-columns: " + e.getMessage(), e);
         }
@@ -1274,7 +1275,26 @@ public class PrometheusRemoteWriterConfig {
     public int     getMetadataAttrBudget()    { return metadataAttrBudget; }
     public String  getMetadataInfoColumns()   { return metadataInfoColumns; }
     /** The parsed {@code metadata.info-columns}, column → attribute key. */
-    public Map<String, String> metadataInfoColumns() { return InfoColumns.parse(metadataInfoColumns); }
+    public Map<String, String> metadataInfoColumns() { return InfoColumns.parse(metadataInfoColumns, metadataRowlessKeys()); }
+
+    /**
+     * The source keys the metadata rows skip because every data series
+     * carries them as a label: {@link MetadataRegistry#LABEL_KEYS} minus the
+     * ones whose label {@code labels.exclude} removes from the wire, since a
+     * value on neither series would be lost. A rename keeps the value on the
+     * wire and changes nothing here.
+     */
+    public Set<String> metadataRowlessKeys() {
+        Set<String> out = new LinkedHashSet<>();
+        for (Map.Entry<String, String> e : MetadataRegistry.LABEL_KEYS.entrySet()) {
+            boolean excluded = false;
+            for (String glob : labelsExcludeGlobs()) {
+                if (globMatches(glob, e.getValue())) { excluded = true; break; }
+            }
+            if (!excluded) out.add(e.getKey());
+        }
+        return out;
+    }
     public int     getRetryMaxAttempts()      { return retryMaxAttempts; }
     public long    getRetryInitialBackoffMs() { return retryInitialBackoffMs; }
     public long    getRetryMaxBackoffMs()     { return retryMaxBackoffMs; }

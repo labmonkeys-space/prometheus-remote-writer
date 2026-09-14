@@ -186,6 +186,8 @@ class PrometheusRemoteWriteIT {
                         .externalTag("foreignId", "meta-rt")
                         .externalTag("ifName", "eth7")
                         .externalTag("ifAlias", "uplink to core-sw-1")
+                        .externalTag("ifHighSpeed", "10000")
+                        .externalTag("ifSpeed", "4294967295")
                         .externalTag("categories", "Routers,Production")
                         .build())
                 .time(now)
@@ -202,11 +204,28 @@ class PrometheusRemoteWriteIT {
         Metric found = await().atMost(Duration.ofSeconds(20))
                 .until(() -> storage.findMetrics(List.of(nameMatcher)),
                        list -> !list.isEmpty()
-                            && list.get(0).getExternalTags().stream().anyMatch(t -> t.getKey().equals("ifAlias")))
+                            && list.get(0).getExternalTags().stream().anyMatch(t -> t.getKey().equals("ifAlias"))
+                            && list.get(0).getExternalTags().stream().anyMatch(t -> t.getKey().equals("ifHighSpeed")))
                 .get(0);
         assertThat(found.getExternalTags()).anySatisfy(t -> {
             assertThat(t.getKey()).isEqualTo("ifAlias");
             assertThat(t.getValue()).isEqualTo("uplink to core-sw-1");
+        });
+        // The speed placeholders of the utilisation graphs resolve from the gauge.
+        assertThat(found.getExternalTags()).anySatisfy(t -> {
+            assertThat(t.getKey()).isEqualTo("ifHighSpeed");
+            assertThat(t.getValue()).isEqualTo("10000");
+        });
+        assertThat(found.getExternalTags()).anySatisfy(t -> {
+            assertThat(t.getKey()).isEqualTo("ifSpeed");
+            assertThat(t.getValue()).isEqualTo("4294967295");
+        });
+        // The node identity is no row (the smoke asserts that on the wire),
+        // yet it comes back as an attribute: the read path hands it back
+        // from the data series' own labels.
+        assertThat(found.getExternalTags()).anySatisfy(t -> {
+            assertThat(t.getKey()).isEqualTo("foreignSource");
+            assertThat(t.getValue()).isEqualTo("NOC");
         });
         assertThat(found.getMetaTags()).anySatisfy(t -> {
             assertThat(t.getKey()).isEqualTo("categories");

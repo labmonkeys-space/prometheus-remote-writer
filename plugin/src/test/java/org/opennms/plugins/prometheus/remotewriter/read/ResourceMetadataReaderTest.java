@@ -34,7 +34,10 @@ class ResourceMetadataReaderTest {
 
     private final List<String> urls = new ArrayList<>();
     private final List<String> forms = new ArrayList<>();
-    private String response = "{\"status\":\"success\",\"data\":{\"resultType\":\"vector\",\"result\":[]}}";
+    private static final String EMPTY = "{\"status\":\"success\",\"data\":{\"resultType\":\"vector\",\"result\":[]}}";
+    private String response = EMPTY;
+    /** What the speed query (the second per batch) gets back. */
+    private String speedResponse = EMPTY;
 
     private PrometheusRemoteWriterConfig config(long cadenceMs, int batchSize) {
         PrometheusRemoteWriterConfig c = new PrometheusRemoteWriterConfig();
@@ -52,7 +55,12 @@ class ResourceMetadataReaderTest {
     private String record(String url, String form) {
         urls.add(url);
         forms.add(form);
-        return response;
+        return form.contains("onms_resource_ifspeed") ? speedResponse : response;
+    }
+
+    /** A gauge sample as {@code last_over_time(onms_resource_ifspeed[w])} returns it. */
+    private static String speed(String resourceId, String bps) {
+        return "{\"metric\":{\"resourceId\":\"" + resourceId + "\"},\"value\":[1700000100,\"" + bps + "\"]}";
     }
 
     private static Metric metric(String name, String resourceId) {
@@ -119,8 +127,11 @@ class ResourceMetadataReaderTest {
             for (int n = 0; n < 4; n++) in.add(metric("m" + n, "node[" + r + "].nodeSnmp[]"));
         }
         reader(900_000, 50).enrich(in);
-        assertThat(urls).containsExactly("http://backend/api/v1/query");   // a POST body, not a request line
-        String q = decoded(forms.get(0));
+        // Two POSTs per batch: the speed gauge, then the rows; bodies, not request lines.
+        assertThat(urls).containsExactly("http://backend/api/v1/query", "http://backend/api/v1/query");
+        assertThat(decoded(forms.get(0))).startsWith("query=last_over_time(")
+                .contains("__name__=\"onms_resource_ifspeed\"").contains("[86400s])");
+        String q = decoded(forms.get(1));
         assertThat(q).startsWith("query=timestamp(");
         assertThat(q).contains(") or max_over_time(timestamp(");
         assertThat(q).contains("__name__=~\"onms_resource_attr|onms_resource_category\"");
@@ -137,7 +148,72 @@ class ResourceMetadataReaderTest {
         List<Metric> in = new ArrayList<>();
         for (int r = 0; r < 120; r++) in.add(metric("m", "node[" + r + "].nodeSnmp[]"));
         reader(900_000, 50).enrich(in);
-        assertThat(urls).hasSize(3);
+        assertThat(urls).hasSize(6);   // three batches, rows and speed each
+    }
+
+    @Test
+    void the_gauge_becomes_the_ifSpeed_and_ifHighSpeed_strings_opennms_reports_read() throws StorageException {
+        // mib2.traffic and mib2.HCtraffic-inout dereference {ifSpeed} and
+        // {ifHighSpeed}; the wire carries only the gauge, so the read path
+        // derives the pair the SNMP collector would have stored.
+        speedResponse = vector(speed("ten-gig", "10000000000"), speed("fast-e", "100000000"));
+        List<Metric> out = reader(900_000, 50).enrich(List.of(metric("m", "ten-gig"), metric("m", "fast-e")));
+        assertThat(external(out.get(0), "ifHighSpeed")).contains("10000");
+        assertThat(external(out.get(0), "ifSpeed")).contains("4294967295");   // the OID saturates
+        assertThat(external(out.get(1), "ifHighSpeed")).contains("100");
+        assertThat(external(out.get(1), "ifSpeed")).contains("100000000");
+        assertThat(ResourceMetadataReader.speedStrings(1_000_000_000)).containsExactly(
+                Map.entry("ifHighSpeed", "1000"), Map.entry("ifSpeed", "1000000000"));
+    }
+
+    @Test
+    void what_the_data_series_carry_as_labels_comes_back_as_attributes_too() throws StorageException {
+        // A custom report may dereference {nodeLabel}: it is no row, but the
+        // label is right there. Rows still win over it.
+        String rid = "node[1].interfaceSnmp[eth0]";
+        Metric m = ImmutableMetric.builder()
+                .intrinsicTag("name", "m").intrinsicTag("resourceId", rid)
+                .metaTag("node_label", "core-sw-1").metaTag("foreign_source", "NOC")
+                .metaTag("foreign_id", "core-sw-1").metaTag("location", "Default").metaTag("node", "NOC:core-sw-1")
+                .build();
+        Metric out = reader(900_000, 50).enrich(List.of(m)).get(0);
+        assertThat(external(out, "nodeLabel")).contains("core-sw-1");
+        assertThat(external(out, "foreignSource")).contains("NOC");
+        assertThat(external(out, "foreignId")).contains("core-sw-1");
+        assertThat(external(out, "location")).contains("Default");
+        assertThat(external(out, "nodeId")).isEmpty();   // `node` is not the numeric id
+        response = vector(row("onms_resource_attr", rid, "key", "nodeLabel", "value", "from-a-row"));
+        assertThat(external(reader(900_000, 50).enrich(List.of(m)).get(0), "nodeLabel")).contains("from-a-row");
+    }
+
+    @Test
+    void the_cap_counts_both_queries_of_a_batch() {
+        List<Metric> in = new ArrayList<>();
+        for (int r = 0; r < 51; r++) in.add(metric("m", "node[" + r + "].nodeSnmp[]"));
+        assertThat(reader(900_000, 1).enrich(in)).isEqualTo(in);   // 51 batches = 102 calls > 100
+        assertThat(urls).isEmpty();
+        for (int r = 0; r < 50; r++) reader(900_000, 1).enrich(List.of(metric("m", "node[" + r + "].nodeSnmp[]")));
+        assertThat(urls).hasSize(100);
+    }
+
+    @Test
+    void a_failed_speed_query_leaves_the_rows_and_a_failed_rows_query_leaves_the_speed() {
+        String rid = "node[1].interfaceSnmp[eth0]";
+        ResourceMetadataReader speedDown = new ResourceMetadataReader(config(900_000, 50), (url, form) -> {
+            if (form.contains("onms_resource_ifspeed")) throw new StorageException("timeout");
+            return vector(row("onms_resource_attr", rid, "key", "ifAlias", "value", "uplink"));
+        });
+        Metric m = speedDown.enrich(List.of(metric("m", rid))).get(0);
+        assertThat(external(m, "ifAlias")).contains("uplink");
+        assertThat(external(m, "ifHighSpeed")).isEmpty();
+
+        ResourceMetadataReader rowsDown = new ResourceMetadataReader(config(900_000, 50), (url, form) -> {
+            if (form.contains("onms_resource_ifspeed")) return vector(speed(rid, "1000000000"));
+            throw new StorageException("timeout");
+        });
+        m = rowsDown.enrich(List.of(metric("m", rid))).get(0);
+        assertThat(external(m, "ifAlias")).isEmpty();
+        assertThat(external(m, "ifHighSpeed")).contains("1000");
     }
 
     @Test
@@ -255,7 +331,9 @@ class ResourceMetadataReaderTest {
     @Test
     void the_window_is_never_shorter_than_two_cadences() {
         reader(TimeUnit_HOURS_24 + 1, 50).enrich(List.of(metric("m", "r")));
-        assertThat(decoded(forms.get(0))).contains("[" + (2 * (TimeUnit_HOURS_24 + 1) / 1000) + "s:5m]");
+        long window = 2 * (TimeUnit_HOURS_24 + 1) / 1000;
+        assertThat(decoded(forms.get(0))).contains("[" + window + "s])");    // the speed gauge
+        assertThat(decoded(forms.get(1))).contains("[" + window + "s:5m]");  // the rows
     }
 
     private static final long TimeUnit_HOURS_24 = 24L * 3_600_000L;

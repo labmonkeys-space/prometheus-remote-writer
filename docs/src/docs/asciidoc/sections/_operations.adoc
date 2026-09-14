@@ -92,7 +92,7 @@ See <<overflow-caller-cost,What an outage costs the writer threads>> for why a s
 | `metadata_series_emitted_total`    | Metadata samples (`onms_resource_attr`, `onms_resource_category`, `onms_resource_info`, `onms_resource_ifspeed`) handed to the pipeline. See <<resource-metadata>>.
 | `metadata_attrs_dropped_total`     | Attributes past `metadata.attr-budget`, per emission. A steadily rising value names a resource type whose attributes outgrow the budget.
 | `metadata_resources`               | Gauge: resources the write path currently remembers metadata for.
-| `find_metrics_enrichment_batches_total` | Metadata queries `findMetrics` issued to restore attributes from the rows, one per `read.discovery-batch-size` resources.
+| `find_metrics_enrichment_batches_total` | Metadata queries `findMetrics` issued to restore attributes from the rows and the speed from the gauge, two per `read.discovery-batch-size` resources.
 | `wal_replay_samples_total`         | Samples recovered from the disk tier at startup, summed over shards. They ship before anything offered after the restart. Approximate by a few samples either way — it sums the per-segment index counts, which over-count a segment spanning the checkpoint and under-count one whose index lagged its last append. Read it as "recovery found work", not as an accounting input; it is deliberately not a term in the reconciliation identity.
 |===
 
@@ -254,7 +254,7 @@ deployment.
 | 25k+ samples/sec      | `writer.shards = 4`, `queue.capacity = 40000`, `batch.size = 1000`, `batch.linger-ms = 100` | Single-process Karaf is the bottleneck before the wire. Size the tier from the outage window you actually want, not from a round number.
 |===
 
-The metadata series add about `resources × 10 ÷ cadence in seconds` samples per second (about 2,400 for 220,000 resources at the default 15 minutes) and, more importantly, about ten series per resource on the backend; see <<resource-metadata>> for the arithmetic and the backend limits to check.
+The metadata series add about `resources × 6 ÷ cadence in seconds` samples per second (about 1,500 for 220,000 resources at the default 15 minutes) and, more importantly, about six series per resource on the backend; see <<resource-metadata>> for the arithmetic and the backend limits to check.
 
 == Karaf shell commands
 

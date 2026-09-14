@@ -89,6 +89,8 @@ class PrometheusReadClientTest {
                 .setBody("{\"status\":\"success\",\"data\":["
                        + "{\"__name__\":\"ifHCInOctets\",\"resourceId\":\"node[1].interfaceSnmp[eth0]\",\"mtype\":\"counter\"}"
                        + "]}"));
+        server.enqueue(new MockResponse().setResponseCode(200)   // the speed gauge query goes first per batch
+                .setBody("{\"status\":\"success\",\"data\":{\"resultType\":\"vector\",\"result\":[]}}"));
         server.enqueue(new MockResponse().setResponseCode(200)
                 .setBody("{\"status\":\"success\",\"data\":{\"resultType\":\"vector\",\"result\":["
                        + "{\"metric\":{\"resourceId\":\"node[1].interfaceSnmp[eth0]\","
@@ -114,8 +116,11 @@ class PrometheusReadClientTest {
             assertThat(t.getValue()).isEqualTo("uplink");
         });
         assertThat(server.takeRequest().getPath()).startsWith("/api/v1/series?");
+        RecordedRequest speed = server.takeRequest();
+        assertThat(speed.getMethod()).isEqualTo("POST");
+        assertThat(speed.getPath()).isEqualTo("/api/v1/query");
+        assertThat(speed.getBody().readUtf8()).startsWith("query=last_over_time");
         RecordedRequest enrichment = server.takeRequest();
-        assertThat(enrichment.getMethod()).isEqualTo("POST");
         assertThat(enrichment.getPath()).isEqualTo("/api/v1/query");
         assertThat(enrichment.getBody().readUtf8()).startsWith("query=timestamp");
     }

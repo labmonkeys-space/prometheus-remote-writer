@@ -30,6 +30,7 @@ the corresponding source data is available:
 That is the whole label set, and it is bounded: whatever a sample carries, the data series get only these names.
 Everything else about a resource, its string attributes (`ifAlias`, `ifDescr`, `hrStorageDescr`, `name`, …), its surveillance categories and its interface speed, travels as series of its own, joined on `resourceId`; see <<resource-metadata>>.
 The source tags `ifDescr`, `ifSpeed`, `ifHighSpeed` and `categories` are consumed by that path and cannot be surfaced with `labels.include` (a literal entry naming one fails validation).
+The other way round, what is a label here is not repeated as a row there: `nodeLabel`, `foreignSource`, `foreignId` and `location` do not appear on `onms_resource_attr` while their label is emitted (an excluded label makes its key a row again), and `ifName` is the one key that is both.
 
 `labels.include` can still promote any other source tag to a label, `sys_descr`, `sys_object_id`, asset-record fields.
 Do that only for values that do not change: a label is part of the series identity, and an operator editing the value splits every series of the resource.

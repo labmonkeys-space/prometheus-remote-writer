@@ -54,6 +54,14 @@ public final class InfoColumns {
      *         name, is reserved, or repeats
      */
     public static Map<String, String> parse(String spec) {
+        return parse(spec, MetadataRegistry.LABEL_KEYS.keySet());
+    }
+
+    /**
+     * @param rowlessKeys the keys the registry skips as rows (their label is
+     *                    on the data series), which a column cannot read
+     */
+    public static Map<String, String> parse(String spec, Set<String> rowlessKeys) {
         Map<String, String> out = new LinkedHashMap<>();
         if (spec == null || spec.isBlank()) return Collections.emptyMap();   // no columns, no info series
         for (String raw : spec.split(",")) {
@@ -81,6 +89,10 @@ public final class InfoColumns {
             }
             // A key the registry never records would make a column that is
             // always empty, with nothing to say why.
+            String why = MetadataRegistry.whyNotARow(key, rowlessKeys);
+            if (why != null) {
+                throw new IllegalArgumentException("key '" + key + "' is not a resource attribute: " + why);
+            }
             if (!MetadataRegistry.isAttributeKey(key)) {
                 throw new IllegalArgumentException("key '" + key + "' is not a resource attribute "
                         + "(the metric type, categories, the interface speed pair, context keys with ':' "
