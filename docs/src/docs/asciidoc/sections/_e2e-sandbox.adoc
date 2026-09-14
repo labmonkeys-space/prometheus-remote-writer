@@ -17,8 +17,9 @@ Use it to:
 
 [NOTE]
 ====
-The sandbox is **single-core** by design — no Minion, no Sentinel,
+The backend stacks are **single-core** by design — no Minion,
 no ActiveMQ/Kafka, no TLS.
+Sentinel exists only as a non-functional proof of concept under `e2e/sentinel`.
 ====
 
 == Layout
@@ -29,14 +30,19 @@ e2e/
 ├── compose.prometheus.yml         # extends base, adds prometheus + per-backend mounts
 ├── compose.mimir.yml              # extends base, adds mimir + per-backend mounts
 ├── compose.victoriametrics.yml    # extends base, adds vm + per-backend mounts
+├── compose.headers.yml            # the prometheus stack behind an nginx auth gate
+├── authgate/
+│   └── nginx.conf                 # the gate: 403 without all three headers
 ├── opennms/
 │   ├── opennms.properties.d/
-│   │   └── timeseries.properties  # activates TSS integration strategy
+│   │   ├── timeseries.properties  # activates TSS integration strategy
+│   │   └── metatags.properties    # the node, interface and category metatags
 │   ├── requisitions/
 │   │   └── e2e.xml                # the fleet: the snmpd node with two categories
 │   ├── prometheus.cfg             # plugin cfg for the prometheus backend
 │   ├── mimir.cfg                  # plugin cfg for the mimir backend
-│   └── victoriametrics.cfg        # plugin cfg for the vm backend
+│   ├── victoriametrics.cfg        # plugin cfg for the vm backend
+│   └── headers.cfg                # plugin cfg for the headers stack (auth + custom headers)
 ├── grafana/
 │   ├── datasources/               # one file per backend; the matching
 │   │   ├── prometheus.yml         # compose.<backend>.yml mounts it to
@@ -50,8 +56,10 @@ e2e/
 ├── mimir/
 │   └── mimir.yaml                 # single-binary Mimir config
 ├── snmpd/                         # a net-snmp agent: the fleet's one SNMP node
+├── sentinel/                      # Sentinel proof of concept, not functional end-to-end
 └── tools/
-    └── smoke-metadata.sh          # the metadata gates of `make smoke`
+    ├── smoke-metadata.sh          # the metadata gates of `make smoke`
+    └── verify-*                   # CI checks on the compat range, docs attributes and the badge
 ```
 
 Two nodes produce data: OpenNMS monitors itself (`selfmonitor:1`, JMX and PostgreSQL resources), and the `snmpd` container is provisioned by the smoke, or by you, as `e2e:snmpd-1` with the categories `Routers` and `Production`, so there are real interfaces with `ifDescr`, an `ifHighSpeed` and categories on the wire (no `ifAlias`: released net-snmp does not report a Linux interface alias, so that row is absent, as the docs say about an empty value).
@@ -79,7 +87,7 @@ make kar
 == Running
 
 One compose file per backend — nothing else to match up. The base
-services (postgres, core, grafana) are defined once in
+services (postgres, core, grafana, snmpd) are defined once in
 `compose.base.yml`; each backend file `extends:` them and appends the
 backend-specific plugin cfg and Grafana datasource mounts.
 
@@ -120,10 +128,8 @@ Grafana auto-provisions a datasource pointing at whichever backend is
 active (selected by the compose file you brought up). Open
 **Explore → OpenNMS (<backend>)** to run PromQL against the data
 OpenNMS just wrote, or the provisioned **OpenNMS / OpenNMS resource
-metadata** dashboard: a data series legended by the
-`group_left` join on `onms_resource_info`, the attribute rows and
-categories of one resource, and the label-name count (see
-<<resource-metadata>>).
+metadata** dashboard.
+Its panels are the stats Resources with metadata, Attribute rows, Distinct attribute keys and Interface speed, a timeseries legended by the `group_left` join on `onms_resource_info`, and the Attributes and Categories tables of one resource (see <<resource-metadata>>).
 
 [#e2e-smoke]
 == Smoke test (automated)
@@ -133,7 +139,7 @@ convention, CI invokes `make smoke` directly.
 
 [source,bash]
 ----
-make smoke                          # default backends: prometheus, mimir, victoriametrics
+make smoke                          # default backends: prometheus, mimir, victoriametrics, headers
 make smoke BACKENDS=prometheus      # single backend
 make smoke BACKENDS="mimir victoriametrics"
 make smoke-prometheus               # convenience wrapper, equivalent to BACKENDS=prometheus
@@ -149,7 +155,7 @@ teardown.
 
 Between the first samples and the teardown the harness gates on:
 
-* the fleet (`e2e/tools/smoke-metadata.sh`): the `e2e` requisition is imported over REST and the snmpd node's interfaces collected; then `onms_resource_attr` carries `ifDescr=eth0`, `onms_resource_category` carries `Routers` and `Production`, `onms_resource_info` carries `if_descr=eth0` and `onms_resource_ifspeed` is 10,000,000,000 bit/s for it; the documented `group_left` join, the utilisation divisor and the category membership join each return a series, and the `@ end()` idiom evaluates on the backend;
+* the fleet (`e2e/tools/smoke-metadata.sh`): the `e2e` requisition is imported over REST and the snmpd node's interfaces collected; then `onms_resource_attr` carries `ifDescr=eth0` and an `ifName` row (a label too, but the flow reports read the row), no row repeats a data-series label or a category (`nodeLabel`, `foreignSource`, `foreignId`, `location`, `cat_*` must match nothing), `onms_resource_category` carries `Routers` and `Production`, `onms_resource_info` carries `if_descr=eth0` and `onms_resource_ifspeed` equals the agent's live `ifHighSpeed × 1e6`, read from the snmpd container with `snmpget`; the documented `group_left` join, the utilisation divisor and the category membership join each return a series, and the `@ end()` idiom evaluates on the backend;
 * the distinct label-name count, metadata rows included, staying at or under `SMOKE_LABEL_BOUND` (the property of issue #112);
 * the provisioned dashboard: Grafana reports it, and its join panel's query returns frames through Grafana's `/api/ds/query`;
 * `/api/v1/label/resourceId/values` enumerating resources, and the `opennms:prometheus-writer-stats` Karaf command rendering its table.
@@ -183,7 +189,8 @@ on a fresh provisioning), query the backend directly.
 [source,bash]
 ----
 curl 'http://localhost:9090/api/v1/series?match%5B%5D={__name__=~".%2B"}' | jq .
-curl 'http://localhost:9090/api/v1/query?query=up' | jq .
+# no scrape targets in the sandbox, so there is no `up` series; count what the plugin wrote instead
+curl 'http://localhost:9090/api/v1/query?query=count({__name__=~".%2B"})' | jq .
 ----
 
 **Mimir** (requires the `X-Scope-OrgID` header; tenant is `e2e` per the cfg):
@@ -237,8 +244,12 @@ cycles the plugin without restarting the container.
 
 - **Minion / remote pollers** — this is a single-core sandbox.
 - **ActiveMQ / Kafka messaging** — not needed for the local TSS path.
-- **TLS / auth to the backend** — all cleartext on the compose
-  network.
+- **TLS** — all cleartext on the compose network. Auth is exercised by
+  the `headers` stack: `auth.authorization.*` (`Authorization: Token …`)
+  plus two `http.headers.*` entries behind an nginx gate that 403s
+  without all three, still over cleartext.
+- **Sentinel.** `e2e/sentinel` is a non-functional proof of concept
+  (`make sentinel-poc`), not part of the smoke.
 - **Multi-tenant routing** beyond Mimir's default `e2e` tenant.
 - **Dashboards beyond the one example.** Build your own in **Explore**
   or by dropping JSON next to `grafana/dashboards/resource-metadata.json`.

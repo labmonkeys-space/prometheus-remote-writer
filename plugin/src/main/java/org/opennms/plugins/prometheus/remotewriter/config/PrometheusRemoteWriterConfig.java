@@ -244,9 +244,10 @@ public class PrometheusRemoteWriterConfig {
     // --- Wire format ---
     /** Prometheus Remote Write protocol version on the wire. {@code 1}
      *  emits the existing v1 format (no behavior change for existing
-     *  deployments). {@code 2} emits the Prometheus 2.50+ v2 format with
+     *  deployments). {@code 2} emits the Remote Write 2.0 format with
      *  string interning — requires a v2-capable backend (Prometheus
-     *  ≥2.50, Mimir ≥2.10, VictoriaMetrics with v2, Grafana Cloud, or
+     *  ≥2.55 behind its receiver flag, 3.0+ recommended, Mimir ≥2.10,
+     *  VictoriaMetrics with v2, Grafana Cloud, or
      *  equivalent). The overflow tier is wire-version-agnostic, so flipping
      *  this knob with samples pending on disk is safe — the next flush
      *  emits according to the new value. */

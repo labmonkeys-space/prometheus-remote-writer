@@ -15,7 +15,7 @@ the corresponding source data is available:
                                                                    | `"snmp"` for SNMP-collected data, `"jmx"` for slash-FS `jmx-*` / `opennms-jvm` groups, `"opennms"` catch-all for unparseable shapes.
 | `__name__`             | intrinsic `name`                        | Sanitized to Prom's metric-name grammar.
 | `resourceId`           | intrinsic `resourceId`                  | Raw, lossless.
-| `node`                 | derived                                  | `"<foreignSource>:<foreignId>"` when both are set; numeric dbId otherwise.
+| `node`                 | derived                                  | `"<foreignSource>:<foreignId>"` from the tags when both are set; else the node id parsed out of the `resourceId` (a `nodeSource[fs:fid]` or `snmp/fs/<fs>/<fid>/…` shape gives `fs:fid` even without the tags); else a numeric `nodeId` tag.
 | `instance`             | same value as `node`                    | Prom-idiomatic subject-identity label for mixed-backend filtering. Emitted iff `node` is emitted.
 | `node_label`           | external `nodeLabel`                    | Human-readable. Mutable — disable via config if churn is a concern.
 | `foreign_source`       | external                                | Stable.
@@ -214,8 +214,9 @@ PromQL:
 
 [source]
 ----
-# All nodes, either OpenNMS
-up{job="opennms"}
+# The unparseable-resourceId catch-all, counted across both instances
+# (the plugin emits no `up` series)
+count({job="opennms"})
 
 # Per-OpenNMS rollup
 sum by (onms_instance_id) (rate(ifHCInOctets[5m]))
@@ -275,8 +276,9 @@ label emitted, opt out with `labels.exclude = instance`.
 If you want the value under a new name AND you want to drop the
 original, use `labels.rename` — it does both in one directive. A
 `labels.copy` source that doesn't exist at copy time (typo, or a label
-the plugin never emits on this deployment) produces a single startup
-WARN naming the unknown source; it does not block startup.
+the plugin never emits on this deployment) produces a one-shot runtime
+WARN naming the unknown source, when the first sample lacks it; it does
+not block startup.
 
 == Cross-source filtering with `job` and `instance`
 
@@ -320,10 +322,10 @@ plugin instance under the same job, e.g., `job.name = opennms-prod`).
 .The `opennms` catch-all
 ====
 Samples whose `resourceId` isn't recognised by any of the three grammars
-fall through to `job="opennms"` as the default. Samples from distinct
-upstream sources that share the same metric name and land in this
-catch-all *will* collide into a single time series (same `{__name__,
-job="opennms"}` identity, no distinguishing labels). If you see an
+fall through to `job="opennms"` as the default. Such samples get no
+`node`, `instance`, `resource_type` or `resource_instance` label, but they
+still carry the raw `resourceId` label, so distinct resources that share a
+metric name stay distinct series rather than colliding. If you see an
 unexpectedly high proportion of samples with `job="opennms"` in your
 backend, treat it as a signal that the parser is missing a real-world
 resourceId shape — open an issue with the offending string. The
@@ -350,6 +352,7 @@ targets:
 | Exact  | `resource_type`, `resource_instance`                  | Parsed from `resourceId`.
 | Exact  | `if_name`                                             | SNMP interface name.
 | Exact  | `job`, `instance`                                     | Default labels (since 0.2.0).
+| Exact  | `mtype`                                               | Metric type; load-bearing for graph rendering (see <<mtype-roundtrip>>).
 | Exact  | `onms_instance_id`                                    | Multi-instance origin stamp (reserved even when `instance.id` is unset).
 | Prefix | `onms_meta_*`                                         | Default metadata-passthrough prefix.
 |===
@@ -359,8 +362,8 @@ Sources are checked too: a `labels.rename`, `labels.copy` or `labels.exclude` en
 
 Duplicate rename targets (`foo -> cluster, bar -> cluster`) and
 duplicate `from` keys (`a -> cluster, a -> tenant`) are also rejected.
-When multiple rename or copy entries have errors, the plugin reports all
-of them in one startup error so you fix once and restart once.
+When several `labels.rename` entries have errors, the plugin reports them together in one error.
+Rename validation runs before copy validation and throws first, so `labels.copy` errors surface in a second round once the renames are fixed.
 
 [WARNING]
 .`onms_meta_*` reservation covers only the default prefix
@@ -417,9 +420,9 @@ the snake_case names disappear from the wire.
 | `foreignSource` | restored                    | Same value as cortex.
 | `foreignId`     | restored                    | Same value as cortex.
 | `ifName`        | restored                    | Same value as cortex.
-| `ifDescr`       | *not a label*               | On the `onms_resource_attr` rows and in the `if_descr` column of `onms_resource_info`; join with `group_left(if_descr) onms_resource_info`. Kept off the data series on purpose: on several platforms it embeds the configured description or follows a rename, and would split the series (see <<resource-metadata>>).
+| `ifDescr`       | *not a label*               | On the `onms_resource_attr` rows and in the `if_descr` column of `onms_resource_info`; join with `group_left(if_descr) last_over_time(onms_resource_info[30m])`. Kept off the data series on purpose: on several platforms it embeds the configured description or follows a rename, and would split the series (see <<resource-metadata>>).
 | `ifSpeed`, `ifHighSpeed` | *not labels*      | The gauge `onms_resource_ifspeed{resourceId}` in bits per second, a divisor as-is: `rate(ifHCInOctets[5m]) * 8 / on(resourceId) (last_over_time(onms_resource_ifspeed[30m]) > 0)`.
-| `nodeId`        | *not directly recoverable*  | This plugin consumes `nodeId` and emits `node` instead. The closest substitute is `labels.copy = node -> nodeId`, but the *value* differs: this plugin's `node` is `<foreignSource>:<foreignId>` when both are set, falling back to the numeric dbId; cortex's `nodeId` was always the raw numeric dbId. Dashboards that expect a purely numeric value must be updated.
+| `nodeId`        | *recoverable from the rows* | This plugin emits `node` instead, and `nodeId` stays an `onms_resource_attr` row because `node` carries `<foreignSource>:<foreignId>`, not the id. The numeric id is one join away, `group_left(value) last_over_time(onms_resource_attr{key="nodeId"}[30m])`, and the plugin's own read path hands it back. `labels.copy = node -> nodeId` is not a substitute: the *value* differs, since cortex's `nodeId` was always the raw numeric dbId. Dashboards that expect a purely numeric label must move to the join.
 | `categories`    | *not a label*               | One `onms_resource_category{resourceId, category}` row per category; set membership is `* on(resourceId) group_left() last_over_time(onms_resource_category{category="Routers"}[30m])` instead of a regex over a joined string.
 |===
 

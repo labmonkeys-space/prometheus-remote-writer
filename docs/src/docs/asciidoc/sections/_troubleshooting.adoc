@@ -3,12 +3,15 @@
 
 == Plugin won't start
 
-Karaf shell shows the bundle as `Failure` or unresolved.
+The bundle is `Active` but the plugin serves nothing, and `opennms:prometheus-writer-stats` shows no movement.
+A rejected `.cfg` leaves the plugin inert rather than failing the bundle: the Karaf log carries an `ERROR` line starting `prometheus-remote-writer not started`, and the plugin activates on the next save of a corrected file.
+Only a setter-level throw, for example a bad `wire.protocol-version` or `metadata.case` value, fails the Blueprint container and shows the bundle as `Failure`.
+A file that does not carry a `write.url` yet is logged at `WARN` as `not yet configured` instead.
 
 . *Check the Karaf log* — `tail /opt/opennms/data/log/karaf.log` (or
   wherever your distribution writes it). Configuration validators emit
   actionable error messages naming the offending key.
-. *Validators that fail at startup* (refuse to start):
+. *Validators that reject the configuration*:
 +
 [cols="3,3",options="header"]
 |===
@@ -16,7 +19,7 @@ Karaf shell shows the bundle as `Failure` or unresolved.
 
 | `labels.rename target 'X' collides with the default label 'X'`     | Pick a non-reserved target — see <<label-mapping>>.
 | `labels.copy target 'X' collides …`                                | Same as above; rules apply symmetrically to copy.
-| `wire.protocol-version=3 is not a valid value`                     | Set to `1` or `2`.
+| `wire.protocol-version must be '1' or '2', got: 3`                | Set to `1` or `2`. This one throws in the setter and fails the Blueprint container.
 | `auth.basic.*, auth.bearer.token and auth.authorization.* are mutually exclusive` | Each produces the `Authorization` header — configure exactly one block. The message names the two that collided.
 | `auth.authorization.type = '<value>' is not supported`             | You set the scheme to `Basic` (in some casing). Use `auth.basic.username` / `auth.basic.password`; the plugin base64-encodes them.
 | `auth.authorization.credentials is required`                       | The credentials half is mandatory whenever `auth.authorization.*` is used.
@@ -24,9 +27,9 @@ Karaf shell shows the bundle as `Failure` or unresolved.
 | `auth.authorization.type contains whitespace`                      | The key takes only the scheme keyword (`Token`), not the whole header value. Put the rest in `auth.authorization.credentials`.
 | `<key> contains a CR or LF character`                              | An *interior* newline in `auth.authorization.*`, `auth.bearer.token` or `tenant.org-id`. A trailing newline (e.g. from a `$[secret:name]` file) is stripped before validation and is fine — this fires only on one in the middle of the value.
 | `<key> contains a non-printable or non-ASCII byte`                 | Base64-encode a binary credential at the source. Values are never echoed in these messages. `auth.basic.*` is exempt: it is base64-encoded by the plugin, so UTF-8 is legal there.
-| `instance.id contains a control character` / `… exceeds 2048 bytes`| Validation rejects unprintable / oversized values.
+| `instance.id must not contain control characters … got one at offset N` / `instance.id is N UTF-8 bytes; must not exceed 2048` | Validation rejects unprintable / oversized values.
 | `… is not writable: …`                                             | The Karaf user can't write to `overflow.dir`. Check ownership / SELinux / mount options.
-| `Corrupt checkpoint.json: …`                                       | Recover by stopping the plugin and removing `overflow.dir`.
+| `checkpoint.json has unparseable last_sent_at=…` / `checkpoint.json missing field …` | Recover by stopping the plugin and removing `overflow.dir`.
 |===
 
 . *Check OSGi feature resolution* — `feature:list -i | grep prometheus`
@@ -129,7 +132,7 @@ Three usual culprits:
   where an edit forks one small series per resource instead (see
   <<resource-metadata>>).
 . *The metadata series themselves.* `onms_resource_attr` is one series
-  per attribute per resource, about eight per SNMP interface. That is by
+  per attribute per resource, about four to six per SNMP interface. That is by
   design and bounded by `metadata.attr-budget`; a per-metric series
   guardrail such as Mimir's `max_global_series_per_metric` sees it as
   one runaway metric and needs an exemption for that name.
@@ -234,7 +237,7 @@ commercial support yet.
 
 Include with any report:
 
-* Plugin version (`opennms:prometheus-writer-stats` prints it).
+* Plugin version (`bundle:list -s | grep prometheus-remote-writer` shows it; `opennms:prometheus-writer-stats` prints only the metrics table).
 * Backend type and version.
 * Relevant config (with secrets redacted).
 * The 4xx response body if applicable, or a short Karaf log excerpt for

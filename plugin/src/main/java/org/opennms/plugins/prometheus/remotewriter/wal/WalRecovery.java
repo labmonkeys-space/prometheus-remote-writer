@@ -145,12 +145,12 @@ public final class WalRecovery {
             Files.createDirectories(dir);
         }
         if (!Files.isDirectory(dir)) {
-            throw new IOException("wal.path is not a directory: " + dir);
+            throw new IOException("overflow.dir is not a directory: " + dir);
         }
         if (!Files.isWritable(dir)) {
             throw new IOException(
-                "wal.path is not writable: " + dir + " — check filesystem "
-                + "permissions or pick a different wal.path");
+                "overflow.dir is not writable: " + dir + " — check filesystem "
+                + "permissions or pick a different overflow.dir");
         }
     }
 

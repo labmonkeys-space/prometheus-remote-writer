@@ -8,10 +8,10 @@ package org.opennms.plugins.prometheus.remotewriter.mapper;
 
 /**
  * Normalises the SNMP {@code (ifSpeed, ifHighSpeed)} pair into a single
- * bits-per-second value. Mirrors the behaviour of the Prometheus SNMP exporter:
- * {@code ifHighSpeed} is expressed in megabits-per-second and is preferred
- * whenever it carries a non-zero value, because {@code ifSpeed} saturates at
- * 4.29 Gb/s.
+ * bits-per-second value. The exact {@code ifSpeed} is preferred while it is
+ * below the OID's cap of 4,294,967,295; above it, {@code ifHighSpeed}, which is
+ * whole megabits per second, times 1,000,000 is used. That keeps a T1 at
+ * 1,544,000 bit/s rather than the 2,000,000 its {@code ifHighSpeed} would give.
  *
  * <p>Returns {@code null} when neither input is parseable — the caller must
  * then omit the {@code onms_resource_ifspeed} gauge rather than emit a
