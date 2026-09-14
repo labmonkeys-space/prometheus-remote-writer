@@ -7,8 +7,8 @@
 package org.opennms.plugins.prometheus.remotewriter.queue;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.fail;
 import static org.awaitility.Awaitility.await;
+import static org.assertj.core.api.Assertions.fail;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -38,10 +38,15 @@ import org.opennms.plugins.prometheus.remotewriter.wire.RemoteWriteRequestBuilde
  *
  * <p>v0.8.0 drained a bucket only when it was found non-empty at start-up.
  * A spill during operation could leave the shard sending nothing until the
- * process restarted. This pins the requirement end to end: many spills, each
- * drained to empty under a sustained offered rate the flusher can keep up
- * with. The race behind #177 is pinned deterministically in
- * {@link FlusherPipelineAccountingTest}; this test rarely hits it by itself.
+ * process restarted. This pins the requirement end to end, in two steps per
+ * cycle: the bucket is drained while samples keep arriving (the drained
+ * counter advances under an offered rate the flusher can keep up with), and
+ * once the offering stops the bucket ends up empty. The two are proved one
+ * after the other on purpose: under {@code ordered} the new samples land in
+ * the bucket too, so demanding "empty" while still offering is a race against
+ * the offered rate that a loaded machine can lose (#200). The race behind
+ * #177 is pinned deterministically in {@link FlusherPipelineAccountingTest};
+ * this test rarely hits it by itself.
  */
 class OverflowLiveDrainTest {
 
@@ -94,19 +99,18 @@ class OverflowLiveDrainTest {
                     assertThat(shards.accept(sample(ts++))).isNotEqualTo(Shards.Acceptance.REFUSED);
                 }
 
-                // Keep offering at about 1,000 samples/s, well under the
-                // flusher's ceiling, and wait for the bucket to empty. Each
-                // disk batch waits for a checkpoint fsync, so a large batch
-                // keeps the drain comfortably ahead of the offered rate. Under
-                // `ordered` the new samples land in the bucket too, and it is
-                // empty only once the reader catches up between two arrivals,
-                // which is why a drain here can take a few seconds.
+                // First: the bucket drains while samples keep arriving. Offer
+                // at about 1,000 samples/s, well under the flusher's ceiling,
+                // until the drained counter has moved past its pre-spill
+                // value. A flusher that never drains a live spill (#177)
+                // fails here, with the diagnostic; one that parks after a
+                // batch fails in the second step.
                 long writtenAtSpill = written(metrics);
                 long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
-                while (shards.recoveringShards() > 0) {
+                while (drained(metrics) <= drainedBefore) {
                     if (System.nanoTime() > deadline) {
-                        fail("cycle %d under %s: bucket still holds %d sample(s) after 10 s; "
-                                + "written %d since the spill, %d requests in total",
+                        fail("cycle %d under %s: nothing drained from the bucket after 10 s of offering; "
+                                + "bucket holds %d sample(s), written %d since the spill, %d requests in total",
                                 cycle, drain, shards.totalOverflowPending(),
                                 written(metrics) - writtenAtSpill, server.getRequestCount());
                     }
@@ -115,11 +119,32 @@ class OverflowLiveDrainTest {
                     }
                     Thread.sleep(5);
                 }
+
+                // Second: with nothing more arriving, the bucket ends up empty
+                // and every spilled sample has been drained. Under `ordered`
+                // the samples offered above landed in the bucket behind the
+                // backlog, so this is bounded by the backlog at the flusher's
+                // rate, not by a race with new arrivals; the bound only turns
+                // a hang into a failure. Waiting for the drained counter to
+                // catch up with the spilled one, not only for the bucket to
+                // read empty, also means the next cycle's drainedBefore is
+                // read after this cycle's last increment has landed.
                 int thisCycle = cycle;
-                await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
-                        assertThat(drained(metrics)).as("cycle %d: drained from the bucket", thisCycle)
-                                .isGreaterThan(drainedBefore));
-                assertThat(shards.totalOverflowPending()).isZero();
+                await().atMost(Duration.ofSeconds(30)).pollInterval(Duration.ofMillis(5)).untilAsserted(() -> {
+                    assertThat(shards.recoveringShards())
+                            .as("cycle %d under %s: bucket still holds %d sample(s) 30 s after offering stopped; "
+                                + "written %d since the spill, %d requests in total",
+                                thisCycle, drain, shards.totalOverflowPending(),
+                                written(metrics) - writtenAtSpill, server.getRequestCount())
+                            .isZero();
+                    assertThat(drained(metrics))
+                            .as("cycle %d under %s: drained %d of %d spilled", thisCycle, drain,
+                                drained(metrics), shards.totalSamplesSpilled())
+                            .isEqualTo(shards.totalSamplesSpilled());
+                });
+                assertThat(drained(metrics) - drainedBefore)
+                        .as("cycle %d under %s: this cycle's spill was drained in full", thisCycle, drain)
+                        .isEqualTo(shards.totalSamplesSpilled() - spilledBefore);
             }
         } finally {
             shards.stop(1_000);
