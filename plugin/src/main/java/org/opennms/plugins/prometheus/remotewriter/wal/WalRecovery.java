@@ -149,7 +149,7 @@ public final class WalRecovery {
         }
         if (!Files.isWritable(dir)) {
             throw new IOException(
-                "overflow.dir is not writable: " + dir + " — check filesystem "
+                "overflow.dir is not writable: " + dir + ". Check filesystem "
                 + "permissions or pick a different overflow.dir");
         }
     }

@@ -264,7 +264,7 @@ Each shard scans its own subdirectory and replays anything past its
 `checkpoint.json`. A shard whose bucket recovers non-empty starts out
 spilling, so recovered samples ship before anything offered after the
 restart. Recovery tolerates *torn tails* — an incomplete frame at the end of
-the newest segment, typical of a process killed mid-append — by truncating
+the newest segment, typical of a process killed mid-append, by truncating
 to the last good frame and resuming, silently.
 A corrupt frame met later, while a bucket is read for sending, is skipped with a WARN and counted in `wal_frames_dropped_corrupted_total`.
 

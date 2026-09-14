@@ -81,7 +81,7 @@ read.url  = https://mimir.example.com/prometheus
 
 `read.url` is the backend's *Prometheus-compatible root*. The plugin
 appends `/api/v1/series`, `/api/v1/query`, `/api/v1/query_range` and
-`/api/v1/label/resourceId/values` itself — do *not*
+`/api/v1/label/resourceId/values` itself. Do *not*
 include `/api/v1` in the configured value. See
 <<configuration,Configuration reference>> for the full list of knobs and
 backend-specific URL shapes.

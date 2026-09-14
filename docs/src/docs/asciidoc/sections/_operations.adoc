@@ -203,7 +203,7 @@ log4j2.logger.prw.level = INFO
 
 | `INFO`  | Plugin lifecycle (start / stop), config-change diff, the `write path:` line naming the resolved shards, queue, batch, linger and overflow settings, overflow bucket recovery at start (`shard N: recovered ... pending sample(s)`), a bucket draining back to empty (`overflow bucket is empty again`).
 | `WARN`  | 4xx response bodies (truncated), 5xx retries with their backoff, `instance.id` unset on startup, an unknown `labels.copy` source (once, when the first sample lacks it), a corrupt frame skipped while a bucket is read, the `wire.protocol-version=2` startup line, `tls.insecure-skip-verify=true` reminder, a shard starting to spill to disk (`shard N is spilling to disk`), an overflow drain that waited its full bound for the sender (`the overflow drain waited ...`). That last line is expected while a write is retrying against a slow backend. It points at a stuck drain only when `http_writes_successful_total` and the dropped-write counters are all flat. A torn tail truncated at startup recovery is not logged.
-| `DEBUG` | Per-batch flush results. Verbose — use sparingly.
+| `DEBUG` | Per-batch flush results. Verbose; use sparingly.
 |===
 
 == The disk overflow tier

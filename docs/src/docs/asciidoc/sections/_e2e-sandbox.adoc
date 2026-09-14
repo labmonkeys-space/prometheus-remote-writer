@@ -17,7 +17,7 @@ Use it to:
 
 [NOTE]
 ====
-The backend stacks are **single-core** by design — no Minion,
+The backend stacks are **single-core** by design: no Minion,
 no ActiveMQ/Kafka, no TLS.
 Sentinel exists only as a non-functional proof of concept under `e2e/sentinel`.
 ====
@@ -244,7 +244,7 @@ cycles the plugin without restarting the container.
 
 - **Minion / remote pollers** — this is a single-core sandbox.
 - **ActiveMQ / Kafka messaging** — not needed for the local TSS path.
-- **TLS** — all cleartext on the compose network. Auth is exercised by
+- **TLS.** All cleartext on the compose network. Auth is exercised by
   the `headers` stack: `auth.authorization.*` (`Authorization: Token …`)
   plus two `http.headers.*` entries behind an nginx gate that 403s
   without all three, still over cleartext.

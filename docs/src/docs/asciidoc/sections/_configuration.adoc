@@ -11,7 +11,7 @@ Every key hot-reloads: a save rebuilds the plugin's Blueprint container, so the 
 | Key                          | Default | Purpose
 
 | `write.url`                  | _(required)_ | Remote Write v1/v2 ingest URL.
-| `read.url`                   | _(required for read path)_ | Prometheus-compatible HTTP API root. The plugin appends `/api/v1/series`, `/api/v1/query`, `/api/v1/query_range` and `/api/v1/label/resourceId/values` — do not include `/api/v1` here.
+| `read.url`                   | _(required for read path)_ | Prometheus-compatible HTTP API root. The plugin appends `/api/v1/series`, `/api/v1/query`, `/api/v1/query_range` and `/api/v1/label/resourceId/values`. Do not include `/api/v1` here.
 | `instance.id`                | _(unset)_ | Stamps every sample with `onms_instance_id="<value>"`. Required for multi-instance deployments sharing a backend.
 | `job.name`                   | _(unset)_ | Override the per-sample `job` derivation with a fleet-wide constant.
 | `tenant.org-id`              | _(unset)_ | Sets the `X-Scope-OrgID` header. Cortex/Mimir/VictoriaMetrics-cluster/Thanos partition by this.

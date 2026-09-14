@@ -59,7 +59,7 @@ assertion becomes an end-to-end proof of the feature rather than a log-scrape.
 The run pins three things beyond "samples landed", so that a misconfigured
 gate cannot let the check pass vacuously:
 
-- the gate itself — 403 without all three headers, 200 with them;
+- the gate itself: 403 without all three headers, 200 with them;
 - traversal — `write.url` points at the gate, and the gate's access log shows
   an accepted `POST /api/v1/write` carrying all three headers;
 - co-activation — the `HttpHeadersConfig` startup line in `karaf.log`, when
