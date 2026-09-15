@@ -30,7 +30,14 @@ cp -r plugin/target/test-classes/. "$OUT/classes/"
 # 21 bytecode, so the runner needs this one rather than its own.
 cp -r "$JAVA_HOME" "$OUT/jdk"
 
-RUNTIME_CLASSPATH="\$this_dir/classes:\$this_dir/lib/*:\$this_dir"
+# Every jar by name, not lib/*: the JVM expands a wildcard classpath entry
+# but Jazzer's --cp does not, and a target whose dependency is missing only
+# fails once an input reaches the code that needs it.
+lib_cp=""
+for jar in "$OUT"/lib/*.jar; do
+  lib_cp="${lib_cp}\$this_dir/lib/$(basename "$jar"):"
+done
+RUNTIME_CLASSPATH="\$this_dir/classes:${lib_cp}\$this_dir"
 
 for target in FrameFuzzer SanitizerFuzzer WalEntryCodecFuzzer; do
   class="org.opennms.plugins.prometheus.remotewriter.fuzz.$target"
