@@ -7,6 +7,8 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.0.2] — 2026-09-15
+
 ### Fixed
 
 - **Per-metric meta tags are no longer read as resource attributes** (#223). OpenNMS attaches a meta tag per metric whose key is the metric's identity, and the registry counted those as attributes of the resource. A resource's snapshot therefore changed with whichever of its metrics was collected, so every metadata series was re-emitted on every sample whatever `metadata.cadence-ms` said, and the key space grew one key per interface per OID. On an 11,000-node fleet that was 12,631 distinct attribute keys, 9.6 M `onms_resource_attr` series, and about 30,000 metadata samples/s that took `store()` from 0.2 ms to 5 ms and made OpenNMS's ring buffer discard about 25,000 collected samples/s. A key is now read as an attribute only when it is shaped like an OpenNMS collector alias: letters, digits, `_` and `-`, at most 64 characters. Latency `ICMP/<ip>`, `SNMP_<oid>.<ifIndex>` and dotted JMX bean paths reach no series, and the cadence governs re-emission.
@@ -1754,7 +1756,8 @@ Go sanitization rules.
 - Karaf feature `prometheus-remote-writer` shipping a pre-populated
   `etc/org.opennms.plugins.tss.prometheusremotewriter.cfg` on install.
 
-[Unreleased]: https://github.com/labmonkeys-space/prometheus-remote-writer/compare/v1.0.1...HEAD
+[Unreleased]: https://github.com/labmonkeys-space/prometheus-remote-writer/compare/v1.0.2...HEAD
+[1.0.2]: https://github.com/labmonkeys-space/prometheus-remote-writer/compare/v1.0.1...v1.0.2
 [1.0.1]: https://github.com/labmonkeys-space/prometheus-remote-writer/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/labmonkeys-space/prometheus-remote-writer/compare/v0.8.2...v1.0.0
 [0.8.2]: https://github.com/labmonkeys-space/prometheus-remote-writer/compare/v0.8.1...v0.8.2
