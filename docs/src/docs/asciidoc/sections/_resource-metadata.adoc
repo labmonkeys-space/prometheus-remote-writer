@@ -76,7 +76,9 @@ What never becomes a row: a key that is not shaped like an attribute key (letter
 The shape rule is what tells a property of the resource from the identity of one of its metrics.
 OpenNMS names a string attribute with the alias its datacollection gives it, `ifName`, `ifAlias`, `hrStorageDescr`, and names a metric with a path: `ICMP/10.42.0.1` for latency, `SNMP_.1.3.6.1.2.1.2.2.1.20.100` for a collected OID, a dotted bean path for JMX.
 The rule errs towards dropping: an attribute OpenNMS does not name like an attribute costs a graph placeholder, which `metadata.attr-include` restores, while an identity admitted as an attribute costs a series per resource per key.
-If a placeholder stops resolving after an upgrade, look for its key in the rows (`onms_resource_attr{key="…"}`) and admit it by glob.
+If a placeholder stops resolving after an upgrade, the key is no longer a row, so the rows are the one place it will not be found.
+Take the key from the placeholder itself, `${ifAlias}` reads the attribute `ifAlias`, and admit it: `metadata.attr-include = <key>`.
+A key both globs name is dropped, so `metadata.attr-exclude` wins over `metadata.attr-include`.
 
 Nor do `nodeLabel`, `foreignSource`, `foreignId` and `location`, while their label is on the wire: every data series of the resource carries them as `node_label`, `foreign_source`, `foreign_id` and `location`, and no report OpenNMS ships dereferences them as a `{placeholder}`, so a row would say nothing a join cannot get from the data series.
 If `labels.exclude` removes one of those labels, its key is a row again, so the value is never on neither series.
@@ -108,6 +110,8 @@ Each emission is one sample per row, category, column series and speed gauge, ab
 |===
 
 Neither glob reaches past a structural rule: no `metadata.attr-include` can put a credential-shaped key, a context key, or a key with a series of its own on the wire.
+A key both globs name is dropped: `metadata.attr-exclude` wins.
+`metadata.info-columns` is validated against both, so a column may read a key `metadata.attr-include` admits and is refused one `metadata.attr-exclude` drops.
 
 The default column list covers the string attributes OpenNMS's shipped datacollection emits for its standard resource types, one column per key, so enabling host-resources storage or the PostgreSQL collector needs no edit.
 A custom datacollection names its own column.

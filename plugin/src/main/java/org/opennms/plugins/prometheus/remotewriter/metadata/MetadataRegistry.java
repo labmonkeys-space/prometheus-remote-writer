@@ -189,10 +189,19 @@ public final class MetadataRegistry {
         differing.addAll(current.attributes().keySet());
         differing.removeIf(k -> Objects.equals(previous.attributes().get(k),
                                                current.attributes().get(k)));
-        String named = differing.stream().limit(CHURN_LOG_KEYS)
-                .collect(java.util.stream.Collectors.joining(", "));
-        if (differing.size() > CHURN_LOG_KEYS) {
-            named = named + ", and " + (differing.size() - CHURN_LOG_KEYS) + " more";
+        String named;
+        if (differing.isEmpty()) {
+            // The attributes are identical, so what moved was a category or
+            // the speed. Say so rather than printing an empty list.
+            named = previous.categories().equals(current.categories())
+                    ? "none; the interface speed changed"
+                    : "none; the categories changed";
+        } else {
+            named = differing.stream().limit(CHURN_LOG_KEYS)
+                    .collect(java.util.stream.Collectors.joining(", "));
+            if (differing.size() > CHURN_LOG_KEYS) {
+                named = named + ", and " + (differing.size() - CHURN_LOG_KEYS) + " more";
+            }
         }
         LOG.warn("resource {} changed its metadata again before the last change was emitted; "
                 + "attribute keys that differ: [{}]. A key that belongs to one metric rather than "
@@ -318,9 +327,11 @@ public final class MetadataRegistry {
     }
 
     /** Whether a key is barred from being an attribute whatever its shape and
-     *  whatever an operator's globs say: it has a series of its own, it is a
-     *  label, it belongs to the metadata passthrough, or it is
-     *  credential-shaped. */
+     *  whatever an operator's globs say: it has a series of its own, it
+     *  belongs to the metadata passthrough, or it is credential-shaped. The
+     *  keys the data series carry as labels are not barred here; that is
+     *  {@link #rowlessKeys}, which {@link #isRow} applies, because it depends
+     *  on which labels {@code labels.exclude} left on the wire. */
     private static boolean isStructurallyBlocked(String key) {
         if (key == null || key.isEmpty()) return true;
         if (key.indexOf(':') >= 0) return true;
@@ -329,25 +340,34 @@ public final class MetadataRegistry {
         return MetadataProcessor.isPlainKeyDenied(key);
     }
 
-    /** Whether a meta or external tag key can be a resource attribute at all,
-     *  before any operator glob: the structural bars and the shape rule. */
-    static boolean isAttributeKey(String key) {
-        return !isStructurallyBlocked(key) && isIdentifierShaped(key);
-    }
-
     /**
-     * {@link #isAttributeKey} with this registry's globs: exclude drops a key
-     * the shape rule admitted, include admits one it rejected. Neither can
-     * reach past a structural bar, so an operator glob can never put a
-     * credential on the wire, the same invariant the metadata passthrough
-     * states.
+     * Whether a meta or external tag key can be a resource attribute: the
+     * structural bars, the operator's globs, then the shape rule. Exclude is
+     * tested before include, so a key both admit is dropped; the narrower
+     * intent wins, and a key can always be kept out.
+     *
+     * @param includeGlobs {@code metadata.attr-include}, keys to admit
+     *                     although they are not shaped like an attribute key
+     * @param excludeGlobs {@code metadata.attr-exclude}, keys to drop
+     *                     although they are
      */
-    private boolean isAttributeKeyHere(String key) {
+    static boolean isAttributeKey(String key, List<Pattern> includeGlobs, List<Pattern> excludeGlobs) {
         if (key == null || key.isEmpty()) return false;
         if (isStructurallyBlocked(key)) return false;
-        if (matchesAny(key, attrExcludeGlobs)) return false;
-        if (matchesAny(key, attrIncludeGlobs)) return true;
+        if (matchesAny(key, excludeGlobs)) return false;
+        if (matchesAny(key, includeGlobs)) return true;
         return isIdentifierShaped(key);
+    }
+
+    /** {@link #isAttributeKey(String, List, List)} with no operator globs. */
+    static boolean isAttributeKey(String key) {
+        return isAttributeKey(key, List.of(), List.of());
+    }
+
+    /** Compile {@code metadata.attr-include} or {@code metadata.attr-exclude}
+     *  for the two-list overloads here and in {@link InfoColumns}. */
+    public static List<Pattern> compileGlobs(List<String> globs) {
+        return compile(globs);
     }
 
     /** OpenNMS's mirror of a category: {@code cat_<Name>} with the name as value. */
@@ -359,7 +379,8 @@ public final class MetadataRegistry {
 
     /** Whether a tag becomes a row for this registry. */
     private boolean isRow(Tag t) {
-        return isAttributeKeyHere(t.getKey()) && !rowlessKeys.contains(t.getKey()) && !isCategoryMirror(t);
+        return isAttributeKey(t.getKey(), attrIncludeGlobs, attrExcludeGlobs)
+                && !rowlessKeys.contains(t.getKey()) && !isCategoryMirror(t);
     }
 
     /**
@@ -370,11 +391,21 @@ public final class MetadataRegistry {
      * mirror from a custom key is not known at configuration time.
      */
     public static String whyNotARow(String key, Set<String> rowlessKeys) {
+        return whyNotARow(key, rowlessKeys, List.of(), List.of());
+    }
+
+    /** {@link #whyNotARow(String, Set)} judged with the operator's globs, so
+     *  a key {@code metadata.attr-include} admits is a row and one
+     *  {@code metadata.attr-exclude} drops is not. */
+    public static String whyNotARow(String key, Set<String> rowlessKeys,
+                                    List<Pattern> includeGlobs, List<Pattern> excludeGlobs) {
         if (key == null) return null;
         if (rowlessKeys.contains(key)) {
             return "every data series carries it as the label '" + LABEL_KEYS.get(key) + "'";
         }
         if (key.startsWith(CATEGORY_TAG_PREFIX)) return "categories are the onms_resource_category rows";
+        if (matchesAny(key, excludeGlobs)) return "metadata.attr-exclude drops it";
+        if (matchesAny(key, includeGlobs)) return null;
         if (!isIdentifierShaped(key)) {
             return "it is not shaped like an attribute key (letters, digits, '_' and '-', at most "
                     + MAX_ATTRIBUTE_KEY_LENGTH + " characters), so it reads as one metric's identity "

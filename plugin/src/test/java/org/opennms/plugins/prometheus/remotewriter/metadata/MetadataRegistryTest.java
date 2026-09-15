@@ -340,4 +340,20 @@ class MetadataRegistryTest {
                 .contains("not shaped like an attribute key");
         assertThat(MetadataRegistry.whyNotARow("hrStorageDescr", java.util.Set.of())).isNull();
     }
+
+    @Test
+    void exclude_wins_over_include() {
+        // A key both globs name is dropped: the narrower intent wins, and a
+        // key can always be kept out.
+        MetadataRegistry both = new MetadataRegistry(clock::get, MetadataRegistry.LABEL_KEYS.keySet(),
+                List.of("hrStorage*"), List.of("hrStorageD*"));
+        Metric m = ImmutableMetric.builder()
+                .intrinsicTag("name", "x").intrinsicTag("resourceId", RID)
+                .externalTag("hrStorageDescr", "/var")
+                .externalTag("hrStorageSize", "1024")
+                .build();
+        both.observe(RID, m);
+        assertThat(both.dueForEmission(CADENCE).get(0).attributes()).containsOnlyKeys("hrStorageSize");
+    }
+
 }

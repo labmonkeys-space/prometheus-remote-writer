@@ -452,7 +452,8 @@ public class PrometheusRemoteWriterConfig {
             throw new IllegalStateException("metadata.attr-budget must be >= 1 (got " + metadataAttrBudget + ")");
         }
         try {
-            InfoColumns.parse(metadataInfoColumns, metadataRowlessKeys());
+            InfoColumns.parse(metadataInfoColumns, metadataRowlessKeys(),
+                    metadataAttrIncludeGlobs(), metadataAttrExcludeGlobs());
         } catch (IllegalArgumentException e) {
             throw new IllegalStateException("metadata.info-columns: " + e.getMessage(), e);
         }
@@ -1294,7 +1295,10 @@ public class PrometheusRemoteWriterConfig {
     /** {@code metadata.attr-exclude} globs, empty when unset. */
     public List<String> metadataAttrExcludeGlobs() { return parseCsv(metadataAttrExclude); }
     /** The parsed {@code metadata.info-columns}, column → attribute key. */
-    public Map<String, String> metadataInfoColumns() { return InfoColumns.parse(metadataInfoColumns, metadataRowlessKeys()); }
+    public Map<String, String> metadataInfoColumns() {
+        return InfoColumns.parse(metadataInfoColumns, metadataRowlessKeys(),
+                metadataAttrIncludeGlobs(), metadataAttrExcludeGlobs());
+    }
 
     /**
      * The source keys the metadata rows skip because every data series
