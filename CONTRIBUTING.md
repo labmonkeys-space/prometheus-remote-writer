@@ -31,6 +31,25 @@ make kar       # build the KAR
 make smoke     # e2e smoke tests against all backends (Docker compose)
 ```
 
+## Fuzzing
+
+Three targets live in `plugin/src/test/java/.../fuzz/`, on the inputs the plugin does not control: the WAL frame decoder, which reads segments a crash may have torn mid-write; the sanitizer, which turns arbitrary OpenNMS strings into Prometheus label names and values; and the WAL entry codec, which parses whatever a frame whose checksum passed happens to contain.
+
+They are plain classes with a `fuzzerTestOneInput(byte[])` method and no fuzzing dependency, so they compile with the rest of the tests. Two things run them:
+
+- `make test` drives each one over a seed corpus and a deterministic sweep (`FuzzTargetsSeedTest`). This is regression coverage: it is fast, and it runs on every pull request.
+- A nightly workflow builds them with [ClusterFuzzLite](https://google.github.io/clusterfuzzlite/) and mutates inputs looking for new crashes.
+
+When the nightly run finds a crash it uploads the input that caused it. Add those bytes to the seed corpus in `FuzzTargetsSeedTest` and the crash becomes an ordinary failing test, which is where it should be fixed.
+
+To run a fuzzer locally the way CI does, with Docker:
+
+```bash
+docker build -f .clusterfuzzlite/Dockerfile -t prw-fuzz .
+docker run --rm -e FUZZING_LANGUAGE=jvm -e SANITIZER=address -v /tmp/fuzz-out:/out prw-fuzz compile
+docker run --rm -v /tmp/fuzz-out:/out -w /out prw-fuzz ./FrameFuzzer -runs=100000
+```
+
 ## Commits
 
 Use [Conventional Commits](https://www.conventionalcommits.org/): `<type>[scope]: <description>` with types `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`, `chore`, `ci`, `build`, `revert`.
