@@ -7,8 +7,11 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.0.1] — 2026-09-15
+
 ### Fixed
 
+- **An eviction and an acknowledgement no longer fight over the checkpoint** (#215, CodeQL `java/toctou-race-condition`). Under `overflow.full = drop-oldest` the append thread read the checkpoint offset and then advanced it, and the flusher's acknowledgement could advance in between. The loser threw "checkpoint cannot move backwards": a spurious WARN on the eviction side, and on the acknowledgement side an ERROR, a rewind and skipped counters for a batch the backend had taken. The checkpoint now moves only if it is behind, in one step under its own lock, and an acknowledgement that finds it already past treats the batch as covered by the eviction.
 - **Under `overflow.full = drop-oldest`, an eviction no longer races the flusher** (#214, found while fixing #215). The pending-sample count behind `overflow_pending_samples` is updated atomically by appends, evictions and acknowledgements. An eviction and an acknowledgement now decide under one lock which of them takes a frame off the count, so an acknowledged segment that garbage collection had not removed yet, and a batch an eviction overtook in flight, are no longer subtracted twice. A segment the checkpoint sits inside is apportioned by bytes, and the count re-bases to 0 whenever the bucket empties. The reader is read, rewound and closed only on the flusher's threads under one lock. An eviction on the append thread flags it for repositioning instead of closing it under a read in progress, on the refused-append path too. Segment GC and eviction, which delete on different threads, no longer fail with `NoSuchFileException` when the other side removed the segment first.
 - **Evicted segments report their real sample count.** Closing a segment the reader had opened rewrote its index with a sample count of 0, so an eviction of a segment the flusher had already read into counted no samples. `samples_dropped_wal_full_total` and the pending count under-reported by those frames. A read-only segment no longer writes an index.
 
@@ -1742,7 +1745,8 @@ Go sanitization rules.
 - Karaf feature `prometheus-remote-writer` shipping a pre-populated
   `etc/org.opennms.plugins.tss.prometheusremotewriter.cfg` on install.
 
-[Unreleased]: https://github.com/labmonkeys-space/prometheus-remote-writer/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/labmonkeys-space/prometheus-remote-writer/compare/v1.0.1...HEAD
+[1.0.1]: https://github.com/labmonkeys-space/prometheus-remote-writer/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/labmonkeys-space/prometheus-remote-writer/compare/v0.8.2...v1.0.0
 [0.8.2]: https://github.com/labmonkeys-space/prometheus-remote-writer/compare/v0.8.1...v0.8.2
 [0.8.1]: https://github.com/labmonkeys-space/prometheus-remote-writer/compare/v0.8.0...v0.8.1
