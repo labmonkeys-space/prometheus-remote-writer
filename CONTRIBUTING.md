@@ -7,6 +7,17 @@ Thanks for considering a contribution to `prometheus-remote-writer`.
 Work starts from a [GitHub issue](https://github.com/labmonkeys-space/prometheus-remote-writer/issues), not a drive-by pull request.
 Open a bug report or enhancement request first, then reference it from your PR with a closing keyword (`Closes #123`).
 
+## Review and merge rules
+
+`main` is protected. A change reaches it through a pull request, never a direct push, and the pull request must carry:
+
+- **A signed commit.** Unsigned commits are rejected by the ruleset, not by a reviewer.
+- **Green CI.** The build, the workflow linters and the version-declaration check are required status checks, and no one can merge through a red one.
+- **A branch that is up to date with `main`.** If `main` moved while your pull request was open, update the branch (`gh pr update-branch`) and let CI run again.
+- **An approving review from a code owner.** `.github/CODEOWNERS` names the maintainer. A review that predates your last push does not count: pushing again dismisses it, and the new head needs approval of its own.
+
+The maintainer can merge their own changes without a second approval, because the project has one of them and GitHub does not let anyone approve their own pull request. Everything above still applies to those merges, the approval requirement excepted.
+
 ## Building and testing
 
 The build is fronted by a `Makefile` over the Maven Wrapper.
