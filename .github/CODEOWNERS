@@ -1,0 +1,6 @@
+# Every file has an owner, so the code-owner review rule on `main` resolves.
+# One line, because the project has one maintainer; split it when that changes.
+#
+# See CONTRIBUTING.md, "Review and merge rules", for what the rule requires.
+
+* @indigo423
