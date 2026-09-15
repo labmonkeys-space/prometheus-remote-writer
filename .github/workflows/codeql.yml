@@ -7,12 +7,13 @@ on:
       - 'docs/**'
       - '**/*.md'
       - '.github/dependabot.yml'
+  # No paths-ignore here. `CodeQL` is a required status check, and a check
+  # that a path filter can skip is one a pull request can wait for forever:
+  # a documentation-only change never produces it, so it never merges. The
+  # push trigger below still skips, because those commits were analysed as
+  # pull requests first.
   pull_request:
     branches: [main]
-    paths-ignore:
-      - 'docs/**'
-      - '**/*.md'
-      - '.github/dependabot.yml'
   schedule:
     - cron: '17 6 * * 1'
   workflow_dispatch:
