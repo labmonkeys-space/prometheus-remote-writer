@@ -1,0 +1,54 @@
+---
+# Fuzzing, on a schedule rather than per pull request.
+#
+# Per-pull-request regression coverage already exists: the same fuzz targets
+# run against their seed corpus in `make test`, so a crash found once cannot
+# come back unnoticed. What a pull request cannot afford is the ten minutes
+# this takes to build a container and mutate inputs, so the search for new
+# crashes runs nightly instead.
+#
+# The upstream action publishes exactly one tag, `v1`, so the trailing
+# comment cannot carry a full semver the way every other pin here does.
+name: Fuzzing
+
+on:
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+    inputs:
+      fuzz-seconds:
+        description: Total seconds to spend fuzzing, split across the targets
+        required: false
+        default: '600'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fuzzing-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fuzz:
+    name: Fuzz the decoders and the sanitizer
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - name: Build the fuzzers
+        id: build
+        uses: google/clusterfuzzlite/actions/build_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1  # v1
+        with:
+          language: jvm
+
+      - name: Fuzz
+        uses: google/clusterfuzzlite/actions/run_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1  # v1
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          fuzz-seconds: ${{ github.event.inputs.fuzz-seconds || 600 }}
+          mode: batch
+          # A crash is uploaded as a build artifact: the input that caused it
+          # goes into the seed corpus of FuzzTargetsSeedTest, which turns it
+          # into an ordinary failing test.
+          output-sarif: false
