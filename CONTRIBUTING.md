@@ -14,9 +14,9 @@ Open a bug report or enhancement request first, then reference it from your PR w
 - **A signed commit.** Unsigned commits are rejected by the ruleset, not by a reviewer.
 - **Green CI.** The build, the workflow linters and the version-declaration check are required status checks, and no one can merge through a red one.
 - **A branch that is up to date with `main`.** If `main` moved while your pull request was open, update the branch (`gh pr update-branch`) and let CI run again.
-- **An approving review from a code owner.** `.github/CODEOWNERS` names the maintainer. A review that predates your last push does not count: pushing again dismisses it, and the new head needs approval of its own.
+- **Review by the maintainer.** `.github/CODEOWNERS` names them, so opening a pull request requests their review automatically. A review that predates your last push is dismissed when you push again.
 
-The maintainer can merge their own changes without a second approval, because the project has one of them and GitHub does not let anyone approve their own pull request. Everything above still applies to those merges, the approval requirement excepted.
+Approval is requested but not enforced by the ruleset, and that is deliberate. The project has one maintainer, GitHub does not let anyone approve their own pull request, and the only way to merge past a required approval is the administrator override, which bypasses the required status checks as well. Trading "no merge without an approval" for "a merge that can skip CI" makes the repository less safe, not more, so the approval stays a convention until there is a second maintainer to make it a rule.
 
 ## Building and testing
 
