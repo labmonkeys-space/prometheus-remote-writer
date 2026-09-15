@@ -94,6 +94,7 @@ See <<overflow-caller-cost,What an outage costs the writer threads>> for why a s
 | `metadata_series_emitted_total`    | Metadata samples (`onms_resource_attr`, `onms_resource_category`, `onms_resource_info`, `onms_resource_ifspeed`) handed to the pipeline. See <<resource-metadata>>.
 | `metadata_attrs_dropped_total`     | Attributes past `metadata.attr-budget`, per emission. A steadily rising value names a resource type whose attributes outgrow the budget.
 | `metadata_resources`               | Gauge: resources the write path currently remembers metadata for.
+| `metadata_resource_changes_total`  | Observations that found a resource new or changed, so its metadata series go out at once. Near zero in steady state, with a burst at startup. A sustained rate near the sample rate means the cadence does not bind. See <<resource-metadata>>.
 | `find_metrics_enrichment_batches_total` | Metadata queries `findMetrics` issued to restore attributes from the rows and the speed from the gauge, two per `read.discovery-batch-size` resources.
 | `find_metrics_single_pass_total`   | `findMetrics` calls that discovered resources with one `GET /api/v1/series` (the `single-pass` strategy, or a matcher shape that stays on it).
 | `find_metrics_two_phase_total`     | `findMetrics` calls that took the `label-values-first` path: `resourceId` values enumerated first, then batched series queries.
@@ -120,6 +121,7 @@ These are starting points — tune to your deployment's noise floor.
 | Queue full (no-WAL deployments)                         | `rate(samples_dropped_queue_full_total[5m]) > 0`
 | `job="opennms"` cardinality exploded                    | `rate(samples_unparseable_resource_id_total[1h]) > 0` — parser regression or new resourceId shape
 | Attributes silently truncated                           | `rate(metadata_attrs_dropped_total[1h]) > 0`. A resource type carries more attributes than `metadata.attr-budget`; raise the budget or add a column.
+| Metadata re-emitting on every sample                    | `rate(metadata_resource_changes_total[15m]) > metadata_resources / 900`. A resource's metadata depends on which of its metrics was observed, so `metadata.cadence-ms` holds nothing back; the plugin logs the offending keys, which `metadata.attr-exclude` removes.
 | Endpoint persistently unhappy                           | `rate(http_writes_failed_total[5m]) / rate(http_writes_successful_total[5m]) > 0.1`
 | TLS skip-verify left on in production                   | log-based — the plugin emits a WARN every hour
 |===

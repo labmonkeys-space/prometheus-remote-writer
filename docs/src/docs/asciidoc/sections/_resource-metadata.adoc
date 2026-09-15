@@ -16,7 +16,13 @@ The same reasoning removes `ifDescr`: it is stable on Cisco, Juniper and Arista,
 The second problem is the key space.
 Under a label encoding every attribute key becomes a distinct label name, and OpenNMS generates keys that embed per-resource identity (latency `ICMP/<ip>`, JMX mbean paths).
 That grows the backend's global label-name index without limit, which is what the v0.x allowlist existed to contain.
-With the key in a label value instead, an unknown attribute cannot add a label name, so nothing an operator fails to curate can hurt the backend.
+With the key in a label value instead, an unknown attribute cannot add a label name.
+
+That bounds the label-name index, and only that.
+Series count it does not bound, and those identity keys are not attributes of the resource at all: they belong to one metric of it.
+Treating them as attributes made a resource's metadata change with whichever of its metrics was last collected, so every metadata series went out on every sample whatever the cadence said, and the key space grew one key per interface per OID.
+A key is therefore read as a resource attribute only when it is shaped like an OpenNMS collector alias: letters, digits, `_` and `-`, at most 64 characters.
+Anything else is one metric's identity and becomes no series.
 
 == What the plugin emits
 
@@ -65,7 +71,14 @@ onms_resource_ifspeed{resourceId="…"} 1000000000
 
 Every metadata series carries `onms_instance_id` when `instance.id` is set, like the data series, and the metric name prefix of `metric.prefix` is not applied to them.
 
-What never becomes a row: `mtype` (it stays a label), `categories` and the two speed attributes (they have series of their own), context keys with a `:` (those are the <<configuration,metadata passthrough>>), keys matching the built-in credential denylist (`*password*`, `*secret*`, `*token*`, `snmp-community`), and attributes with an empty value, such as an unset `ifAlias`.
+What never becomes a row: a key that is not shaped like an attribute key (letters, digits, `_` and `-`, at most 64 characters), `mtype` (it stays a label), `categories` and the two speed attributes (they have series of their own), context keys with a `:` (those are the <<configuration,metadata passthrough>>), keys matching the built-in credential denylist (`*password*`, `*secret*`, `*token*`, `snmp-community`), and attributes with an empty value, such as an unset `ifAlias`.
+
+The shape rule is what tells a property of the resource from the identity of one of its metrics.
+OpenNMS names a string attribute with the alias its datacollection gives it, `ifName`, `ifAlias`, `hrStorageDescr`, and names a metric with a path: `ICMP/10.42.0.1` for latency, `SNMP_.1.3.6.1.2.1.2.2.1.20.100` for a collected OID, a dotted bean path for JMX.
+The rule errs towards dropping: an attribute OpenNMS does not name like an attribute costs a graph placeholder, which `metadata.attr-include` restores, while an identity admitted as an attribute costs a series per resource per key.
+If a placeholder stops resolving after an upgrade, the key is no longer a row, so the rows are the one place it will not be found.
+Take the key from the placeholder itself, `${ifAlias}` reads the attribute `ifAlias`, and admit it: `metadata.attr-include = <key>`.
+A key both globs name is dropped, so `metadata.attr-exclude` wins over `metadata.attr-include`.
 
 Nor do `nodeLabel`, `foreignSource`, `foreignId` and `location`, while their label is on the wire: every data series of the resource carries them as `node_label`, `foreign_source`, `foreign_id` and `location`, and no report OpenNMS ships dereferences them as a `{placeholder}`, so a row would say nothing a join cannot get from the data series.
 If `labels.exclude` removes one of those labels, its key is a row again, so the value is never on neither series.
@@ -92,7 +105,13 @@ Each emission is one sample per row, category, column series and speed gauge, ab
 | `metadata.cadence-ms` | `900000` (15 min) | How often an unchanged resource's series are re-emitted. New or changed metadata goes out at once. `0` switches the metadata series off; OpenNMS graph placeholders then no longer resolve, since the read path restores attributes from the rows.
 | `metadata.attr-budget` | `16` | Attributes per resource emitted as rows, lowest keys first. An SNMP interface carries about four to six; the budget only bites on JMX beans with dozens of properties.
 | `metadata.info-columns` | `if_alias=ifAlias, if_descr=ifDescr, resource_name=name, hr_storage_descr=hrStorageDescr, dsk_path=dskPath, datname=datname, spcname=spcname` | Comma-separated `column=key` entries: the column is the label name on `onms_resource_info`, the key the OpenNMS attribute it is read from. Empty means no info series.
+| `metadata.attr-include` | empty | Comma-separated globs (`*`, `?`) admitting attribute keys the shape rule rejects, for an OpenNMS that names an attribute unlike an alias.
+| `metadata.attr-exclude` | empty | Comma-separated globs dropping attribute keys the shape rule admits, for a collector whose per-metric keys are alias-shaped and would otherwise re-emit a resource on every sample.
 |===
+
+Neither glob reaches past a structural rule: no `metadata.attr-include` can put a credential-shaped key, a context key, or a key with a series of its own on the wire.
+A key both globs name is dropped: `metadata.attr-exclude` wins.
+`metadata.info-columns` is validated against both, so a column may read a key `metadata.attr-include` admits and is refused one `metadata.attr-exclude` drops.
 
 The default column list covers the string attributes OpenNMS's shipped datacollection emits for its standard resource types, one column per key, so enabling host-resources storage or the PostgreSQL collector needs no edit.
 A custom datacollection names its own column.
@@ -263,7 +282,10 @@ Substitute real figures before committing to limits.
 | `onms_resource_category` | ~ resources × categories | every resource of a node that carries the `categories` tag, interfaces included
 |===
 
-Series count is the number to watch, and `metadata.attr-budget` controls it directly.
+Series count is the number to watch, and two things set it: how many attributes a resource has, which `metadata.attr-budget` caps, and how many resources there are, which OpenNMS decides.
+Count resources, not devices.
+OpenNMS gives one SNMP interface a resource path per collection group, so an interface collected for traffic, packets and errors is three `resourceId` values, and the metadata series are per `resourceId` because that is the join key the data series carry.
+A fleet of 11,000 devices with 144 interfaces each is 1.58 M interfaces and about 4.8 M resources, so one genuine attribute per resource is already 4.8 M rows and, at the default cadence, about 5,300 samples per second.
 Sample rate is about six samples per resource per cadence, and the cadence is tunable against the query idiom: emit every 15 minutes and query with `last_over_time(…[30m])` rather than emitting every 2 minutes to stay inside the default 5-minute lookback.
 
 [cols="2,2,4",options="header"]
@@ -287,5 +309,6 @@ Remote Write v2's symbol table interns strings across a request and is a materia
 | `metadata_series_emitted_total` | Metadata samples handed to the pipeline (rows, categories, info and speed alike).
 | `metadata_attrs_dropped_total` | Attributes past `metadata.attr-budget`, per emission. A steadily rising value names a resource type whose attributes outgrow the budget.
 | `metadata_resources` | Resources the write path currently remembers metadata for.
+| `metadata_resource_changes_total` | Observations that found a resource new or changed. Near zero in steady state, a burst at startup as resources are first seen. A sustained rate near the sample rate means a resource's metadata depends on which of its metrics was observed, so the cadence does not bind and every metadata series is re-emitted per sample; the plugin then logs one WARN every ten minutes naming a resource and the attribute keys that differ, which `metadata.attr-exclude` removes.
 | `find_metrics_enrichment_batches_total` | Metadata queries the read path issued to restore attributes: two per batch, the rows and the speed gauge.
 |===

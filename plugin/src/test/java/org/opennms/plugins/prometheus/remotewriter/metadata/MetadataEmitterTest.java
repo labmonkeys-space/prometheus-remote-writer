@@ -204,6 +204,8 @@ class MetadataEmitterTest {
                 "name", "Eventd Processing Stats"));
         registry.observe("node[1].pgDatabase[opennms]", metric("node[1].pgDatabase[opennms]",
                 "datname", "opennms", "spcname", "pg_default"));
+        // A latency resource carries only the metric's own identity, which
+        // is not a property of the resource and becomes no row (#223).
         registry.observe("node[1].responseTime[10.0.0.1]", metric("node[1].responseTime[10.0.0.1]",
                 "ICMP/10.0.0.1", "latency ICMP/10.0.0.1"));
         emitter(16, null).emitDue();
@@ -214,8 +216,10 @@ class MetadataEmitterTest {
                 Map.of("__name__", "onms_resource_attr", "resourceId", "node[1].hrStorageIndex[3]", "key", "hrStorageAllocationUnits", "value", "4096"),
                 Map.of("__name__", "onms_resource_attr", "resourceId", "node[1].opennms-eventd[0]", "key", "name", "value", "Eventd Processing Stats"),
                 Map.of("__name__", "onms_resource_attr", "resourceId", "node[1].pgDatabase[opennms]", "key", "datname", "value", "opennms"),
-                Map.of("__name__", "onms_resource_attr", "resourceId", "node[1].pgDatabase[opennms]", "key", "spcname", "value", "pg_default"),
-                Map.of("__name__", "onms_resource_attr", "resourceId", "node[1].responseTime[10.0.0.1]", "key", "ICMP/10.0.0.1", "value", "latency ICMP/10.0.0.1"));
+                Map.of("__name__", "onms_resource_attr", "resourceId", "node[1].pgDatabase[opennms]", "key", "spcname", "value", "pg_default"));
+        assertThat(rows)
+                .as("a metric identity is no row, so the latency resource emits nothing")
+                .noneMatch(l -> "node[1].responseTime[10.0.0.1]".equals(l.get("resourceId")));
         // Three label names on every row, whatever the key.
         assertThat(rows).filteredOn(l -> "onms_resource_attr".equals(l.get("__name__")))
                 .isNotEmpty()

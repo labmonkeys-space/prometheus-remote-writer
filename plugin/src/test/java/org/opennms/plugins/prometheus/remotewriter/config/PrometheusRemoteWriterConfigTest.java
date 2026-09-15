@@ -2070,4 +2070,33 @@ class PrometheusRemoteWriterConfigTest {
         c.setReadUrl("https://example.com/prometheus");
         return c;
     }
+
+    @Test
+    void the_attribute_globs_default_to_empty_and_parse_as_a_list() {
+        PrometheusRemoteWriterConfig c = minimal();
+        assertThat(c.metadataAttrIncludeGlobs()).isEmpty();
+        assertThat(c.metadataAttrExcludeGlobs()).isEmpty();
+
+        c.setMetadataAttrInclude("ICMP/*, JMX_*");
+        c.setMetadataAttrExclude(" hrStorage* ");
+        assertThat(c.metadataAttrIncludeGlobs()).containsExactly("ICMP/*", "JMX_*");
+        assertThat(c.metadataAttrExcludeGlobs()).containsExactly("hrStorage*");
+
+        c.setMetadataAttrInclude("   ");
+        assertThat(c.getMetadataAttrInclude()).isNull();
+        assertThat(c.metadataAttrIncludeGlobs()).isEmpty();
+    }
+
+    @Test
+    void the_attribute_globs_are_reported_in_diff() {
+        PrometheusRemoteWriterConfig before = minimal();
+        PrometheusRemoteWriterConfig after  = minimal();
+        after.setMetadataAttrInclude("ICMP/*");
+        after.setMetadataAttrExclude("hrStorage*");
+
+        assertThat(after.diff(before))
+            .anyMatch(l -> l.startsWith("metadata.attr-include: "))
+            .anyMatch(l -> l.startsWith("metadata.attr-exclude: "));
+    }
+
 }

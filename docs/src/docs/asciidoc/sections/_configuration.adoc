@@ -508,6 +508,8 @@ until the line is removed; see <<migration>>.
 
 | `metadata.cadence-ms`        | `900000` | How often an unchanged resource's metadata series are re-emitted (15 min). `0` switches them off, and OpenNMS graph placeholders stop resolving.
 | `metadata.attr-budget`       | `16`    | `onms_resource_attr` rows per resource, lowest keys first; the remainder is counted in `metadata_attrs_dropped_total`.
+| `metadata.attr-include`      | empty   | Globs admitting attribute keys the shape rule rejects. A key is an attribute when it is letters, digits, `_` and `-`, at most 64 characters; anything else reads as one metric's identity. See <<resource-metadata>>.
+| `metadata.attr-exclude`      | empty   | Globs dropping attribute keys the shape rule admits.
 | `metadata.info-columns`      | `if_alias=ifAlias, if_descr=ifDescr, resource_name=name, hr_storage_descr=hrStorageDescr, dsk_path=dskPath, datname=datname, spcname=spcname` | `column=key` entries for the `onms_resource_info` series. Empty means no info series. A key the rows never carry (a data-series label such as `nodeLabel`, a `cat_*` key, `mtype`, the speed pair, a context or denied key) is rejected, naming the reason.
 |===
 

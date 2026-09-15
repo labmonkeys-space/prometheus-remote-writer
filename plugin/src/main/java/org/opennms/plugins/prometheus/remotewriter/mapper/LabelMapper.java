@@ -205,8 +205,12 @@ public final class LabelMapper {
         // is a hash compare on the hot path; the registry allocates only when
         // the metadata is new or changed.
         String rawResourceId = sourceTags.get(IntrinsicTagNames.resourceId);
-        if (registry != null && rawResourceId != null && !rawResourceId.isEmpty()) {
-            registry.observe(rawResourceId, metric);
+        if (registry != null && rawResourceId != null && !rawResourceId.isEmpty()
+                && registry.observe(rawResourceId, metric) && metrics != null) {
+            // New or changed. In steady state this is rare, so the rate says
+            // whether a resource's metadata really is a property of the
+            // resource; see metadata_resource_changes_total.
+            metrics.metadataResourceChanged();
         }
 
         Defaults defaults = buildDefaults(metricName, sourceTags, instanceId, jobName);
@@ -548,7 +552,7 @@ public final class LabelMapper {
      * Compile a glob (wildcards {@code *} and {@code ?}) into a case-sensitive regex.
      * Dots, brackets, and other regex metacharacters are escaped.
      */
-    static Pattern globToPattern(String glob) {
+    public static Pattern globToPattern(String glob) {
         return globToPattern(glob, 0);
     }
 

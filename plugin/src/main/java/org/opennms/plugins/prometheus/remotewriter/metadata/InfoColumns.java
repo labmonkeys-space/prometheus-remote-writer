@@ -62,6 +62,24 @@ public final class InfoColumns {
      *                    on the data series), which a column cannot read
      */
     public static Map<String, String> parse(String spec, Set<String> rowlessKeys) {
+        return parse(spec, rowlessKeys, java.util.List.of(), java.util.List.of());
+    }
+
+    /**
+     * {@link #parse(String, Set)} judged with the operator's attribute globs,
+     * so a column may read a key {@code metadata.attr-include} admits and may
+     * not read one {@code metadata.attr-exclude} drops. Without them the
+     * validation would refuse a configuration the registry accepts, and
+     * accept one whose column can only ever be empty.
+     *
+     * @param attrIncludeGlobs {@code metadata.attr-include} globs
+     * @param attrExcludeGlobs {@code metadata.attr-exclude} globs
+     */
+    public static Map<String, String> parse(String spec, Set<String> rowlessKeys,
+                                            java.util.List<String> attrIncludeGlobs,
+                                            java.util.List<String> attrExcludeGlobs) {
+        java.util.List<java.util.regex.Pattern> include = MetadataRegistry.compileGlobs(attrIncludeGlobs);
+        java.util.List<java.util.regex.Pattern> exclude = MetadataRegistry.compileGlobs(attrExcludeGlobs);
         Map<String, String> out = new LinkedHashMap<>();
         if (spec == null || spec.isBlank()) return Collections.emptyMap();   // no columns, no info series
         for (String raw : spec.split(",")) {
@@ -89,11 +107,11 @@ public final class InfoColumns {
             }
             // A key the registry never records would make a column that is
             // always empty, with nothing to say why.
-            String why = MetadataRegistry.whyNotARow(key, rowlessKeys);
+            String why = MetadataRegistry.whyNotARow(key, rowlessKeys, include, exclude);
             if (why != null) {
                 throw new IllegalArgumentException("key '" + key + "' is not a resource attribute: " + why);
             }
-            if (!MetadataRegistry.isAttributeKey(key)) {
+            if (!MetadataRegistry.isAttributeKey(key, include, exclude)) {
                 throw new IllegalArgumentException("key '" + key + "' is not a resource attribute "
                         + "(the metric type, categories, the interface speed pair, context keys with ':' "
                         + "and secret keys never become attributes)");

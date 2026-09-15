@@ -107,4 +107,20 @@ class InfoColumnsTest {
     void two_columns_may_read_the_same_key() {
         assertThat(InfoColumns.parse("a=ifAlias, b=ifAlias")).hasSize(2);
     }
+
+    @Test
+    void a_column_is_judged_with_the_operator_globs() {
+        java.util.Set<String> rowless = MetadataRegistry.LABEL_KEYS.keySet();
+        // Without the globs the validation contradicts the registry in both
+        // directions: it refuses a key attr-include admits, and accepts one
+        // attr-exclude drops, whose column could only ever be empty.
+        assertThatThrownBy(() -> InfoColumns.parse("dsk_path=disk.path", rowless))
+                .hasMessageContaining("not shaped like an attribute key");
+        assertThat(InfoColumns.parse("dsk_path=disk.path", rowless, java.util.List.of("disk.*"), java.util.List.of()))
+                .containsEntry("dsk_path", "disk.path");
+        assertThatThrownBy(() -> InfoColumns.parse("if_alias=ifAlias", rowless,
+                        java.util.List.of(), java.util.List.of("ifAlias")))
+                .hasMessageContaining("metadata.attr-exclude drops it");
+    }
+
 }

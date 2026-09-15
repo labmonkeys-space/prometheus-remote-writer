@@ -338,7 +338,8 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
             // metadata.cadence-ms = 0 switches the metadata series off: no
             // registry work on the hot path, no emitter thread.
             MetadataRegistry registry = config.getMetadataCadenceMs() > 0
-                    ? new MetadataRegistry(System::currentTimeMillis, config.metadataRowlessKeys()) : null;
+                    ? new MetadataRegistry(System::currentTimeMillis, config.metadataRowlessKeys(),
+                            config.metadataAttrIncludeGlobs(), config.metadataAttrExcludeGlobs()) : null;
             lm = new LabelMapper(config, m, registry);
             wc = new RemoteWriteHttpClient(config, httpHeadersConfig);
             rc = new PrometheusReadClient(config, m, httpHeadersConfig);
@@ -417,8 +418,10 @@ public class PrometheusRemoteWriterStorage implements TimeSeriesStorage {
                 config.getOverflowDrain().name().toLowerCase(java.util.Locale.ROOT),
                 config.getOverflowFull().name().toLowerCase(java.util.Locale.ROOT).replace('_', '-'),
                 storePolicy);
-        LOG.info("metadata: metadata.cadence-ms={}, metadata.attr-budget={}, metadata.info-columns={}",
-                config.getMetadataCadenceMs(), config.getMetadataAttrBudget(), config.getMetadataInfoColumns());
+        LOG.info("metadata: metadata.cadence-ms={}, metadata.attr-budget={}, metadata.info-columns={}, "
+                + "metadata.attr-include={}, metadata.attr-exclude={}",
+                config.getMetadataCadenceMs(), config.getMetadataAttrBudget(), config.getMetadataInfoColumns(),
+                config.metadataAttrIncludeGlobs(), config.metadataAttrExcludeGlobs());
     }
 
     /**
