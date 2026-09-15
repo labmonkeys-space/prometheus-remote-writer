@@ -225,14 +225,119 @@ class MetadataRegistryTest {
 
     @Test
     void attribute_values_are_kept_verbatim() {
+        // The shape rule is about keys. A value keeps its slashes, dots and
+        // spaces, which is what a graph placeholder substitutes.
         Metric m = ImmutableMetric.builder()
                 .intrinsicTag("name", "x").intrinsicTag("resourceId", "r")
-                .externalTag("ICMP/10.0.0.1", "latency ICMP/10.0.0.1")
                 .externalTag("hrStorageDescr", "/var/lib/postgresql")
+                .externalTag("ifAlias", "uplink to core-sw-1 (10.0.0.1/30)")
                 .build();
         registry.observe("r", m);
         Map<String, String> a = registry.dueForEmission(CADENCE).get(0).attributes();
-        assertThat(a).containsEntry("ICMP/10.0.0.1", "latency ICMP/10.0.0.1")
-                     .containsEntry("hrStorageDescr", "/var/lib/postgresql");
+        assertThat(a).containsEntry("hrStorageDescr", "/var/lib/postgresql")
+                     .containsEntry("ifAlias", "uplink to core-sw-1 (10.0.0.1/30)");
+    }
+
+    // -- #223: a metric's identity is not the resource's metadata ----------
+
+    /** One metric of the interface, with the per-metric meta tag OpenNMS
+     *  attaches: the key is the metric's identity, the value a display name. */
+    private static Metric collectedMetric(String name, String identityKey, String identityValue) {
+        return ImmutableMetric.builder()
+                .intrinsicTag("name", name)
+                .intrinsicTag("resourceId", RID)
+                .metaTag("mtype", "counter")
+                .metaTag(identityKey, identityValue)
+                .externalTag("ifName", "eth0")
+                .externalTag("ifAlias", "uplink")
+                .build();
+    }
+
+    @Test
+    void two_metrics_of_one_resource_leave_it_unchanged() {
+        // The regression this change exists for: a resource's metadata must
+        // be a function of the resource, not of which of its metrics was
+        // observed. Otherwise the hash flips per sample, every entry is
+        // dirty, and no cadence can hold anything back (#223).
+        assertThat(registry.observe(RID,
+                collectedMetric("ifHCInOctets", "SNMP_.1.3.6.1.2.1.31.1.1.1.6.100", "HundredGigE0/0/0/1"))).isTrue();
+        assertThat(registry.observe(RID,
+                collectedMetric("ifOutErrors", "SNMP_.1.3.6.1.2.1.2.2.1.20.100", "HundredGigE0/0/0/1")))
+                .as("a second metric of the same resource is not a change")
+                .isFalse();
+
+        registry.markEmitted(registry.dueForEmission(HOUR));
+        clock.addAndGet(5 * 60_000L);
+        registry.observe(RID, collectedMetric("ifHCOutOctets", "SNMP_.1.3.6.1.2.1.31.1.1.1.10.100", "HundredGigE0/0/0/1"));
+        assertThat(registry.dueForEmission(HOUR))
+                .as("nothing is due inside the cadence")
+                .isEmpty();
+    }
+
+    @Test
+    void a_metric_identity_is_no_attribute() {
+        Metric m = ImmutableMetric.builder()
+                .intrinsicTag("name", "icmp")
+                .intrinsicTag("resourceId", RID)
+                .metaTag("ICMP/10.42.0.1", "10.42.0.1")
+                .metaTag("SNMP_.1.3.6.1.2.1.2.2.1.20.100", "HundredGigE0/0/0/1")
+                .metaTag("JMX_OpenNMS.Name.Collectd.ONMSCollectTskQRCap", "Heartbeat.dispatchTime")
+                .metaTag("Minion-RPC/10.42.0.1", "10.42.0.1")
+                .externalTag("ifName", "eth0")
+                .build();
+        registry.observe(RID, m);
+        ResourceMetadata r = registry.dueForEmission(CADENCE).get(0);
+        assertThat(r.attributes())
+                .as("only the alias-shaped key is a resource attribute")
+                .containsOnlyKeys("ifName");
+    }
+
+    @Test
+    void the_shape_rule_is_bounded_by_length() {
+        assertThat(MetadataRegistry.isIdentifierShaped("a".repeat(MetadataRegistry.MAX_ATTRIBUTE_KEY_LENGTH))).isTrue();
+        assertThat(MetadataRegistry.isIdentifierShaped("a".repeat(MetadataRegistry.MAX_ATTRIBUTE_KEY_LENGTH + 1))).isFalse();
+        assertThat(MetadataRegistry.isIdentifierShaped("hrStorageDescr")).isTrue();
+        assertThat(MetadataRegistry.isIdentifierShaped("sys-name_2")).isTrue();
+        assertThat(MetadataRegistry.isIdentifierShaped("ICMP/10.42.0.1")).isFalse();
+        assertThat(MetadataRegistry.isIdentifierShaped("JMX_OpenNMS.Name")).isFalse();
+        assertThat(MetadataRegistry.isIdentifierShaped("")).isFalse();
+    }
+
+    @Test
+    void the_globs_correct_the_rule_in_either_direction() {
+        MetadataRegistry globbed = new MetadataRegistry(clock::get, MetadataRegistry.LABEL_KEYS.keySet(),
+                List.of("ICMP/*"), List.of("ifDescr", "hrStorage*"));
+        Metric m = ImmutableMetric.builder()
+                .intrinsicTag("name", "icmp")
+                .intrinsicTag("resourceId", RID)
+                .metaTag("ICMP/10.42.0.1", "10.42.0.1")
+                .metaTag("SNMP_.1.3.6.1.2.1.2.2.1.20.100", "HundredGigE0/0/0/1")
+                .externalTag("ifName", "eth0")
+                .externalTag("ifDescr", "GigabitEthernet0/0")
+                .externalTag("hrStorageDescr", "/var")
+                .build();
+        globbed.observe(RID, m);
+        ResourceMetadata r = globbed.dueForEmission(CADENCE).get(0);
+        assertThat(r.attributes()).containsOnlyKeys("ICMP/10.42.0.1", "ifName");
+    }
+
+    @Test
+    void no_glob_reaches_past_a_structural_bar() {
+        // A credential, a key with a series of its own, a context key and a
+        // label the data series carry: an include cannot put any of them on
+        // the wire.
+        MetadataRegistry globbed = new MetadataRegistry(clock::get, MetadataRegistry.LABEL_KEYS.keySet(),
+                List.of("*"), List.of());
+        globbed.observe(RID, interfaceMetric("uplink"));
+        ResourceMetadata r = globbed.dueForEmission(CADENCE).get(0);
+        assertThat(r.attributes()).containsOnlyKeys("ifAlias", "ifDescr", "ifName");
+        assertThat(r.categories()).containsExactly("ProductionSites", "Routers");
+    }
+
+    @Test
+    void why_not_a_row_names_the_shape() {
+        assertThat(MetadataRegistry.whyNotARow("ICMP/10.42.0.1", java.util.Set.of()))
+                .contains("not shaped like an attribute key");
+        assertThat(MetadataRegistry.whyNotARow("hrStorageDescr", java.util.Set.of())).isNull();
     }
 }

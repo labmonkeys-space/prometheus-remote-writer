@@ -7,6 +7,15 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Per-metric meta tags are no longer read as resource attributes** (#223). OpenNMS attaches a meta tag per metric whose key is the metric's identity, and the registry counted those as attributes of the resource. A resource's snapshot therefore changed with whichever of its metrics was collected, so every metadata series was re-emitted on every sample whatever `metadata.cadence-ms` said, and the key space grew one key per interface per OID. On an 11,000-node fleet that was 12,631 distinct attribute keys, 9.6 M `onms_resource_attr` series, and about 30,000 metadata samples/s that took `store()` from 0.2 ms to 5 ms and made OpenNMS's ring buffer discard about 25,000 collected samples/s. A key is now read as an attribute only when it is shaped like an OpenNMS collector alias: letters, digits, `_` and `-`, at most 64 characters. Latency `ICMP/<ip>`, `SNMP_<oid>.<ifIndex>` and dotted JMX bean paths reach no series, and the cadence governs re-emission.
+
+### Added
+
+- **`metadata.attr-include` and `metadata.attr-exclude`** (#223), comma-separated globs that admit attribute keys the shape rule rejects and drop keys it admits. Neither can put a credential-shaped key, a context key, or a key with a series of its own on the wire. Both are empty by default.
+- **`metadata_resource_changes_total`** (#223), the observations that found a resource new or changed. Near zero in steady state; a rate near the sample rate means the cadence is not binding. A resource that changes again before its previous change was emitted is named in a WARN once every ten minutes, with the attribute keys that differ.
+
 ## [1.0.1] — 2026-09-15
 
 ### Fixed

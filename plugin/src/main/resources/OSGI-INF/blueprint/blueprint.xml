@@ -84,6 +84,8 @@
             <cm:property name="metadata.cadence-ms"     value="900000"/>
             <cm:property name="metadata.attr-budget"    value="16"/>
             <cm:property name="metadata.info-columns"   value="if_alias=ifAlias, if_descr=ifDescr, resource_name=name, hr_storage_descr=hrStorageDescr, dsk_path=dskPath, datname=datname, spcname=spcname"/>
+            <cm:property name="metadata.attr-include"   value=""/>
+            <cm:property name="metadata.attr-exclude"   value=""/>
             <cm:property name="overflow.fsync"          value="batch"/>
         </cm:default-properties>
     </cm:property-placeholder>
@@ -147,6 +149,8 @@
         <property name="metadataCadenceMs"       value="${metadata.cadence-ms}"/>
         <property name="metadataAttrBudget"      value="${metadata.attr-budget}"/>
         <property name="metadataInfoColumns"     value="${metadata.info-columns}"/>
+        <property name="metadataAttrInclude"     value="${metadata.attr-include}"/>
+        <property name="metadataAttrExclude"     value="${metadata.attr-exclude}"/>
     </bean>
 
     <!--

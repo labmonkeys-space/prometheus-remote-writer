@@ -1204,4 +1204,27 @@ class LabelMapperTest {
         c.setReadUrl("https://example.com/prometheus");
         return c;
     }
+
+    @Test
+    void a_new_or_changed_resource_is_counted_but_an_unchanged_one_is_not() {
+        // metadata_resource_changes_total is the rate that says whether a
+        // resource's metadata is a property of the resource: near zero in
+        // steady state, near the sample rate when it flaps (#223).
+        PluginMetrics metrics = new PluginMetrics();
+        org.opennms.plugins.prometheus.remotewriter.metadata.MetadataRegistry registry =
+                new org.opennms.plugins.prometheus.remotewriter.metadata.MetadataRegistry();
+        LabelMapper mapper = new LabelMapper(defaultConfig(), metrics, registry);
+        ImmutableMetric.MetricBuilder m = ImmutableMetric.builder()
+                .intrinsicTag(IntrinsicTagNames.name, "ifHCInOctets")
+                .intrinsicTag(IntrinsicTagNames.resourceId, "nodeSource[NOC:r].interfaceSnmp[eth0]")
+                .externalTag("ifAlias", "uplink");
+
+        mapper.map(sample(m));
+        assertThat(metrics.metadataResourceChangesTotal()).isEqualTo(1);
+        mapper.map(sample(m));
+        assertThat(metrics.metadataResourceChangesTotal())
+                .as("the same metadata again is not a change")
+                .isEqualTo(1);
+    }
+
 }

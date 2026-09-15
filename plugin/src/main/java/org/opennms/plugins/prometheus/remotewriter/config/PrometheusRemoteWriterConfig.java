@@ -299,6 +299,14 @@ public class PrometheusRemoteWriterConfig {
     /** {@code metadata.info-columns}: {@code column=key} entries for the
      *  onms_resource_info series. See {@link InfoColumns}. */
     private String metadataInfoColumns = InfoColumns.DEFAULT_SPEC;
+    /** {@code metadata.attr-include}: globs admitting attribute keys the
+     *  shape rule rejects, for an OpenNMS that names an attribute unlike an
+     *  alias. See {@link MetadataRegistry#isIdentifierShaped}. */
+    private String metadataAttrInclude;
+    /** {@code metadata.attr-exclude}: globs dropping attribute keys the shape
+     *  rule admits, for a collector whose per-metric keys are alias-shaped
+     *  and would otherwise re-emit a resource on every sample. */
+    private String metadataAttrExclude;
 
     /** Fsync policy for bucket segments: {@code always} (fsync every
      *  append; tightest RPO, lowest throughput), {@code batch} (fsync at
@@ -970,6 +978,8 @@ public class PrometheusRemoteWriterConfig {
         diffLong(out, "metadata.cadence-ms",      other.metadataCadenceMs,     metadataCadenceMs);
         diffLong(out, "metadata.attr-budget",     other.metadataAttrBudget,    metadataAttrBudget);
         diffStr(out, "metadata.info-columns",     other.metadataInfoColumns,   metadataInfoColumns);
+        diffStr(out, "metadata.attr-include",     other.metadataAttrInclude,   metadataAttrInclude);
+        diffStr(out, "metadata.attr-exclude",     other.metadataAttrExclude,   metadataAttrExclude);
         diffInt(out, "retry.max-attempts",        other.retryMaxAttempts,      retryMaxAttempts);
         diffLong(out, "retry.initial-backoff-ms", other.retryInitialBackoffMs, retryInitialBackoffMs);
         diffLong(out, "retry.max-backoff-ms",     other.retryMaxBackoffMs,     retryMaxBackoffMs);
@@ -1075,6 +1085,8 @@ public class PrometheusRemoteWriterConfig {
     public void setMetadataEnabled(boolean v)      { metadataEnabled = v; }
     public void setMetadataInclude(String v)       { metadataInclude = blankToNull(v); }
     public void setMetadataExclude(String v)       { metadataExclude = blankToNull(v); }
+    public void setMetadataAttrInclude(String v)   { metadataAttrInclude = blankToNull(v); }
+    public void setMetadataAttrExclude(String v)   { metadataAttrExclude = blankToNull(v); }
     public void setMetadataLabelPrefix(String v) {
         String trimmed = blankToNull(v);
         if (trimmed == null) {
@@ -1275,6 +1287,12 @@ public class PrometheusRemoteWriterConfig {
     public long    getMetadataCadenceMs()     { return metadataCadenceMs; }
     public int     getMetadataAttrBudget()    { return metadataAttrBudget; }
     public String  getMetadataInfoColumns()   { return metadataInfoColumns; }
+    public String  getMetadataAttrInclude()   { return metadataAttrInclude; }
+    public String  getMetadataAttrExclude()   { return metadataAttrExclude; }
+    /** {@code metadata.attr-include} globs, empty when unset. */
+    public List<String> metadataAttrIncludeGlobs() { return parseCsv(metadataAttrInclude); }
+    /** {@code metadata.attr-exclude} globs, empty when unset. */
+    public List<String> metadataAttrExcludeGlobs() { return parseCsv(metadataAttrExclude); }
     /** The parsed {@code metadata.info-columns}, column → attribute key. */
     public Map<String, String> metadataInfoColumns() { return InfoColumns.parse(metadataInfoColumns, metadataRowlessKeys()); }
 

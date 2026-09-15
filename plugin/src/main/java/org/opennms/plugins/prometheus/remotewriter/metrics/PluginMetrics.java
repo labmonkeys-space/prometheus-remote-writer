@@ -39,6 +39,11 @@ public final class PluginMetrics {
     public static final String METADATA_ATTRS_DROPPED         = "metadata_attrs_dropped_total";
     /** Resources currently in the metadata registry (gauge). */
     public static final String METADATA_RESOURCES             = "metadata_resources";
+    /** Observations that found a resource new or changed. Near zero in steady
+     *  state; a rate approaching the sample rate means a resource's metadata
+     *  depends on which of its metrics was observed, so the cadence does not
+     *  bind and every metadata series is re-emitted per sample. */
+    public static final String METADATA_RESOURCE_CHANGES      = "metadata_resource_changes_total";
     public static final String SAMPLES_DROPPED_5XX             = "samples_dropped_5xx_total";
     public static final String SAMPLES_DROPPED_TRANSPORT       = "samples_dropped_transport_total";
     public static final String SAMPLES_DROPPED_QUEUE_FULL      = "samples_dropped_queue_full_total";
@@ -146,6 +151,7 @@ public final class PluginMetrics {
     private final Counter samplesUnconfirmedByReceiver;
     private final Counter metadataSeriesEmitted;
     private final Counter metadataAttrsDropped;
+    private final Counter metadataResourceChanges;
     private final Counter samplesDropped5xx;
     private final Counter samplesDroppedTransport;
     private final Counter samplesDroppedNonfinite;
@@ -187,6 +193,7 @@ public final class PluginMetrics {
         this.samplesUnconfirmedByReceiver = registry.counter(SAMPLES_UNCONFIRMED_BY_RECEIVER);
         this.metadataSeriesEmitted        = registry.counter(METADATA_SERIES_EMITTED);
         this.metadataAttrsDropped         = registry.counter(METADATA_ATTRS_DROPPED);
+        this.metadataResourceChanges      = registry.counter(METADATA_RESOURCE_CHANGES);
         this.samplesDropped5xx            = registry.counter(SAMPLES_DROPPED_5XX);
         this.samplesDroppedTransport      = registry.counter(SAMPLES_DROPPED_TRANSPORT);
         this.samplesDroppedNonfinite      = registry.counter(SAMPLES_DROPPED_NONFINITE);
@@ -225,6 +232,8 @@ public final class PluginMetrics {
     public long samplesUnconfirmedByReceiverTotal()    { return samplesUnconfirmedByReceiver.getCount(); }
     public void metadataSeriesEmitted(long n)          { if (n > 0) metadataSeriesEmitted.inc(n); }
     public void metadataAttrsDropped(long n)           { if (n > 0) metadataAttrsDropped.inc(n); }
+    public void metadataResourceChanged()              { metadataResourceChanges.inc(); }
+    public long metadataResourceChangesTotal()         { return metadataResourceChanges.getCount(); }
     public void samplesDropped5xx(long n)              { if (n > 0) samplesDropped5xx.inc(n); }
     public void samplesDroppedTransport(long n)        { if (n > 0) samplesDroppedTransport.inc(n); }
     public void samplesDroppedNonfinite(long n)        { if (n > 0) samplesDroppedNonfinite.inc(n); }

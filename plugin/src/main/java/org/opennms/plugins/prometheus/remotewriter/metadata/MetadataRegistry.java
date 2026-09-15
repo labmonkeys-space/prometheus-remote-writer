@@ -15,13 +15,19 @@ import java.util.Set;
 import java.util.TreeMap;
 import java.util.TreeSet;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.LongSupplier;
+import java.util.regex.Pattern;
 
 import org.opennms.integration.api.v1.timeseries.MetaTagNames;
 import org.opennms.integration.api.v1.timeseries.Metric;
 import org.opennms.integration.api.v1.timeseries.Tag;
 import org.opennms.plugins.prometheus.remotewriter.mapper.IfSpeedNormalizer;
+import org.opennms.plugins.prometheus.remotewriter.mapper.LabelMapper;
 import org.opennms.plugins.prometheus.remotewriter.mapper.MetadataProcessor;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * One entry per OpenNMS resource the write path has seen, holding what its
@@ -35,7 +41,8 @@ import org.opennms.plugins.prometheus.remotewriter.mapper.MetadataProcessor;
  * hide one change until the next one, which is a risk taken deliberately
  * against comparing maps on the hot path.
  *
- * <p>What counts as an attribute: every meta or external tag except the
+ * <p>What counts as an attribute: a meta or external tag whose key is shaped
+ * like an OpenNMS collector alias ({@link #isIdentifierShaped}), except the
  * intrinsics (not walked), {@code mtype}, {@code categories} (rows of its
  * own), {@code ifSpeed} and {@code ifHighSpeed} (a gauge of their own),
  * the keys the data series carry as labels ({@link #LABEL_KEYS}, while the
@@ -45,6 +52,14 @@ import org.opennms.plugins.prometheus.remotewriter.mapper.MetadataProcessor;
  * denylist; a tag with an empty value is no attribute either. Keys keep
  * their OpenNMS spelling, because a row is a fact about OpenNMS and a graph
  * placeholder is named after it.
+ *
+ * <p>The shape rule is what keeps a resource's metadata a property of the
+ * resource. OpenNMS attaches per-metric meta tags whose key is the metric's
+ * identity, and treating those as attributes made the snapshot change with
+ * whichever metric was observed: the hash flapped, so the cadence never
+ * bound, and the key space grew without limit (#223). {@code metadata
+ * .attr-exclude} and {@code metadata.attr-include} let an operator correct
+ * the rule in either direction without a release.
  */
 public final class MetadataRegistry {
 
@@ -57,20 +72,44 @@ public final class MetadataRegistry {
         volatile boolean dirty = true;
     }
 
+    private static final Logger LOG = LoggerFactory.getLogger(MetadataRegistry.class);
+
+    /** At most one churn WARN in this span, however many resources flap. */
+    static final long CHURN_LOG_INTERVAL_MS = TimeUnit.MINUTES.toMillis(10);
+    /** Keys named in one churn WARN before it says "and more". */
+    private static final int CHURN_LOG_KEYS = 8;
+
     private final ConcurrentHashMap<String, Entry> entries = new ConcurrentHashMap<>();
     private final LongSupplier clockMillis;
     /** The {@link #LABEL_KEYS} whose label is on the wire, so no row is needed. */
     private final Set<String> rowlessKeys;
+    /** {@code metadata.attr-exclude}: keys the shape rule admitted, dropped. */
+    private final List<Pattern> attrExcludeGlobs;
+    /** {@code metadata.attr-include}: keys the shape rule rejected, admitted. */
+    private final List<Pattern> attrIncludeGlobs;
+    /** {@link Long#MIN_VALUE} until the first churn WARN. */
+    private final AtomicLong lastChurnLogMs = new AtomicLong(Long.MIN_VALUE);
 
     /**
      * @param rowlessKeys the source keys to skip as rows because their label
      *                    is emitted: {@link #LABEL_KEYS} minus what
      *                    {@code labels.exclude} removes, see
      *                    {@code PrometheusRemoteWriterConfig#metadataRowlessKeys()}
+     * @param attrIncludeGlobs {@code metadata.attr-include}, keys to admit
+     *                    although they are not shaped like an attribute key
+     * @param attrExcludeGlobs {@code metadata.attr-exclude}, keys to drop
+     *                    although they are
      */
-    public MetadataRegistry(LongSupplier clockMillis, Set<String> rowlessKeys) {
+    public MetadataRegistry(LongSupplier clockMillis, Set<String> rowlessKeys,
+                            List<String> attrIncludeGlobs, List<String> attrExcludeGlobs) {
         this.clockMillis = Objects.requireNonNull(clockMillis, "clockMillis");
         this.rowlessKeys = Set.copyOf(Objects.requireNonNull(rowlessKeys, "rowlessKeys"));
+        this.attrIncludeGlobs = compile(attrIncludeGlobs);
+        this.attrExcludeGlobs = compile(attrExcludeGlobs);
+    }
+
+    public MetadataRegistry(LongSupplier clockMillis, Set<String> rowlessKeys) {
+        this(clockMillis, rowlessKeys, List.of(), List.of());
     }
 
     public MetadataRegistry(LongSupplier clockMillis) {
@@ -79,6 +118,21 @@ public final class MetadataRegistry {
 
     public MetadataRegistry() {
         this(System::currentTimeMillis);
+    }
+
+    private static List<Pattern> compile(List<String> globs) {
+        Objects.requireNonNull(globs, "globs");
+        if (globs.isEmpty()) return List.of();
+        List<Pattern> out = new ArrayList<>(globs.size());
+        for (String g : globs) out.add(LabelMapper.globToPattern(g));
+        return List.copyOf(out);
+    }
+
+    private static boolean matchesAny(String s, List<Pattern> patterns) {
+        for (Pattern p : patterns) {
+            if (p.matcher(s).matches()) return true;
+        }
+        return false;
     }
 
     /**
@@ -98,6 +152,12 @@ public final class MetadataRegistry {
             return false;
         }
         ResourceMetadata snapshot = snapshotOf(resourceId, metric);
+        // Changed again before the last change was even emitted: this
+        // resource is flapping, which costs a series set per observation and
+        // makes the cadence meaningless. Read before the compute, so the
+        // pair described is the one this call replaces.
+        boolean churning = e != null && e.dirty && e.snapshot != null;
+        ResourceMetadata previous = churning ? e.snapshot : null;
         entries.compute(resourceId, (k, old) -> {
             Entry entry = old == null ? new Entry() : old;
             if (entry.hash != hash || entry.snapshot == null) {
@@ -108,7 +168,39 @@ public final class MetadataRegistry {
             entry.lastSeenMs = now;
             return entry;
         });
+        if (previous != null) reportChurn(resourceId, previous, snapshot, now);
         return true;
+    }
+
+    /**
+     * One WARN per {@link #CHURN_LOG_INTERVAL_MS}, naming a resource whose
+     * metadata changed again before the previous change was emitted and the
+     * keys that differ. The counter {@code metadata_resource_changes_total}
+     * says how much of this there is; this line says which keys to look at,
+     * which is the difference between reading a graph and reading a profile.
+     * The key sets are compared only when the line is due.
+     */
+    private void reportChurn(String resourceId, ResourceMetadata previous,
+                             ResourceMetadata current, long now) {
+        long last = lastChurnLogMs.get();
+        if (last != Long.MIN_VALUE && now - last < CHURN_LOG_INTERVAL_MS) return;
+        if (!lastChurnLogMs.compareAndSet(last, now)) return;
+        TreeSet<String> differing = new TreeSet<>(previous.attributes().keySet());
+        differing.addAll(current.attributes().keySet());
+        differing.removeIf(k -> Objects.equals(previous.attributes().get(k),
+                                               current.attributes().get(k)));
+        String named = differing.stream().limit(CHURN_LOG_KEYS)
+                .collect(java.util.stream.Collectors.joining(", "));
+        if (differing.size() > CHURN_LOG_KEYS) {
+            named = named + ", and " + (differing.size() - CHURN_LOG_KEYS) + " more";
+        }
+        LOG.warn("resource {} changed its metadata again before the last change was emitted; "
+                + "attribute keys that differ: [{}]. A key that belongs to one metric rather than "
+                + "to the resource makes every metadata series of the resource be re-emitted on "
+                + "every sample: exclude it with metadata.attr-exclude. "
+                + "metadata_resource_changes_total counts these; this warning is logged at most "
+                + "once every {} minutes.",
+                resourceId, named, TimeUnit.MILLISECONDS.toMinutes(CHURN_LOG_INTERVAL_MS));
     }
 
     /**
@@ -188,13 +280,74 @@ public final class MetadataRegistry {
      *  {@code categories}; the category rows are their wire form. */
     static final String CATEGORY_TAG_PREFIX = "cat_";
 
-    /** Whether a meta or external tag key can be a resource attribute at all. */
+    /** Longest key still read as an attribute; every OpenNMS collector alias
+     *  is far shorter, the RRD data-source grammar they inherit having capped
+     *  them at 19 characters. */
+    static final int MAX_ATTRIBUTE_KEY_LENGTH = 64;
+
+    /**
+     * Whether a key is shaped like an OpenNMS collector alias: letters,
+     * digits, {@code _} and {@code -}, at most
+     * {@link #MAX_ATTRIBUTE_KEY_LENGTH} characters.
+     *
+     * <p>This is what tells a resource's attribute from one metric's
+     * identity. OpenNMS names a string attribute with the alias its
+     * datacollection gives it ({@code ifName}, {@code ifAlias},
+     * {@code hrStorageDescr}), and names a metric with a path:
+     * {@code ICMP/10.42.0.1} for latency, {@code SNMP_<oid>.<ifIndex>} for a
+     * collected OID, a dotted mbean path for JMX. A path is a property of
+     * one metric of the resource, so a snapshot built from it changes with
+     * whichever metric was observed.
+     *
+     * <p>The rule fails closed: an attribute OpenNMS does not name like an
+     * attribute is dropped, which costs a graph placeholder and is
+     * correctable with {@code metadata.attr-include}, rather than admitted,
+     * which costs the backend a series per resource per key. A character
+     * loop, not a regular expression: this runs per tag per sample.
+     */
+    static boolean isIdentifierShaped(String key) {
+        int n = key.length();
+        if (n == 0 || n > MAX_ATTRIBUTE_KEY_LENGTH) return false;
+        for (int i = 0; i < n; i++) {
+            char c = key.charAt(i);
+            boolean ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+                      || (c >= '0' && c <= '9') || c == '_' || c == '-';
+            if (!ok) return false;
+        }
+        return true;
+    }
+
+    /** Whether a key is barred from being an attribute whatever its shape and
+     *  whatever an operator's globs say: it has a series of its own, it is a
+     *  label, it belongs to the metadata passthrough, or it is
+     *  credential-shaped. */
+    private static boolean isStructurallyBlocked(String key) {
+        if (key == null || key.isEmpty()) return true;
+        if (key.indexOf(':') >= 0) return true;
+        if (MetaTagNames.mtype.equals(key)) return true;
+        if ("categories".equals(key) || "ifSpeed".equals(key) || "ifHighSpeed".equals(key)) return true;
+        return MetadataProcessor.isPlainKeyDenied(key);
+    }
+
+    /** Whether a meta or external tag key can be a resource attribute at all,
+     *  before any operator glob: the structural bars and the shape rule. */
     static boolean isAttributeKey(String key) {
+        return !isStructurallyBlocked(key) && isIdentifierShaped(key);
+    }
+
+    /**
+     * {@link #isAttributeKey} with this registry's globs: exclude drops a key
+     * the shape rule admitted, include admits one it rejected. Neither can
+     * reach past a structural bar, so an operator glob can never put a
+     * credential on the wire, the same invariant the metadata passthrough
+     * states.
+     */
+    private boolean isAttributeKeyHere(String key) {
         if (key == null || key.isEmpty()) return false;
-        if (key.indexOf(':') >= 0) return false;
-        if (MetaTagNames.mtype.equals(key)) return false;
-        if ("categories".equals(key) || "ifSpeed".equals(key) || "ifHighSpeed".equals(key)) return false;
-        return !MetadataProcessor.isPlainKeyDenied(key);
+        if (isStructurallyBlocked(key)) return false;
+        if (matchesAny(key, attrExcludeGlobs)) return false;
+        if (matchesAny(key, attrIncludeGlobs)) return true;
+        return isIdentifierShaped(key);
     }
 
     /** OpenNMS's mirror of a category: {@code cat_<Name>} with the name as value. */
@@ -206,7 +359,7 @@ public final class MetadataRegistry {
 
     /** Whether a tag becomes a row for this registry. */
     private boolean isRow(Tag t) {
-        return isAttributeKey(t.getKey()) && !rowlessKeys.contains(t.getKey()) && !isCategoryMirror(t);
+        return isAttributeKeyHere(t.getKey()) && !rowlessKeys.contains(t.getKey()) && !isCategoryMirror(t);
     }
 
     /**
@@ -222,6 +375,11 @@ public final class MetadataRegistry {
             return "every data series carries it as the label '" + LABEL_KEYS.get(key) + "'";
         }
         if (key.startsWith(CATEGORY_TAG_PREFIX)) return "categories are the onms_resource_category rows";
+        if (!isIdentifierShaped(key)) {
+            return "it is not shaped like an attribute key (letters, digits, '_' and '-', at most "
+                    + MAX_ATTRIBUTE_KEY_LENGTH + " characters), so it reads as one metric's identity "
+                    + "rather than a property of the resource; metadata.attr-include admits it";
+        }
         return null;
     }
 

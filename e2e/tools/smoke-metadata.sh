@@ -113,6 +113,11 @@ check_count category 1 "onms_resource_category{resourceId=~\"$node_re\",category
 check_count info     1 "onms_resource_info{resourceId=~\"$node_re\",if_descr=\"eth0\"}"              "info series with if_descr=eth0 for snmpd-1"
 check_count attr     1 "onms_resource_attr{resourceId=~\"$node_re\",key=\"ifName\"}"                   "ifName row(s) for snmpd-1 (a label too, but the flow reports read it)"
 check_zero  attr       "onms_resource_attr{resourceId=~\"$node_re\",key=~\"nodeLabel|foreignSource|foreignId|location|cat_.*\"}" "row(s) repeat a data-series label or a category for snmpd-1 (#204)"
+# A key with '/' or '.' is one metric's identity, not a property of the
+# resource: OpenNMS names latency 'ICMP/<ip>', a collected OID
+# 'SNMP_<oid>.<ifIndex>' and a JMX bean by its dotted path. Emitting those
+# made every metadata series of a resource go out on every sample (#223).
+check_zero  attr       "onms_resource_attr{key=~\".*[/.].*\"}" "row(s) whose key is a metric identity rather than a resource attribute (#223)"
 # The gauge must be the agent's own ifHighSpeed for eth0 (ifIndex 2) times
 # a million: read it from snmpd rather than pinning what a veth reports.
 hs=$(docker compose $cf exec -T snmpd snmpget -v2c -c public -Oqv localhost IF-MIB::ifHighSpeed.2 2>/dev/null | tr -d '[:space:]')
