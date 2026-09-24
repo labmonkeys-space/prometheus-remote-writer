@@ -15,8 +15,9 @@
 #      (2, 3 and the dashboard's panel query) and still runs the others.
 #   2. Assert the four metadata series exist for that node, with the values
 #      the requisition and the agent make predictable.
-#   3. Assert the documented group_left join returns a value and the `@ end()`
-#      idiom evaluates on this backend.
+#   3. Assert the documented group_left join returns a value, also over an
+#      info series duplicated in the query, and the `@ end()` idiom
+#      evaluates on this backend.
 #   4. Assert the distinct label-name count stays under the bound (#112).
 #   5. Assert Grafana provisioned the dashboard and its join panel returns
 #      frames through /api/ds/query.
@@ -132,10 +133,28 @@ else
 fi
 
 # --- 3. the documented queries -------------------------------------------
-check_count join 1 "ifHCInOctets{resourceId=~\"$node_re\"} * on(resourceId) group_left(if_descr) last_over_time(onms_resource_info[30m])" "series from the group_left join on onms_resource_info"
+# The column join keeps the newest info series per resourceId before it
+# joins: one resource anywhere with two info series in the window (an
+# ifAlias rename, or two OpenNMS objects on one resourceId) fails every
+# naive join, not only the ones that match it (#241).
+rank='(timestamp(onms_resource_info) or max_over_time(timestamp(onms_resource_info)[30m:1m]))'
+newest_info() {  # <ranked info series>: the documented right-hand side
+    echo "group by (resourceId, if_descr) (topk by (resourceId) (1, $1))"
+}
+check_count join 1 "ifHCInOctets{resourceId=~\"$node_re\"} * on(resourceId) group_left(if_descr) $(newest_info "$rank")" "series from the group_left join on onms_resource_info"
+# A second series per interface, built in the query, so the gate does not
+# depend on a real duplicate being in the window. It is added after
+# timestamp(), which VictoriaMetrics evaluates on a raw selector only. The
+# first gate proves the fixture holds two series per resourceId; the naive
+# join fails on that on Prometheus and Mimir, while VictoriaMetrics answers
+# it. The documented form must return a series on all three.
+dup() { echo "($1 or label_replace($1, \"if_descr\", \"smoke-dup\", \"if_descr\", \".+\"))"; }
+check_count join-dup 1 "count by (resourceId) ($(dup "$rank")) > 1" "resourceId(s) with two info series in the fixture"
+check_count join-dup 1 "ifHCInOctets{resourceId=~\"$node_re\"} * on(resourceId) group_left(if_descr) $(newest_info "$(dup "$rank")")" "series from the documented join over a duplicated info series"
 check_count join 1 "ifHCInOctets{resourceId=~\"$node_re\"} * 8 / on(resourceId) (last_over_time(onms_resource_ifspeed[30m]) > 0)" "series from the utilisation divisor on onms_resource_ifspeed"
 check_count join 1 "ifHCInOctets{resourceId=~\"$node_re\"} * on(resourceId) group_left() last_over_time(onms_resource_category{category=\"Routers\"}[30m])" "series from the category membership join"
 check_count at-end 1 "last_over_time(onms_resource_attr{resourceId=~\"$node_re\",key=\"ifDescr\"}[1h] @ end())" "row(s) from the @ end() idiom"
+check_count at-end 1 "ifHCInOctets{resourceId=~\"$node_re\"} * on(resourceId) group_left(value) group by (resourceId, value) (topk by (resourceId) (1, timestamp(onms_resource_attr{key=\"ifDescr\"} @ end()) or max_over_time(timestamp(onms_resource_attr{key=\"ifDescr\"})[1h:1m] @ end())))" "series from the pinned @ end() join"
 else
     say "fleet gates skipped (the label bound and the dashboard are checked regardless)"
 fi

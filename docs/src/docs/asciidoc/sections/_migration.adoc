@@ -20,14 +20,15 @@ What that means, once:
 |===
 | You had | You write now
 
-| `{if_descr="Ethernet1"}` on a data series | `* on(resourceId) group_left(if_descr) last_over_time(onms_resource_info[30m])`, then filter on `if_descr`
+| `{if_descr="Ethernet1"}` on a data series | `* on(resourceId) group_left(if_descr) group by (resourceId, if_descr) (topk by (resourceId) (1, timestamp(onms_resource_info) or max_over_time(timestamp(onms_resource_info)[30m:1m])))`, then filter on `if_descr`
 | `if_speed` as a divisor | `/ on(resourceId) (last_over_time(onms_resource_ifspeed[30m]) > 0)`
 | `{onms_cat_Routers="true"}` | `* on(resourceId) group_left() last_over_time(onms_resource_category{category="Routers"}[30m])`
 | `{categories=~".*Routers.*"}` | the same exact match on `onms_resource_category`
-| `{onms_extattr_name="…"}` or `{onms_attr_<key>="…"}` | `* on(resourceId) group_left(value) last_over_time(onms_resource_attr{key="<key>"}[30m])`, or a column in `metadata.info-columns`
+| `{onms_extattr_name="…"}` or `{onms_attr_<key>="…"}` | `* on(resourceId) group_left(value) group by (resourceId, value) (topk by (resourceId) (1, timestamp(onms_resource_attr{key="<key>"}) or max_over_time(timestamp(onms_resource_attr{key="<key>"})[30m:1m])))`, or a column in `metadata.info-columns`
 |===
 
-The `last_over_time(…[30m])` is not optional: the metadata series are emitted every 15 minutes and a bare selector sees only the 5-minute lookback delta.
+The 30-minute look-back is not optional: the metadata series are emitted every 15 minutes and a bare selector sees only the 5-minute lookback delta.
+The `topk` over `timestamp()` is not optional either: a bare `last_over_time(onms_resource_info[30m])` fails every join as soon as one resource has two info series (see <<duplicate-match>>).
 See <<resource-metadata>> for the idioms, including the one to use in alert rules.
 
 The configuration keys that shaped the removed labels are gone with them.

@@ -244,7 +244,7 @@
             "type": "prometheus",
             "uid": "${ds}"
           },
-          "expr": "$metric * on(resourceId) group_left(resource_name, if_alias, if_descr) last_over_time(onms_resource_info[30m])",
+          "expr": "$metric * on(resourceId) group_left(resource_name, if_alias, if_descr) group by (resourceId, resource_name, if_alias, if_descr) (topk by (resourceId) (1, timestamp(onms_resource_info) or max_over_time(timestamp(onms_resource_info)[30m:1m])))",
           "instant": false,
           "range": true,
           "editorMode": "code",
