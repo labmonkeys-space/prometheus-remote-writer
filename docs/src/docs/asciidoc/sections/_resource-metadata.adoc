@@ -134,12 +134,16 @@ A metadata series has a sample every 15 minutes, and a bare selector sees only t
 (VictoriaMetrics widens its staleness window to the observed interval, which is why a bare selector appears to work there and not in production Prometheus.)
 
 The column series is the everyday join.
-`group_left` copies the named columns onto the data series:
+`group_left` copies the named columns onto the data series.
+The right-hand side keeps the newest info series per resource first, for the reason in <<duplicate-match>>:
 
 [source,promql]
 ----
 rate(ifHCInOctets[5m]) * 8
-  * on(resourceId) group_left(if_alias, if_descr) last_over_time(onms_resource_info[30m])
+  * on(resourceId) group_left(if_alias, if_descr)
+    group by (resourceId, if_alias, if_descr) (
+      topk by (resourceId) (1, timestamp(onms_resource_info) or max_over_time(timestamp(onms_resource_info)[30m:1m]))
+    )
 ----
 
 Utilisation, with the speed gauge as a plain divisor.
@@ -160,26 +164,34 @@ rate(ifHCInOctets[5m])
 ----
 
 A single attribute from the rows, when it is not a column.
-The `key` matcher is required: without it the selector matches the whole attribute space, which VictoriaMetrics refuses above `-search.maxUniqueTimeseries`:
-
-[source,promql]
-----
-rate(ifHCInOctets[5m])
-  * on(resourceId) group_left(value) last_over_time(onms_resource_attr{key="ifAlias"}[30m])
-----
-
-=== Historical correctness
-
-Point-in-time is the default behaviour of a range-vector join, so a query over old data sees the alias as it was then.
-To apply the current alias to historical data, pin the right-hand side with the `@` modifier:
+The `key` matcher is required: without it the selector matches the whole attribute space, which VictoriaMetrics refuses above `-search.maxUniqueTimeseries`.
+A changed value leaves two rows for the key, so this join keeps the newest one too:
 
 [source,promql]
 ----
 rate(ifHCInOctets[5m])
   * on(resourceId) group_left(value)
-    last_over_time(onms_resource_attr{key="ifAlias"}[1h] @ end())
+    group by (resourceId, value) (
+      topk by (resourceId) (1, timestamp(onms_resource_attr{key="ifAlias"}) or max_over_time(timestamp(onms_resource_attr{key="ifAlias"})[30m:1m]))
+    )
 ----
 
+=== Historical correctness
+
+Point-in-time is the default behaviour of a range-vector join, so a query over old data sees the alias as it was then.
+To apply the current alias to historical data, pin the right-hand side with the `@` modifier.
+It keeps the newest row per resource like the joins above, because a rename anywhere in the fleet during the pinned hour would otherwise fail the whole join:
+
+[source,promql]
+----
+rate(ifHCInOctets[5m])
+  * on(resourceId) group_left(value)
+    group by (resourceId, value) (
+      topk by (resourceId) (1,
+        timestamp(onms_resource_attr{key="ifAlias"} @ end())
+          or max_over_time(timestamp(onms_resource_attr{key="ifAlias"})[1h:1m] @ end()))
+    )
+----
 Both readings are available from the same data.
 Neither is available when the attribute is part of the data series identity.
 The `@` modifier has minimum backend versions; see <<backends>>.
@@ -187,22 +199,31 @@ The `@` modifier has minimum backend versions; see <<backends>>.
 [#duplicate-match]
 === Duplicate match during churn
 
-When an attribute changes, the old series stays resolvable for the whole lookback window, so a `group_left` join sees two matches and fails with `found duplicate series for the match group`.
-This is the known sharp edge of the info-series pattern and has no clean fix, because Prometheus has no tombstone.
-The two series differ in the very label you want, so no aggregation over that label can merge them; what tells them apart is which one was written last.
-The documented idiom keeps, per resource, the series with the newest sample:
+The naive join reads the metadata series straight through the lookback:
 
 [source,promql]
 ----
+# fails as soon as any one resource has two info series in the window
 rate(ifHCInOctets[5m]) * 8
-  * on(resourceId) group_left(if_alias, if_descr)
-    group by (resourceId, if_alias, if_descr) (
-      topk by (resourceId) (1, max_over_time(timestamp(onms_resource_info)[30m:1m]))
-    )
+  * on(resourceId) group_left(if_alias, if_descr) last_over_time(onms_resource_info[30m])
 ----
 
-`timestamp()` on the raw selector yields each sample's own time, the subquery walks it across the lookback, `topk` keeps the newest series per `resourceId`, and `group` turns it back into a value of 1 with the columns attached.
-The naive join heals on its own once the old series leaves the lookback; this form is correct throughout.
+When an attribute changes, the old series stays resolvable for the whole lookback window, so a `group_left` join sees two matches and fails with `found duplicate series for the match group`.
+The failure is not limited to the changed resource.
+Prometheus checks the whole right-hand side for duplicates before it matches, so one resource anywhere with two series fails every join whose right-hand side is not scoped away from it.
+
+Two things leave a resource with two series:
+
+* A changed value, such as an `ifAlias` rename. Both series stay in the window for up to 30 minutes.
+* Two OpenNMS objects that map to one `resourceId`. The resource carries both values and alternates between them, so this never heals. Horizon 36's stock `telemetryAdapters` resource type is one such case: its storage strategy cuts the adapter name down to the protocol, so `SFlow-Telemetry` and `SFlow-Adapter` share `snmp/fs/selfmonitor/1/telemetryAdapters/SFlow/…`.
+
+Prometheus has no tombstone, and the two series differ in the very label you want, so no aggregation over that label can merge them.
+What tells them apart is which one was written last.
+Every join in this section therefore keeps, per resource, the series with the newest sample.
+`timestamp()` on the raw selector yields each sample's own time, and the subquery walks it across the lookback.
+The subquery's steps fall on whole minutes, so it misses a sample written since the last one: a new resource or a fresh rename would be absent for up to a minute.
+The instant `timestamp()` on the left of `or` adds that sample, and wins where both sides hold the series.
+`topk` keeps the newest series per `resourceId`, and `group` turns it back into a value of 1 with the columns attached.
 
 === Alerting
 
@@ -218,14 +239,14 @@ This matters most for VictoriaMetrics, where the usual setup has no `vmalert` at
 )
   * on(resourceId) group_left(if_alias, if_descr)
     group by (resourceId, if_alias, if_descr) (
-      topk by (resourceId) (1, max_over_time(timestamp(onms_resource_info)[30m:1m]))
+      topk by (resourceId) (1, timestamp(onms_resource_info) or max_over_time(timestamp(onms_resource_info)[30m:1m]))
     )
 > 0.9
 ----
 
 Two cautions specific to alert expressions.
 Scope the join to the resources the alert covers rather than joining the whole fleet every evaluation, or a minutely alert becomes the most repetitive form of the series-limit problem.
-And use the newest-series form of <<duplicate-match>> here even if you skip it on dashboards: a duplicate match during an `ifAlias` churn window turns a panel visibly red, but it makes an alert rule error out instead of evaluating, which is a silent loss of coverage.
+And never fall back to the naive join of <<duplicate-match>> here: a duplicate match turns a panel visibly red, but it makes an alert rule error out instead of evaluating, which is a silent loss of coverage.
 
 [cols="2,1,1,2",options="header"]
 |===

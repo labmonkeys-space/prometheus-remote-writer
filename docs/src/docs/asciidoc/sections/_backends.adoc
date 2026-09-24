@@ -39,6 +39,14 @@ Minimum versions for that one idiom:
 | Cortex           | 1.8 to 1.13 behind `-querier.at-modifier-enabled` (default off); always on from 1.14, flag removed in 1.18 | 1.14, or the flag on 1.8 to 1.13
 |===
 
+== Duplicate match on the one side
+
+Prometheus and Mimir reject a `group_left` whose right-hand side holds two series for one `resourceId`, with `found duplicate series for the match group`.
+VictoriaMetrics {e2e-victoriametrics} answers the same query instead, and which of the two series it joins is not specified.
+Use the newest-series form of <<duplicate-match>> on all three: it gives the same answer everywhere.
+Keep its `timestamp()` directly on the metadata selector, as written there: VictoriaMetrics returns nothing for `timestamp()` over an expression such as a `label_replace` or an `or`.
+The smoke's metadata gates evaluate it on each backend over an info series duplicated in the query.
+
 == `read.url` shapes per backend
 
 The plugin appends `/api/v1/series`, `/api/v1/query`,

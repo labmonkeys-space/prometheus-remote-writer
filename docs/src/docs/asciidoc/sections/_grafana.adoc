@@ -16,7 +16,10 @@ rate(ifHCInOctets{node_label="router1"}[5m]) * 8
 
 # The same, legended by the interface alias an operator set on the switch
 rate(ifHCInOctets{node_label="router1"}[5m]) * 8
-  * on(resourceId) group_left(if_alias) last_over_time(onms_resource_info[30m])
+  * on(resourceId) group_left(if_alias)
+    group by (resourceId, if_alias) (
+      topk by (resourceId) (1, timestamp(onms_resource_info) or max_over_time(timestamp(onms_resource_info)[30m:1m]))
+    )
 
 # Interface utilisation, the speed gauge as a plain divisor (0 = unknown, skipped)
 rate(ifHCInOctets[5m]) * 8
@@ -28,5 +31,5 @@ count by (node_label) ({__name__=~".+"})
 
 `node_label`, `location` and `if_name` appear when the matching core metatags are configured (see <<configuration>>).
 `job` is always present; `node`, `instance`, `resource_type` and `resource_instance` are present when the `resourceId` parses or the node identity is known (see <<label-mapping>>).
-The metadata series are emitted every 15 minutes, so the right-hand side of a join is always a `last_over_time` over twice that.
-The full label set is described in <<label-mapping>>; the metadata series, the join idioms and the duplicate-match caveat after an alias change are in <<resource-metadata>>.
+The metadata series are emitted every 15 minutes, so the right-hand side of a join always looks back twice that, and keeps the newest series per resource so a renamed alias cannot fail the join.
+The full label set is described in <<label-mapping>>; the metadata series, the join idioms and why they keep the newest series are in <<resource-metadata>>.

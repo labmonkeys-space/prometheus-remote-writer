@@ -7,6 +7,10 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **The documented metadata joins no longer fail because of one resource elsewhere in the fleet** (#241). `… * on(resourceId) group_left(if_descr) last_over_time(onms_resource_info[30m])` fails with `found duplicate series for the match group` as soon as any one `resourceId` has two info series in the window, including resources the left-hand side never matches. An `ifAlias` rename causes that for 30 minutes. Stock Horizon 36 causes it permanently: its `telemetryAdapters` resource type puts `SFlow-Telemetry` and `SFlow-Adapter` on one `resourceId`. The docs, the resource-metadata dashboard and the smoke now keep the newest series per resource before the join: `group by (resourceId, if_descr) (topk by (resourceId) (1, timestamp(onms_resource_info) or max_over_time(timestamp(onms_resource_info)[30m:1m])))`, and the same for `onms_resource_attr{key=…}` with `value`. Dashboards and alerts that copied the naive join should switch; see *Duplicate match during churn* in the resource-metadata docs. Nothing changes on the wire.
+
 ## [1.0.2] — 2026-09-15
 
 ### Fixed
