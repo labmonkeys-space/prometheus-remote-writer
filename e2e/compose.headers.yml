@@ -88,7 +88,7 @@ services:
   # with compose.prometheus.yml by hand — image tag, command flags, config
   # mount and healthcheck.
   prometheus:
-    image: prom/prometheus:v3.14.0
+    image: prom/prometheus:v3.15.0
     command:
       - "--config.file=/etc/prometheus/prometheus.yml"
       - "--storage.tsdb.path=/prometheus"
