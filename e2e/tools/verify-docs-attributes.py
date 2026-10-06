@@ -46,7 +46,8 @@ SUBS_OK = re.compile(r"subs\s*=\s*[\"']?[^\]]*\b(attributes|normal)\b")
 
 # Supplied by the asciidoctor-maven-plugin <attributes> block in docs/pom.xml
 # rather than declared in the .adoc sources.
-POM_SUPPLIED = {"revnumber", "revdate", "project-version", "toc-title"}
+POM_SUPPLIED = {"revnumber", "revdate", "project-version", "toc-title",
+                "e2e-prometheus", "e2e-mimir", "e2e-victoriametrics"}
 
 
 def main() -> int:

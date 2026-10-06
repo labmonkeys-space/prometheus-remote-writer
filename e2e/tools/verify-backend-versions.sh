@@ -8,19 +8,20 @@
 # verify-backend-versions.sh — fail when a backend version the docs quote
 # disagrees with what the tests actually run.
 #
-# Five versions live in docs/src/docs/asciidoc/_attributes.adoc and are
+# Two versions live in docs/src/docs/asciidoc/_attributes.adoc and are
 # derived, never authoritative:
-#   e2e-prometheus        <- image tag in e2e/compose.prometheus.yml
-#                            (and e2e/compose.headers.yml, which must agree)
-#   e2e-mimir             <- image tag in e2e/compose.mimir.yml
-#   e2e-victoriametrics   <- image tag in e2e/compose.victoriametrics.yml
 #   it-prometheus-v1      <- PrometheusImages.V1_REFERENCE in the test tree
 #   it-prometheus-v2      <- PrometheusImages.V2_REFERENCE in the test tree
-# Dependabot bumps the compose tags; the test references are deliberate.
-# Either way a bump goes red here until the attribute follows, the same
-# contract verify-horizon-badge.sh gives the README badge.
+# The test references are deliberate, so a bump goes red here until the
+# attribute follows, the same contract verify-horizon-badge.sh gives the
+# README badge.
 #
-# Read-only: parses six files, writes nothing.
+# The smoke backend versions need no check: `make docs` reads them from the
+# compose pins (docs-backend-versions.sh). The docs quote one Prometheus
+# version for the smoke, so e2e/compose.headers.yml must run the same
+# Prometheus as e2e/compose.prometheus.yml.
+#
+# Read-only: parses four files, writes nothing.
 #
 # Usage:
 #   verify-backend-versions.sh [repo-root]
@@ -32,8 +33,7 @@ attrs="${root}/docs/src/docs/asciidoc/_attributes.adoc"
 images="${root}/plugin/src/test/java/org/opennms/plugins/prometheus/remotewriter/PrometheusImages.java"
 e2e="${root}/e2e"
 
-for f in "${attrs}" "${images}" "${e2e}/compose.prometheus.yml" "${e2e}/compose.headers.yml" \
-         "${e2e}/compose.mimir.yml" "${e2e}/compose.victoriametrics.yml"; do
+for f in "${attrs}" "${images}" "${e2e}/compose.prometheus.yml" "${e2e}/compose.headers.yml"; do
   [[ -f "${f}" ]] || { echo "verify-backend-versions: no such file: ${f}" >&2; exit 2; }
 done
 
@@ -52,12 +52,10 @@ attr() {         # <attribute name>
 
 prom="$(compose_tag "${e2e}/compose.prometheus.yml" 'prom/prometheus')"
 prom_headers="$(compose_tag "${e2e}/compose.headers.yml" 'prom/prometheus')"
-mimir="$(compose_tag "${e2e}/compose.mimir.yml" 'grafana/mimir')"
-vm="$(compose_tag "${e2e}/compose.victoriametrics.yml" 'victoriametrics/victoria-metrics')"
 v1="$(java_ref V1_REFERENCE)"
 v2="$(java_ref V2_REFERENCE)"
 
-for pair in "prom:${prom}" "prom_headers:${prom_headers}" "mimir:${mimir}" "vm:${vm}" "v1:${v1}" "v2:${v2}"; do
+for pair in "prom:${prom}" "prom_headers:${prom_headers}" "v1:${v1}" "v2:${v2}"; do
   [[ -n "${pair#*:}" ]] || { echo "verify-backend-versions: could not read the ${pair%%:*} version from its source" >&2; exit 2; }
 done
 
@@ -72,11 +70,14 @@ check() {  # <attribute> <expected> <source description>
     fail=1
   fi
 }
-check e2e-prometheus      "${prom}"         "e2e/compose.prometheus.yml"
-check e2e-prometheus      "${prom_headers}" "e2e/compose.headers.yml (must match compose.prometheus.yml)"
-check e2e-mimir           "${mimir}" "e2e/compose.mimir.yml"
-check e2e-victoriametrics "${vm}"    "e2e/compose.victoriametrics.yml"
-check it-prometheus-v1    "${v1}"    "PrometheusImages.V1_REFERENCE"
-check it-prometheus-v2    "${v2}"    "PrometheusImages.V2_REFERENCE"
+if [[ "${prom_headers}" == "${prom}" ]]; then
+  echo "verify-backend-versions: OK — e2e/compose.headers.yml runs Prometheus ${prom}, same as e2e/compose.prometheus.yml"
+else
+  echo "verify-backend-versions: DRIFT — e2e/compose.headers.yml runs Prometheus ${prom_headers} but e2e/compose.prometheus.yml runs ${prom}" >&2
+  echo "  pin the same prom/prometheus tag in both files" >&2
+  fail=1
+fi
+check it-prometheus-v1 "${v1}" "PrometheusImages.V1_REFERENCE"
+check it-prometheus-v2 "${v2}" "PrometheusImages.V2_REFERENCE"
 
 exit "${fail}"

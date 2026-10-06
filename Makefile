@@ -364,8 +364,11 @@ sentinel-poc: kar ## Bring up Sentinel deployment proof-of-concept stack (Core +
 sentinel-poc-down: ## Tear down the Sentinel proof-of-concept stack and remove its volumes
 	cd e2e/sentinel && docker compose down -v --remove-orphans
 
+# The smoke backend versions the docs quote are read from the e2e compose
+# pins at render time, so a Dependabot bump needs no docs edit.
 docs: ## Render single-page HTML documentation to docs/target/generated-docs
-	$(MVN) $(MAVEN_FLAGS) -pl :prometheus-remote-writer-docs -am -DskipTests \
+	@versions="$$(./e2e/tools/docs-backend-versions.sh)" && \
+	$(MVN) $(MAVEN_FLAGS) -pl :prometheus-remote-writer-docs -am -DskipTests $$versions \
 	  org.asciidoctor:asciidoctor-maven-plugin:process-asciidoc
 
 sbom: ## Generate CycloneDX 1.6 aggregate SBOM (target/bom.json) — opt-in, gated by the sbom Maven profile
@@ -380,7 +383,7 @@ verify-compat: ## Fail if the opennms-integration-api floor disagrees across pom
 verify-docs-attrs: ## Fail if a docs listing block references attributes that will not resolve
 	@./e2e/tools/verify-docs-attributes.py
 
-verify-versions: ## Fail if the backend versions the docs quote drift from the e2e compose pins or the IT references
+verify-versions: ## Fail if the IT reference versions the docs quote drift, or the headers smoke runs a different Prometheus
 	@./e2e/tools/verify-backend-versions.sh
 
 clean: ## Remove all build artifacts

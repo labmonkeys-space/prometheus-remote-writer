@@ -52,6 +52,11 @@
                         <revdate>${maven.build.timestamp}</revdate>
                         <project-version>${project.version}</project-version>
                         <docinfo>shared</docinfo>
+                        <!-- Passed by `make docs` from the e2e compose image tags
+                             (e2e/tools/docs-backend-versions.sh). -->
+                        <e2e-prometheus>${e2e-prometheus}</e2e-prometheus>
+                        <e2e-mimir>${e2e-mimir}</e2e-mimir>
+                        <e2e-victoriametrics>${e2e-victoriametrics}</e2e-victoriametrics>
                     </attributes>
                 </configuration>
             </plugin>
