@@ -38,7 +38,7 @@
 // plugin/src/test/java/.../PrometheusImages.java (deliberate, never
 // auto-bumped). `make verify-versions` fails the build when one of these
 // disagrees with its source, so a bump there means one edit here.
-:e2e-prometheus:         3.14.0
+:e2e-prometheus:         3.15.0
 :e2e-mimir:              3.2.1
 :e2e-victoriametrics:    1.152.0
 :it-prometheus-v1:       2.53.2
