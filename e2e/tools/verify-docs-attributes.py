@@ -44,10 +44,16 @@ ATTR_DECL = re.compile(r"^:([a-zA-Z][\w-]*):", re.MULTILINE)
 ATTR_REF = re.compile(r"(?<!\\)\{([a-zA-Z][\w-]*)\}")
 SUBS_OK = re.compile(r"subs\s*=\s*[\"']?[^\]]*\b(attributes|normal)\b")
 
-# Supplied by the asciidoctor-maven-plugin <attributes> block in docs/pom.xml
-# rather than declared in the .adoc sources.
-POM_SUPPLIED = {"revnumber", "revdate", "project-version", "toc-title",
-                "e2e-prometheus", "e2e-mimir", "e2e-victoriametrics"}
+# Attributes the asciidoctor-maven-plugin <attributes> block in docs/pom.xml
+# supplies rather than the .adoc sources. Read from the pom, so a new one
+# needs no edit here.
+POM_ATTRIBUTES = re.compile(r"<attributes>(.*?)</attributes>", re.DOTALL)
+POM_ELEMENT = re.compile(r"<([a-zA-Z][\w-]*)>")
+
+
+def pom_supplied(root: pathlib.Path) -> set:
+    block = POM_ATTRIBUTES.search((root / "docs" / "pom.xml").read_text(encoding="utf-8"))
+    return set(POM_ELEMENT.findall(block.group(1))) if block else set()
 
 
 def main() -> int:
@@ -63,7 +69,7 @@ def main() -> int:
         print(f"verify-docs-attributes: no .adoc sources under {docs}", file=sys.stderr)
         return 2
 
-    known = set(POM_SUPPLIED)
+    known = pom_supplied(root)
     for path in sources:
         known |= set(ATTR_DECL.findall(path.read_text(encoding="utf-8")))
 

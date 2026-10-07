@@ -73,7 +73,7 @@ jobs:
       - name: Verify README badge matches the e2e Horizon pin
         run: make verify-badge
 
-      - name: Verify the backend versions the docs quote match the compose pins and the IT references
+      - name: Verify the IT versions the docs quote and the smoke versions the docs derive
         run: make verify-versions
 
       - name: Verify the integration-api floor agrees across pom, feature and bundle

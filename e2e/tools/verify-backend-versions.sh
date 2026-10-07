@@ -16,12 +16,12 @@
 # attribute follows, the same contract verify-horizon-badge.sh gives the
 # README badge.
 #
-# The smoke backend versions need no check: `make docs` reads them from the
-# compose pins (docs-backend-versions.sh). The docs quote one Prometheus
-# version for the smoke, so e2e/compose.headers.yml must run the same
-# Prometheus as e2e/compose.prometheus.yml.
+# The smoke backend versions need no attribute: `make docs` reads them from
+# the compose pins through docs-backend-versions.sh. This runs that script
+# too, so a compose change it can no longer parse, or a headers stack on a
+# different Prometheus, fails here instead of at docs publish time.
 #
-# Read-only: parses four files, writes nothing.
+# Read-only: parses the attributes and the test tree, writes nothing.
 #
 # Usage:
 #   verify-backend-versions.sh [repo-root]
@@ -31,17 +31,11 @@ set -euo pipefail
 root="${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 attrs="${root}/docs/src/docs/asciidoc/_attributes.adoc"
 images="${root}/plugin/src/test/java/org/opennms/plugins/prometheus/remotewriter/PrometheusImages.java"
-e2e="${root}/e2e"
 
-for f in "${attrs}" "${images}" "${e2e}/compose.prometheus.yml" "${e2e}/compose.headers.yml"; do
+for f in "${attrs}" "${images}"; do
   [[ -f "${f}" ]] || { echo "verify-backend-versions: no such file: ${f}" >&2; exit 2; }
 done
 
-# First image tag of the given repository in a compose file, leading "v"
-# stripped, a digest suffix and YAML quotes tolerated.
-compose_tag() {  # <file> <repository>
-  sed -nE "s|^[[:space:]]*image:[[:space:]]*[\"']?$2:v?([^[:space:]@\"']+).*|\1|p" "$1" | head -1
-}
 # The version inside a PrometheusImages constant, leading "v" stripped.
 java_ref() {     # <constant>
   sed -nE "s|.*$1[[:space:]]*=[[:space:]]*\"prom/prometheus:v?([^\"]+)\".*|\1|p" "${images}" | head -1
@@ -50,12 +44,10 @@ attr() {         # <attribute name>
   sed -nE "s|^:$1:[[:space:]]*([^[:space:]]+).*|\1|p" "${attrs}" | head -1
 }
 
-prom="$(compose_tag "${e2e}/compose.prometheus.yml" 'prom/prometheus')"
-prom_headers="$(compose_tag "${e2e}/compose.headers.yml" 'prom/prometheus')"
 v1="$(java_ref V1_REFERENCE)"
 v2="$(java_ref V2_REFERENCE)"
 
-for pair in "prom:${prom}" "prom_headers:${prom_headers}" "v1:${v1}" "v2:${v2}"; do
+for pair in "v1:${v1}" "v2:${v2}"; do
   [[ -n "${pair#*:}" ]] || { echo "verify-backend-versions: could not read the ${pair%%:*} version from its source" >&2; exit 2; }
 done
 
@@ -70,11 +62,9 @@ check() {  # <attribute> <expected> <source description>
     fail=1
   fi
 }
-if [[ "${prom_headers}" == "${prom}" ]]; then
-  echo "verify-backend-versions: OK — e2e/compose.headers.yml runs Prometheus ${prom}, same as e2e/compose.prometheus.yml"
+if smoke="$("$(dirname "${BASH_SOURCE[0]}")/docs-backend-versions.sh" "${root}")"; then
+  echo "verify-backend-versions: OK — smoke versions for the docs: ${smoke}"
 else
-  echo "verify-backend-versions: DRIFT — e2e/compose.headers.yml runs Prometheus ${prom_headers} but e2e/compose.prometheus.yml runs ${prom}" >&2
-  echo "  pin the same prom/prometheus tag in both files" >&2
   fail=1
 fi
 check it-prometheus-v1 "${v1}" "PrometheusImages.V1_REFERENCE"

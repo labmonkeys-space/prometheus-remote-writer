@@ -368,6 +368,7 @@ sentinel-poc-down: ## Tear down the Sentinel proof-of-concept stack and remove i
 # pins at render time, so a Dependabot bump needs no docs edit.
 docs: ## Render single-page HTML documentation to docs/target/generated-docs
 	@versions="$$(./e2e/tools/docs-backend-versions.sh)" && \
+	echo "docs: smoke backend versions: $$versions" && \
 	$(MVN) $(MAVEN_FLAGS) -pl :prometheus-remote-writer-docs -am -DskipTests $$versions \
 	  org.asciidoctor:asciidoctor-maven-plugin:process-asciidoc
 
@@ -383,7 +384,7 @@ verify-compat: ## Fail if the opennms-integration-api floor disagrees across pom
 verify-docs-attrs: ## Fail if a docs listing block references attributes that will not resolve
 	@./e2e/tools/verify-docs-attributes.py
 
-verify-versions: ## Fail if the IT reference versions the docs quote drift, or the headers smoke runs a different Prometheus
+verify-versions: ## Fail if the IT versions the docs quote drift, or the smoke versions the docs derive cannot be read
 	@./e2e/tools/verify-backend-versions.sh
 
 clean: ## Remove all build artifacts
