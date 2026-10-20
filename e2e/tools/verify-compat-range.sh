@@ -10,9 +10,7 @@
 #
 # The floor is stated in three files that are edited independently and by
 # different actors — a Dependabot bump touches only the build property, and
-# nothing else notices. That drift is exactly what broke the KAR on Horizon
-# 36.0.4 (#139): the build moved to 2.0.1 while the Karaf feature still
-# demanded exactly 2.0.0.
+# nothing else notices.
 #
 #   pom.xml                 <opennms-integration-api.version>  what we build against
 #   karaf-features/.../features.xml   <feature version="[x,y)">  what the KAR requires

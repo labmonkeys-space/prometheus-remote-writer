@@ -76,7 +76,7 @@ services:
     # it (${HORIZON_VERSION:-...}) would silently disable both. The smoke
     # matrix overrides the version with a generated layer instead — see the
     # HORIZON_VERSION handling in the Makefile.
-    image: opennms/horizon:36.0.4
+    image: opennms/horizon:36.0.5
     command: ["-s"]
     # Karaf's orderly bundle shutdown routinely hits the full default
     # 10s SIGTERM grace before SIGKILL. For this sandbox the data in

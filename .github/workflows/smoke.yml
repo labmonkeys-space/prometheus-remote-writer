@@ -45,14 +45,7 @@ jobs:
         # rather than asserted. The floor is whatever the feature range in
         # karaf-features demands; the ceiling end is the newest released
         # Horizon.
-        #
-        # These are the SAME version today: the floor is OIA 2.0.1 and
-        # 36.0.4 is both the oldest Horizon shipping it and the newest
-        # released. The axis exists anyway so that widening it at the next
-        # Horizon release is a one-line change rather than a retrofit under
-        # time pressure. Add the newer version here, keep the oldest
-        # supported one.
-        horizon: ['36.0.4']
+        horizon: ['36.0.5']
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
