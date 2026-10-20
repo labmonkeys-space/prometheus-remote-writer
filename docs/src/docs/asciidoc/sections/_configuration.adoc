@@ -99,7 +99,7 @@ if that is what your backend accepts, it fits.
 You do not have to write secrets into `{cfg-file}`. Karaf resolves two
 placeholder forms in configuration values before the plugin ever sees them,
 and both are available with no container reconfiguration. Verified on OpenNMS
-Horizon 36.0.4 (Karaf 4.4.x).
+Horizon 36.0.5 (Karaf 4.4.x).
 
 The two forms are different mechanisms, which is why their syntax differs.
 `${env:NAME}` is substituted when Karaf reads the `.cfg` file, before any key

@@ -59,8 +59,7 @@ jobs:
   badge-drift:
     # Declaration-drift checks. They exist because the files involved are
     # edited independently — a Dependabot bump touches one and nothing
-    # notices the others fell out of step. That is how the KAR ended up
-    # unable to install on Horizon 36.0.4 (#139).
+    # notices the others fell out of step.
     name: Check version declarations
     runs-on: ubuntu-24.04
     timeout-minutes: 5
